@@ -3,6 +3,7 @@ import { ensureDataDir, twitterBookmarksCachePath, twitterBookmarksMetaPath } fr
 import type { BookmarkCacheMeta, BookmarkRecord } from './types.js';
 import { loadXApiConfig } from './config.js';
 import { loadTwitterOAuthToken } from './xauth.js';
+import { stat } from 'node:fs/promises';
 
 export interface BookmarkSyncResult {
   mode: 'full' | 'incremental';
@@ -235,8 +236,24 @@ export async function getTwitterBookmarksStatus(): Promise<BookmarkCacheMeta & {
     ? await readJson<BookmarkCacheMeta>(metaPath)
     : { provider: 'twitter', schemaVersion: 1, totalBookmarks: 0 };
 
+  if (meta.totalBookmarks > 0 || meta.lastIncrementalSyncAt || meta.lastFullSyncAt) {
+    return {
+      ...meta,
+      cachePath,
+      metaPath,
+    };
+  }
+
+  const records = await readJsonLines<BookmarkRecord>(cachePath);
+  const lastUpdated = records[0]?.syncedAt
+    ?? records[0]?.bookmarkedAt
+    ?? records[0]?.postedAt
+    ?? await stat(cachePath).then((entry) => entry.mtime.toISOString()).catch(() => undefined);
+
   return {
     ...meta,
+    totalBookmarks: records.length,
+    lastIncrementalSyncAt: meta.lastIncrementalSyncAt ?? lastUpdated,
     cachePath,
     metaPath,
   };
