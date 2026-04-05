@@ -131,3 +131,13 @@ Use `ft classify` for LLM-powered classification that catches what regex misses.
 ## License
 
 MIT — [fieldtheory.dev/cli](https://fieldtheory.dev/cli)
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=afar1%2Ffieldtheory-cli&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=afar1/fieldtheory-cli&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=afar1/fieldtheory-cli&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=afar1/fieldtheory-cli&type=date&legend=top-left" />
+ </picture>
+</a>
