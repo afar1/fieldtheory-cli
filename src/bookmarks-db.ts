@@ -234,7 +234,7 @@ function normalizeStoredDates(db: Database): void {
   stmt.free();
 }
 
-function ensureMigrations(db: Database): void {
+export function ensureMigrations(db: Database): void {
   db.run('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)');
   const tableExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'");
   if (!tableExists.length || tableExists[0].values.length === 0) {

@@ -15,6 +15,7 @@ import { openDb, saveDb } from './db.js';
 import { twitterBookmarksIndexPath } from './paths.js';
 import { loadChromeSessionConfig } from './config.js';
 import { extractChromeXCookies } from './chrome-cookies.js';
+import { ensureMigrations } from './bookmarks-db.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -269,7 +270,7 @@ async function fetchXArticleByTweetId(
 export async function fetchArticle(url: string): Promise<ArticleContent | null> {
   // Skip non-article X/Twitter URLs (profiles, timelines, etc.)
   // X Article URLs are handled separately via fetchXArticleByTweetId
-  if (/x\.com|twitter\.com/i.test(url)) return null;
+  if (isTwitterUrl(url)) return null;
 
   const headers: Record<string, string> = {
     'User-Agent':
@@ -299,6 +300,36 @@ export async function fetchArticle(url: string): Promise<ArticleContent | null> 
   }
 }
 
+function parseUrl(url: string): URL | null {
+  try {
+    return new URL(url);
+  } catch {
+    return null;
+  }
+}
+
+function isTwitterHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return (
+    normalized === 'x.com' ||
+    normalized === 'twitter.com' ||
+    normalized.endsWith('.x.com') ||
+    normalized.endsWith('.twitter.com')
+  );
+}
+
+function isTwitterUrl(url: string): boolean {
+  const parsed = parseUrl(url);
+  return parsed ? isTwitterHostname(parsed.hostname) : false;
+}
+
+function isShortlinkUrl(url: string): boolean {
+  const parsed = parseUrl(url);
+  if (!parsed) return false;
+  const normalized = parsed.hostname.toLowerCase();
+  return normalized === 't.co' || normalized.endsWith('.t.co');
+}
+
 // ── DB helpers ─────────────────────────────────────────────────────────────
 
 /**
@@ -318,16 +349,16 @@ function isLinkOnly(text: string, linkCount: number): boolean {
  * Filters out t.co shortlinks (usually media refs).
  * X Article URLs are kept (handled via GraphQL), other x.com URLs are dropped.
  */
-function extractEnrichableUrls(linksJson: string | null): string[] {
+export function extractEnrichableUrls(linksJson: string | null): string[] {
   if (!linksJson) return [];
   try {
     const links: string[] = JSON.parse(linksJson);
     return links.filter((u) => {
-      if (u.includes('t.co/')) return false;
+      if (isShortlinkUrl(u)) return false;
       // Keep X Article URLs — they're enrichable via GraphQL
-      if (/x\.com\/i\/article\/\d+/i.test(u)) return true;
+      if (isXArticleUrl(u)) return true;
       // Drop other x.com/twitter.com URLs (profiles, timelines, etc.)
-      if (/x\.com|twitter\.com/i.test(u)) return false;
+      if (isTwitterUrl(u)) return false;
       return true;
     });
   } catch {
@@ -337,15 +368,9 @@ function extractEnrichableUrls(linksJson: string | null): string[] {
 
 /** Check if a URL is an X Article. */
 function isXArticleUrl(url: string): boolean {
-  return /x\.com\/i\/article\/\d+/i.test(url);
-}
-
-// ── Schema migration ───────────────────────────────────────────────────────
-
-export function ensureEnrichColumns(dbPath: string): void {
-  // This is called lazily — the main schema migration in bookmarks-db.ts
-  // handles schema_version bumps. Here we just add columns if missing.
-  // Safe to call multiple times.
+  const parsed = parseUrl(url);
+  if (!parsed || !isTwitterHostname(parsed.hostname)) return false;
+  return /^\/i\/article\/\d+\/?$/i.test(parsed.pathname);
 }
 
 // ── Main pipeline ──────────────────────────────────────────────────────────
@@ -356,11 +381,7 @@ export async function enrichBookmarks(options: EnrichOptions = {}): Promise<Enri
   const limit = options.limit ?? 50;
 
   try {
-    // Ensure enrichment columns exist
-    try { db.run('ALTER TABLE bookmarks ADD COLUMN article_title TEXT'); } catch { /* exists */ }
-    try { db.run('ALTER TABLE bookmarks ADD COLUMN article_text TEXT'); } catch { /* exists */ }
-    try { db.run('ALTER TABLE bookmarks ADD COLUMN article_site TEXT'); } catch { /* exists */ }
-    try { db.run('ALTER TABLE bookmarks ADD COLUMN enriched_at TEXT'); } catch { /* exists */ }
+    ensureMigrations(db);
 
     // Find bookmarks that need enrichment
     const whereClause = options.force
@@ -377,6 +398,7 @@ export async function enrichBookmarks(options: EnrichOptions = {}): Promise<Enri
     );
 
     if (!rows.length || !rows[0].values.length) {
+      saveDb(db, dbPath);
       return { enriched: 0, skipped: 0, failed: 0, total: 0, warnings: [] };
     }
 
