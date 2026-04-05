@@ -4,7 +4,8 @@
   "description": "Field Theory CLI. Self-custody for your X/Twitter bookmarks. Local sync, full-text search, classification, and terminal dashboards.",
   "type": "module",
   "bin": {
-    "ft": "bin/ft.mjs"
+    "ft": "bin/ft.mjs",
+    "fieldtheory": "bin/ft.mjs"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
