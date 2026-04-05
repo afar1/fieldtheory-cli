@@ -307,7 +307,7 @@ async function fetchPageWithRetry(csrfToken: string, cursor?: string, cookieHead
         `GraphQL Bookmarks API returned ${response.status}.\n` +
           `Response: ${text.slice(0, 300)}\n\n` +
           (response.status === 401 || response.status === 403
-            ? 'Fix: Your X session may have expired. Open Chrome, go to https://x.com, and make sure you are logged in. Then retry.'
+            ? 'Fix: Your X session may have expired. Open your browser, go to https://x.com, and make sure you are logged in. Then retry.'
             : 'This may be a temporary issue. Try again in a few minutes.')
       );
     }

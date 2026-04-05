@@ -235,7 +235,7 @@ export function buildCli() {
     .option('--target-adds <n>', 'Stop after N new bookmarks', (v: string) => Number(v))
     .option('--delay-ms <n>', 'Delay between requests in ms', (v: string) => Number(v), 600)
     .option('--max-minutes <n>', 'Max runtime in minutes', (v: string) => Number(v), 30)
-    .option('--browser <name>', 'Browser to read cookies from: chrome or firefox', 'chrome')
+    .option('--browser <name>', 'Browser to read cookies from (choices: chrome, firefox)', 'chrome')
     .option('--chrome-user-data-dir <path>', 'Chrome user-data directory')
     .option('--chrome-profile-directory <name>', 'Chrome profile name')
     .option('--firefox-profile-dir <path>', 'Firefox profile directory')
@@ -260,7 +260,10 @@ export function buildCli() {
           }
         } else {
           const startTime = Date.now();
-          const browser = String(options.browser ?? 'chrome').toLowerCase() as 'chrome' | 'firefox';
+          const browser = String(options.browser ?? 'chrome').toLowerCase();
+          if (browser !== 'chrome' && browser !== 'firefox') {
+            throw new Error(`Unsupported browser: "${browser}". Supported browsers: chrome, firefox`);
+          }
           const result = await syncBookmarksGraphQL({
             incremental: !Boolean(options.full),
             maxPages: Number(options.maxPages) || 500,
