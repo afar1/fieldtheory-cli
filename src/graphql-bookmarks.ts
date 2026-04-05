@@ -5,13 +5,13 @@ import { extractChromeXCookies } from './chrome-cookies.js';
 import type { BookmarkBackfillState, BookmarkRecord } from './types.js';
 import { exportBookmarksForSyncSeed } from './bookmarks-db.js';
 
-const X_PUBLIC_BEARER =
+export const X_PUBLIC_BEARER =
   'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
 
 const BOOKMARKS_QUERY_ID = 'Z9GWmP0kP2dajyckAaDUBw';
 const BOOKMARKS_OPERATION = 'Bookmarks';
 
-const GRAPHQL_FEATURES = {
+export const GRAPHQL_FEATURES = {
   graphql_timeline_v2_bookmark_timeline: true,
   rweb_tipjar_consumption_enabled: true,
   responsive_web_graphql_exclude_directive_enabled: true,
@@ -139,7 +139,7 @@ function buildUrl(cursor?: string): string {
   return `https://x.com/i/api/graphql/${BOOKMARKS_QUERY_ID}/${BOOKMARKS_OPERATION}?${params}`;
 }
 
-function buildHeaders(csrfToken: string, cookieHeader?: string): Record<string, string> {
+export function buildHeaders(csrfToken: string, cookieHeader?: string): Record<string, string> {
   return {
     authorization: `Bearer ${X_PUBLIC_BEARER}`,
     'x-csrf-token': csrfToken,
@@ -327,9 +327,13 @@ export function scoreRecord(record: BookmarkRecord): number {
 
 export function mergeBookmarkRecord(existing: BookmarkRecord | undefined, incoming: BookmarkRecord): BookmarkRecord {
   if (!existing) return incoming;
-  return scoreRecord(incoming) >= scoreRecord(existing)
+  const merged = scoreRecord(incoming) >= scoreRecord(existing)
     ? { ...existing, ...incoming }
     : { ...incoming, ...existing };
+  // Preserve folder info from whichever side has it
+  merged.xFolder = incoming.xFolder ?? existing.xFolder;
+  merged.xFolderId = incoming.xFolderId ?? existing.xFolderId;
+  return merged;
 }
 
 export function mergeRecords(
