@@ -457,7 +457,7 @@ export async function syncBookmarksGraphQL(
       stopReason = 'caught up to newest stored bookmark';
       break;
     }
-    if (incremental && stalePages >= stalePageLimit) {
+    if (stalePages >= stalePageLimit) {
       stopReason = 'no new bookmarks (stale)';
       break;
     }
