@@ -2,6 +2,7 @@ import { ensureDir, readJsonLines, writeJsonLines, readJson, writeJson, pathExis
 import { ensureDataDir, twitterBookmarksCachePath, twitterBackfillStatePath } from './paths.js';
 import { loadChromeSessionConfig } from './config.js';
 import { extractChromeXCookies } from './chrome-cookies.js';
+import { extractFirefoxXCookies } from './firefox-cookies.js';
 import type { BookmarkBackfillState, BookmarkRecord } from './types.js';
 import { exportBookmarksForSyncSeed } from './bookmarks-db.js';
 
@@ -48,13 +49,17 @@ export interface SyncOptions {
   maxMinutes?: number;
   /** Consecutive pages with 0 new bookmarks before stopping. Default: 3 */
   stalePageLimit?: number;
+  /** Browser to extract cookies from. Default: 'chrome' */
+  browser?: 'chrome' | 'firefox';
   /** Chrome user-data-dir override. */
   chromeUserDataDir?: string;
   /** Chrome profile directory name (e.g. "Default"). */
   chromeProfileDirectory?: string;
-  /** Direct csrf token override; skips Chrome cookie extraction. */
+  /** Firefox profile directory override. */
+  firefoxProfileDir?: string;
+  /** Direct csrf token override; skips cookie extraction. */
   csrfToken?: string;
-  /** Direct cookie header override; skips Chrome cookie extraction. */
+  /** Direct cookie header override; skips cookie extraction. */
   cookieHeader?: string;
   /** Progress callback. */
   onProgress?: (status: SyncProgress) => void;
@@ -391,6 +396,10 @@ export async function syncBookmarksGraphQL(
   if (options.csrfToken) {
     csrfToken = options.csrfToken;
     cookieHeader = options.cookieHeader;
+  } else if (options.browser === 'firefox') {
+    const cookies = extractFirefoxXCookies(options.firefoxProfileDir);
+    csrfToken = cookies.csrfToken;
+    cookieHeader = cookies.cookieHeader;
   } else {
     const chromeConfig = loadChromeSessionConfig();
     const chromeDir = options.chromeUserDataDir ?? chromeConfig.chromeUserDataDir;

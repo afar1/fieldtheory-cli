@@ -119,9 +119,11 @@ function timeAgo(dateStr: string): string {
 
 function showSyncWelcome(): void {
   console.log(`
-  Make sure Google Chrome is open and logged into x.com.
-  Your Chrome session is used to authenticate \u2014 no passwords
+  Make sure your browser is open and logged into x.com.
+  Your browser session is used to authenticate \u2014 no passwords
   are stored or transmitted.
+
+  Supports Chrome (default) and Firefox (--browser firefox).
 `);
 }
 
@@ -233,8 +235,10 @@ export function buildCli() {
     .option('--target-adds <n>', 'Stop after N new bookmarks', (v: string) => Number(v))
     .option('--delay-ms <n>', 'Delay between requests in ms', (v: string) => Number(v), 600)
     .option('--max-minutes <n>', 'Max runtime in minutes', (v: string) => Number(v), 30)
+    .option('--browser <name>', 'Browser to read cookies from: chrome or firefox', 'chrome')
     .option('--chrome-user-data-dir <path>', 'Chrome user-data directory')
     .option('--chrome-profile-directory <name>', 'Chrome profile name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory')
     .action(async (options) => {
       const firstRun = isFirstRun();
       if (firstRun) showSyncWelcome();
@@ -256,14 +260,17 @@ export function buildCli() {
           }
         } else {
           const startTime = Date.now();
+          const browser = String(options.browser ?? 'chrome').toLowerCase() as 'chrome' | 'firefox';
           const result = await syncBookmarksGraphQL({
             incremental: !Boolean(options.full),
             maxPages: Number(options.maxPages) || 500,
             targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
             delayMs: Number(options.delayMs) || 600,
             maxMinutes: Number(options.maxMinutes) || 30,
+            browser,
             chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
             chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+            firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
             onProgress: (status: SyncProgress) => {
               renderProgress(status, startTime);
               if (status.done) process.stderr.write('\n');
