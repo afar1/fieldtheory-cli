@@ -1,6 +1,6 @@
 import { ensureDir, pathExists, readJson, readJsonLines, writeJson, writeJsonLines } from './fs.js';
-import { ensureDataDir, twitterBookmarksCachePath, twitterBookmarksMetaPath } from './paths.js';
-import type { BookmarkCacheMeta, BookmarkRecord } from './types.js';
+import { ensureDataDir, twitterBackfillStatePath, twitterBookmarksCachePath, twitterBookmarksMetaPath } from './paths.js';
+import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkRecord } from './types.js';
 import { loadXApiConfig } from './config.js';
 import { loadTwitterOAuthToken } from './xauth.js';
 
@@ -231,9 +231,30 @@ export async function syncTwitterBookmarks(
 export async function getTwitterBookmarksStatus(): Promise<BookmarkCacheMeta & { cachePath: string; metaPath: string }> {
   const cachePath = twitterBookmarksCachePath();
   const metaPath = twitterBookmarksMetaPath();
-  const meta: BookmarkCacheMeta = (await pathExists(metaPath))
+  const statePath = twitterBackfillStatePath();
+  const meta = (await pathExists(metaPath))
     ? await readJson<BookmarkCacheMeta>(metaPath)
-    : { provider: 'twitter', schemaVersion: 1, totalBookmarks: 0 };
+    : undefined;
+  const state = (await pathExists(statePath))
+    ? await readJson<BookmarkBackfillState>(statePath)
+    : undefined;
+  const metaUpdatedAt = meta?.lastIncrementalSyncAt ?? meta?.lastFullSyncAt;
+  const graphQlStatusIsNewer = Boolean(
+    state?.lastRunAt && (!metaUpdatedAt || Date.parse(state.lastRunAt) > Date.parse(metaUpdatedAt))
+  );
+
+  if (!meta || graphQlStatusIsNewer) {
+    const totalBookmarks = (await readJsonLines<BookmarkRecord>(cachePath)).length;
+    return {
+      provider: 'twitter',
+      schemaVersion: meta?.schemaVersion ?? 1,
+      lastFullSyncAt: meta?.lastFullSyncAt,
+      lastIncrementalSyncAt: state?.lastRunAt ?? meta?.lastIncrementalSyncAt,
+      totalBookmarks,
+      cachePath,
+      metaPath,
+    };
+  }
 
   return {
     ...meta,

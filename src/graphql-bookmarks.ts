@@ -1,8 +1,8 @@
 import { ensureDir, readJsonLines, writeJsonLines, readJson, writeJson, pathExists } from './fs.js';
-import { ensureDataDir, twitterBookmarksCachePath, twitterBackfillStatePath } from './paths.js';
+import { ensureDataDir, twitterBookmarksCachePath, twitterBookmarksMetaPath, twitterBackfillStatePath } from './paths.js';
 import { loadChromeSessionConfig } from './config.js';
 import { extractChromeXCookies } from './chrome-cookies.js';
-import type { BookmarkBackfillState, BookmarkRecord } from './types.js';
+import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkRecord } from './types.js';
 import { exportBookmarksForSyncSeed } from './bookmarks-db.js';
 
 const X_PUBLIC_BEARER =
@@ -402,10 +402,14 @@ export async function syncBookmarksGraphQL(
 
   ensureDataDir();
   const cachePath = twitterBookmarksCachePath();
+  const metaPath = twitterBookmarksMetaPath();
   const statePath = twitterBackfillStatePath();
   let existing = await loadExistingBookmarks();
   const newestKnownId = incremental
     ? existing.slice().sort((a, b) => compareBookmarkChronology(b, a))[0]?.id
+    : undefined;
+  const previousMeta = (await pathExists(metaPath))
+    ? await readJson<BookmarkCacheMeta>(metaPath)
     : undefined;
   const prevState: BookmarkBackfillState = (await pathExists(statePath))
     ? await readJson<BookmarkBackfillState>(statePath)
@@ -474,7 +478,15 @@ export async function syncBookmarksGraphQL(
 
   if (stopReason === 'unknown') stopReason = page >= maxPages ? 'max pages reached' : 'unknown';
 
+  const syncedAt = new Date().toISOString();
   await writeJsonLines(cachePath, existing);
+  await writeJson(metaPath, {
+    provider: 'twitter',
+    schemaVersion: 1,
+    lastFullSyncAt: incremental ? previousMeta?.lastFullSyncAt : syncedAt,
+    lastIncrementalSyncAt: incremental ? syncedAt : previousMeta?.lastIncrementalSyncAt,
+    totalBookmarks: existing.length,
+  } satisfies BookmarkCacheMeta);
   await writeJson(statePath, updateState(prevState, { added: totalAdded, seenIds: allSeenIds.slice(-20), stopReason }));
 
   options.onProgress?.({
