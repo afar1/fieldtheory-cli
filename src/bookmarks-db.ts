@@ -1,6 +1,6 @@
 import type { Database } from 'sql.js';
 import { openDb, saveDb } from './db.js';
-import { readJsonLines } from './fs.js';
+import { readJsonLines, writeJsonLines } from './fs.js';
 import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js';
 import type { BookmarkRecord } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
@@ -764,6 +764,53 @@ export async function sampleByDomain(
       githubUrls: (r[5] as string) ?? undefined,
       links: (r[6] as string) ?? undefined,
     }));
+  } finally {
+    db.close();
+  }
+}
+
+export async function deleteByFilter(filters: {
+  categories?: string[];
+  domains?: string[];
+}): Promise<{ deleted: number; ids: string[] }> {
+  const dbPath = twitterBookmarksIndexPath();
+  const db = await openDb(dbPath);
+  ensureMigrations(db);
+
+  try {
+    // Build WHERE clause
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+    for (const cat of filters.categories ?? []) {
+      conditions.push(`primary_category = ?`);
+      params.push(cat);
+    }
+    for (const dom of filters.domains ?? []) {
+      conditions.push(`primary_domain = ?`);
+      params.push(dom);
+    }
+    if (conditions.length === 0) return { deleted: 0, ids: [] };
+
+    const where = conditions.join(' OR ');
+
+    // Collect IDs to delete
+    const rows = db.exec(`SELECT id FROM bookmarks WHERE ${where}`, params);
+    const ids: string[] = (rows[0]?.values ?? []).map((r) => r[0] as string);
+    if (ids.length === 0) return { deleted: 0, ids: [] };
+
+    // Remove from JSONL cache first (source of truth)
+    const cachePath = twitterBookmarksCachePath();
+    const idSet = new Set(ids);
+    const records = await readJsonLines<BookmarkRecord>(cachePath);
+    const filtered = records.filter((r) => !idSet.has(r.id));
+    await writeJsonLines(cachePath, filtered);
+
+    // Delete from FTS index and main table
+    db.run(`DELETE FROM bookmarks_fts WHERE rowid IN (SELECT rowid FROM bookmarks WHERE ${where})`, params);
+    db.run(`DELETE FROM bookmarks WHERE ${where}`, params);
+    saveDb(db, dbPath);
+
+    return { deleted: ids.length, ids };
   } finally {
     db.close();
   }

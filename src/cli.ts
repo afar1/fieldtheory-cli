@@ -17,6 +17,7 @@ import {
   getDomainCounts,
   listBookmarks,
   getBookmarkById,
+  deleteByFilter,
 } from './bookmarks-db.js';
 import { formatClassificationSummary } from './bookmark-classify.js';
 import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm.js';
@@ -593,6 +594,36 @@ export function buildCli() {
       }
     }));
 
+  // ── delete ──────────────────────────────────────────────────────────────
+
+  program
+    .command('delete')
+    .description('Delete bookmarks by category or domain')
+    .option('--category <categories...>', 'Categories to delete')
+    .option('--domain <domains...>', 'Domains to delete')
+    .action(safe(async (options) => {
+      if (!requireIndex()) return;
+      const categories: string[] = options.category ?? [];
+      const domains: string[] = options.domain ?? [];
+      if (categories.length === 0 && domains.length === 0) {
+        console.log('  Specify at least one --category or --domain to delete.');
+        process.exitCode = 1;
+        return;
+      }
+
+      const labels = [
+        ...categories.map((c) => `category:${c}`),
+        ...domains.map((d) => `domain:${d}`),
+      ];
+
+      const result = await deleteByFilter({ categories, domains });
+      if (result.deleted === 0) {
+        console.log(`\n  No bookmarks found matching: ${labels.join(', ')}\n`);
+      } else {
+        console.log(`\n  Deleted ${result.deleted} bookmarks matching: ${labels.join(', ')}\n`);
+      }
+    }));
+
   // ── fetch-media ─────────────────────────────────────────────────────────
 
   program
@@ -613,7 +644,7 @@ export function buildCli() {
 
   const bookmarksAlias = program.command('bookmarks').description('(alias) Bookmark commands').helpOption(false);
   for (const cmd of ['sync', 'search', 'list', 'show', 'stats', 'viz', 'classify', 'classify-domains',
-    'categories', 'domains', 'index', 'auth', 'status', 'path', 'sample', 'fetch-media']) {
+    'categories', 'domains', 'index', 'auth', 'status', 'path', 'sample', 'fetch-media', 'delete']) {
     bookmarksAlias.command(cmd).description(`Alias for: ft ${cmd}`).allowUnknownOption(true)
       .action(async () => {
         const args = ['node', 'ft', cmd, ...process.argv.slice(4)];
