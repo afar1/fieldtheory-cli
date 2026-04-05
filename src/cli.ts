@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
 import { runTwitterOAuthFlow } from './xauth.js';
@@ -19,7 +19,13 @@ import {
   getBookmarkById,
 } from './bookmarks-db.js';
 import { formatClassificationSummary } from './bookmark-classify.js';
-import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm.js';
+import {
+  LLM_ENGINE_CHOICES,
+  classifyWithLlm,
+  classifyDomainsWithLlm,
+  resolveLlmEngine,
+} from './bookmark-classify-llm.js';
+import type { LlmEngineSelection } from './bookmark-classify-llm.js';
 import { renderViz } from './bookmarks-viz.js';
 import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath } from './paths.js';
 import fs from 'node:fs';
@@ -170,6 +176,18 @@ function safe(fn: (...args: any[]) => Promise<void>): (...args: any[]) => Promis
   };
 }
 
+export function addLlmEngineOption<T extends Command>(
+  command: T,
+  description = 'LLM engine to use (auto prefers claude, then codex)'
+): T {
+  command.addOption(
+    new Option('--engine <engine>', description)
+      .choices([...LLM_ENGINE_CHOICES])
+      .default('auto')
+  );
+  return command;
+}
+
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
 export function buildCli() {
@@ -183,10 +201,11 @@ export function buildCli() {
     return idx.newRecords;
   }
 
-  async function classifyNew(): Promise<void> {
+  async function classifyNew(engine: LlmEngineSelection = 'auto'): Promise<void> {
     const start = Date.now();
     process.stderr.write('  Classifying new bookmarks (categories)...\n');
     const catResult = await classifyWithLlm({
+      engine,
       onBatch: (done: number, total: number) => {
         const pct = total > 0 ? Math.round((done / total) * 100) : 0;
         const elapsed = Math.round((Date.now() - start) / 1000);
@@ -200,6 +219,7 @@ export function buildCli() {
     const domStart = Date.now();
     process.stderr.write('  Classifying new bookmarks (domains)...\n');
     const domResult = await classifyDomainsWithLlm({
+      engine,
       all: false,
       onBatch: (done: number, total: number) => {
         const pct = total > 0 ? Math.round((done / total) * 100) : 0;
@@ -223,8 +243,9 @@ export function buildCli() {
 
   // ── sync ────────────────────────────────────────────────────────────────
 
-  program
-    .command('sync')
+  addLlmEngineOption(
+    program
+      .command('sync')
     .description('Sync bookmarks from X into your local database')
     .option('--api', 'Use OAuth v2 API instead of Chrome session', false)
     .option('--full', 'Full crawl instead of incremental sync', false)
@@ -234,7 +255,9 @@ export function buildCli() {
     .option('--delay-ms <n>', 'Delay between requests in ms', (v: string) => Number(v), 600)
     .option('--max-minutes <n>', 'Max runtime in minutes', (v: string) => Number(v), 30)
     .option('--chrome-user-data-dir <path>', 'Chrome user-data directory')
-    .option('--chrome-profile-directory <name>', 'Chrome profile name')
+    .option('--chrome-profile-directory <name>', 'Chrome profile name'),
+    'LLM engine to use with --classify (auto prefers claude, then codex)'
+  )
     .action(async (options) => {
       const firstRun = isFirstRun();
       if (firstRun) showSyncWelcome();
@@ -243,6 +266,8 @@ export function buildCli() {
       try {
         const useApi = Boolean(options.api);
         const mode = Boolean(options.full) ? 'full' : 'incremental';
+        const llmEngine = (options.engine ?? 'auto') as LlmEngineSelection;
+        if (options.classify) resolveLlmEngine(llmEngine);
 
         if (useApi) {
           const result = await syncTwitterBookmarks(mode, {
@@ -252,7 +277,7 @@ export function buildCli() {
           console.log(`  \u2713 Data: ${dataDir()}\n`);
           const newCount = await rebuildIndex(result.added);
           if (options.classify && newCount > 0) {
-            await classifyNew();
+            await classifyNew(llmEngine);
           }
         } else {
           const startTime = Date.now();
@@ -276,7 +301,7 @@ export function buildCli() {
 
           const newCount = await rebuildIndex(result.added);
           if (options.classify && newCount > 0) {
-            await classifyNew();
+            await classifyNew(llmEngine);
           }
         }
 
@@ -431,10 +456,13 @@ export function buildCli() {
 
   // ── classify ────────────────────────────────────────────────────────────
 
-  program
-    .command('classify')
+  addLlmEngineOption(
+    program
+      .command('classify')
     .description('Classify bookmarks by category and domain using LLM (requires claude or codex CLI)')
-    .option('--regex', 'Use simple regex classification instead of LLM')
+    .option('--regex', 'Use simple regex classification instead of LLM'),
+    'LLM engine to use (auto prefers claude, then codex)'
+  )
     .action(safe(async (options) => {
       if (!requireData()) return;
       if (options.regex) {
@@ -446,6 +474,7 @@ export function buildCli() {
         let catStart = Date.now();
         process.stderr.write('Classifying categories with LLM (batches of 50, ~2 min per batch)...\n');
         const catResult = await classifyWithLlm({
+          engine: (options.engine ?? 'auto') as LlmEngineSelection,
           onBatch: (done: number, total: number) => {
             const pct = total > 0 ? Math.round((done / total) * 100) : 0;
             const elapsed = Math.round((Date.now() - catStart) / 1000);
@@ -458,6 +487,7 @@ export function buildCli() {
         let domStart = Date.now();
         process.stderr.write('\nClassifying domains with LLM (batches of 50, ~2 min per batch)...\n');
         const domResult = await classifyDomainsWithLlm({
+          engine: (options.engine ?? 'auto') as LlmEngineSelection,
           all: false,
           onBatch: (done: number, total: number) => {
             const pct = total > 0 ? Math.round((done / total) * 100) : 0;
@@ -471,15 +501,19 @@ export function buildCli() {
 
   // ── classify-domains ────────────────────────────────────────────────────
 
-  program
-    .command('classify-domains')
+  addLlmEngineOption(
+    program
+      .command('classify-domains')
     .description('Classify bookmarks by subject domain using LLM (ai, finance, etc.)')
-    .option('--all', 'Re-classify all bookmarks, not just missing')
+    .option('--all', 'Re-classify all bookmarks, not just missing'),
+    'LLM engine to use (auto prefers claude, then codex)'
+  )
     .action(safe(async (options) => {
       if (!requireData()) return;
       const start = Date.now();
       process.stderr.write('Classifying bookmark domains with LLM (batches of 50, ~2 min per batch)...\n');
       const result = await classifyDomainsWithLlm({
+        engine: (options.engine ?? 'auto') as LlmEngineSelection,
         all: options.all ?? false,
         onBatch: (done: number, total: number) => {
           const pct = total > 0 ? Math.round((done / total) * 100) : 0;
