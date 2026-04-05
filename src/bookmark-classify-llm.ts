@@ -6,7 +6,7 @@
  * No API keys needed. No local models. Just a logged-in Claude or Codex CLI.
  */
 
-import { execFileSync } from 'node:child_process';
+import * as childProcess from 'node:child_process';
 import { openDb, saveDb } from './db.js';
 import { twitterBookmarksIndexPath } from './paths.js';
 
@@ -31,28 +31,53 @@ type Engine = 'claude' | 'codex';
 
 function detectEngine(): Engine | null {
   try {
-    execFileSync('which', ['claude'], { stdio: 'ignore' });
+    childProcess.execFileSync('which', ['claude'], { stdio: 'ignore' });
     return 'claude';
   } catch { /* not found */ }
   try {
-    execFileSync('which', ['codex'], { stdio: 'ignore' });
+    childProcess.execFileSync('which', ['codex'], { stdio: 'ignore' });
     return 'codex';
   } catch { /* not found */ }
   return null;
 }
 
+export function buildEngineArgs(engine: Engine, prompt: string): string[] {
+  return engine === 'claude'
+    ? ['-p', '--output-format', 'text', prompt]
+    : ['exec', '--skip-git-repo-check', prompt];
+}
+
+export function attachStderrToError(error: unknown): Error {
+  if (!(error instanceof Error)) {
+    return new Error(String(error));
+  }
+
+  const stderr = typeof (error as Error & { stderr?: unknown }).stderr === 'string'
+    ? (error as Error & { stderr: string }).stderr.trim()
+    : '';
+
+  if (!stderr) {
+    return error;
+  }
+
+  error.message = `${error.message}\n${stderr}`;
+  return error;
+}
+
 function invokeEngine(engine: Engine, prompt: string): string {
   const bin = engine === 'claude' ? 'claude' : 'codex';
-  const args = engine === 'claude'
-    ? ['-p', '--output-format', 'text', prompt]
-    : ['exec', prompt];
+  const args = buildEngineArgs(engine, prompt);
 
-  return execFileSync(bin, args, {
-    encoding: 'utf-8',
-    timeout: 120_000, // 2 minutes per batch
-    maxBuffer: 1024 * 1024,
-    stdio: ['pipe', 'pipe', 'ignore'],
-  }).trim();
+  try {
+    return childProcess.execFileSync(bin, args, {
+      encoding: 'utf-8',
+      timeout: 120_000, // 2 minutes per batch
+      maxBuffer: 1024 * 1024,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+  } catch (error) {
+    throw attachStderrToError(error);
+  }
 }
 
 // ── Text sanitization ───────────────────────────────────────────────────
