@@ -41,37 +41,59 @@ function normalizeBrowserId(raw: string): SupportedBrowserId {
   );
 }
 
-function detectChromeUserDataDir(browserId?: string): string | undefined {
+function chromeUserDataDir(): string | undefined {
   const platform = os.platform();
   const home = os.homedir();
+  if (platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'Google', 'Chrome');
+  if (platform === 'linux')  return path.join(home, '.config', 'google-chrome');
+  if (platform === 'win32')  return path.join(home, 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
+  return undefined;
+}
 
-  // Explicit browser override: --browser / FT_BROWSER.
+function heliumUserDataDir(): string | undefined {
+  if (os.platform() !== 'darwin') return undefined;
+  return path.join(os.homedir(), 'Library', 'Application Support', 'net.imput.helium');
+}
+
+function detectChromeUserDataDir(browserId?: string): string | undefined {
+  // Explicit browser override: always honor the request, even if the chosen
+  // browser isn't installed. Returning a "fallback" browser's path would
+  // silently contradict the user's intent and, worse, pair a profile path
+  // with the wrong keychain entry on dual-install machines.
   if (browserId) {
     const id = normalizeBrowserId(browserId);
-    if (id === 'helium') {
-      if (platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'net.imput.helium');
-      return undefined;
-    }
-    // id === 'chrome' falls through to the default detection below.
+    if (id === 'chrome')  return chromeUserDataDir();
+    if (id === 'helium')  return heliumUserDataDir();
   }
 
-  if (platform === 'darwin') {
-    const chrome = path.join(home, 'Library', 'Application Support', 'Google', 'Chrome');
-    if (existsSync(chrome)) return chrome;
-    // Fall back to Helium if Chrome isn't installed.
-    const helium = path.join(home, 'Library', 'Application Support', 'net.imput.helium');
-    if (existsSync(helium)) return helium;
+  // No explicit browser: pick the first installed browser we know about on
+  // macOS, else fall back to Chrome's canonical path (so the error messages
+  // downstream stay stable).
+  if (os.platform() === 'darwin') {
+    const chrome = chromeUserDataDir();
+    if (chrome && existsSync(chrome)) return chrome;
+    const helium = heliumUserDataDir();
+    if (helium && existsSync(helium)) return helium;
     return chrome;
   }
-  if (platform === 'linux') return path.join(home, '.config', 'google-chrome');
-  if (platform === 'win32') return path.join(home, 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
-  return undefined;
+  return chromeUserDataDir();
 }
 
 export function loadChromeSessionConfig(overrides: { browserId?: string } = {}): ChromeSessionConfig {
   loadEnv();
-  const browserId = overrides.browserId ?? process.env.FT_BROWSER;
-  const dir = process.env.FT_CHROME_USER_DATA_DIR ?? detectChromeUserDataDir(browserId);
+
+  // Precedence: an explicit CLI --browser wins over everything else (including
+  // FT_CHROME_USER_DATA_DIR in a stale .env). Otherwise we consult
+  // FT_CHROME_USER_DATA_DIR, then FT_BROWSER, then autodetect.
+  let dir: string | undefined;
+  if (overrides.browserId) {
+    dir = detectChromeUserDataDir(overrides.browserId);
+  } else if (process.env.FT_CHROME_USER_DATA_DIR) {
+    dir = process.env.FT_CHROME_USER_DATA_DIR;
+  } else {
+    dir = detectChromeUserDataDir(process.env.FT_BROWSER);
+  }
+
   if (!dir) {
     throw new Error(
       'Could not detect a browser user-data directory.\n' +

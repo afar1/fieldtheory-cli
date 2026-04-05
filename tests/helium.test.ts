@@ -75,6 +75,29 @@ test('loadChromeSessionConfig: case-insensitive browser id', (t) => {
   }
 });
 
+test('loadChromeSessionConfig: --browser chrome always returns Chrome path, even if Chrome is not installed', (t) => {
+  // Regression: an explicit --browser choice must never silently fall back
+  // to a different browser (cursor-bot on #13).
+  if (process.platform !== 'darwin') {
+    t.skip('macOS-only');
+    return;
+  }
+  const saved = {
+    FT_BROWSER: process.env.FT_BROWSER,
+    FT_CHROME_USER_DATA_DIR: process.env.FT_CHROME_USER_DATA_DIR,
+  };
+  delete process.env.FT_BROWSER;
+  delete process.env.FT_CHROME_USER_DATA_DIR;
+  try {
+    const cfg = loadChromeSessionConfig({ browserId: 'chrome' });
+    assert.match(cfg.chromeUserDataDir, /Google\/Chrome$/);
+    assert.doesNotMatch(cfg.chromeUserDataDir, /net\.imput\.helium/);
+  } finally {
+    if (saved.FT_BROWSER !== undefined) process.env.FT_BROWSER = saved.FT_BROWSER;
+    if (saved.FT_CHROME_USER_DATA_DIR !== undefined) process.env.FT_CHROME_USER_DATA_DIR = saved.FT_CHROME_USER_DATA_DIR;
+  }
+});
+
 test('loadChromeSessionConfig: unknown browser id throws a helpful error', () => {
   const saved = process.env.FT_CHROME_USER_DATA_DIR;
   delete process.env.FT_CHROME_USER_DATA_DIR;
