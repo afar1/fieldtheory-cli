@@ -43,6 +43,32 @@ function getMacOSChromeKey(): Buffer {
   );
 }
 
+/**
+ * Derive the AES key Chrome uses on Linux to encrypt cookies.
+ *
+ * Chrome on Linux stores an encryption password in the GNOME Secret Service
+ * (via libsecret / secret-tool) under the key `application=chrome`.  It then
+ * derives a 16-byte AES-128 key with PBKDF2-HMAC-SHA1, salt "saltysalt",
+ * and **1 iteration** (vs. 1003 on macOS).  When no keyring is available
+ * Chrome falls back to the hard-coded password "peanuts".
+ */
+function getLinuxChromeKey(): Buffer {
+  // Try GNOME Secret Service first (works on GNOME / KDE with libsecret).
+  try {
+    const pw = execFileSync(
+      'secret-tool',
+      ['lookup', 'application', 'chrome'],
+      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 }
+    ).trim();
+    if (pw) return pbkdf2Sync(pw, 'saltysalt', 1, 16, 'sha1');
+  } catch {
+    // secret-tool not installed or no entry — fall through to hard-coded default.
+  }
+
+  // Chrome's hard-coded fallback password when no keyring is present.
+  return pbkdf2Sync('peanuts', 'saltysalt', 1, 16, 'sha1');
+}
+
 function sanitizeCookieValue(name: string, value: string): string {
   const cleaned = value.replace(/\0+$/g, '').trim();
   if (!cleaned) {
@@ -74,7 +100,12 @@ function sanitizeCookieValue(name: string, value: string): string {
 export function decryptCookieValue(encryptedValue: Buffer, key: Buffer, dbVersion = 0): string {
   if (encryptedValue.length === 0) return '';
 
-  if (encryptedValue[0] === 0x76 && encryptedValue[1] === 0x31 && encryptedValue[2] === 0x30) {
+  // Prefix is "v10" (macOS) or "v11" (Linux). Both use the same AES-128-CBC
+  // scheme; only the key-derivation parameters differ between platforms.
+  const isV10 = encryptedValue[0] === 0x76 && encryptedValue[1] === 0x31 && encryptedValue[2] === 0x30;
+  const isV11 = encryptedValue[0] === 0x76 && encryptedValue[1] === 0x31 && encryptedValue[2] === 0x31;
+
+  if (isV10 || isV11) {
     const iv = Buffer.alloc(16, 0x20); // 16 spaces
     const ciphertext = encryptedValue.subarray(3);
     const decipher = createDecipheriv('aes-128-cbc', key, iv);
@@ -176,16 +207,16 @@ export function extractChromeXCookies(
   profileDirectory = 'Default'
 ): ChromeCookieResult {
   const os = platform();
-  if (os !== 'darwin') {
+  if (os !== 'darwin' && os !== 'linux') {
     throw new Error(
-      `Direct cookie extraction is currently supported on macOS only.\n` +
+      `Direct cookie extraction is supported on macOS and Linux only.\n` +
       `Detected platform: ${os}\n` +
-      'Fix: Pass --csrf-token and --cookie-header directly, or contribute Linux/Windows support.'
+      'Fix: Pass --csrf-token and --cookie-header directly, or contribute Windows support.'
     );
   }
 
   const dbPath = join(chromeUserDataDir, profileDirectory, 'Cookies');
-  const key = getMacOSChromeKey();
+  const key = os === 'linux' ? getLinuxChromeKey() : getMacOSChromeKey();
 
   let result = queryCookies(dbPath, '.x.com', ['ct0', 'auth_token']);
   if (result.cookies.length === 0) {

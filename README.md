@@ -2,7 +2,7 @@
 
 Sync and store locally all of your X/Twitter bookmarks. Search, classify, and make them available to Claude Code, Codex, or any agent with shell access.
 
-Free and open source. Designed for Mac.
+Free and open source. Works on macOS and Linux.
 
 ## Install
 
