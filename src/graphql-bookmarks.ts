@@ -4,6 +4,20 @@ import { loadChromeSessionConfig } from './config.js';
 import { extractChromeXCookies } from './chrome-cookies.js';
 import type { BookmarkBackfillState, BookmarkRecord } from './types.js';
 import { exportBookmarksForSyncSeed } from './bookmarks-db.js';
+import { ProxyAgent, setGlobalDispatcher } from 'undici';
+
+// Set up proxy if environment variable is set
+const proxyUrl =
+  process.env.HTTPS_PROXY ||
+  process.env.https_proxy ||
+  process.env.HTTP_PROXY ||
+  process.env.http_proxy ||
+  process.env.ALL_PROXY ||
+  process.env.all_proxy;
+
+if (proxyUrl) {
+  setGlobalDispatcher(new ProxyAgent(proxyUrl));
+}
 
 const X_PUBLIC_BEARER =
   'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
