@@ -48,6 +48,8 @@ export interface SyncOptions {
   maxMinutes?: number;
   /** Consecutive pages with 0 new bookmarks before stopping. Default: 3 */
   stalePageLimit?: number;
+  /** Browser id to read session cookies from. Currently "chrome" (default) or "helium". */
+  browser?: string;
   /** Chrome user-data-dir override. */
   chromeUserDataDir?: string;
   /** Chrome profile directory name (e.g. "Default"). */
@@ -392,7 +394,7 @@ export async function syncBookmarksGraphQL(
     csrfToken = options.csrfToken;
     cookieHeader = options.cookieHeader;
   } else {
-    const chromeConfig = loadChromeSessionConfig();
+    const chromeConfig = loadChromeSessionConfig({ browserId: options.browser });
     const chromeDir = options.chromeUserDataDir ?? chromeConfig.chromeUserDataDir;
     const chromeProfile = options.chromeProfileDirectory ?? chromeConfig.chromeProfileDirectory;
     const cookies = extractChromeXCookies(chromeDir, chromeProfile);

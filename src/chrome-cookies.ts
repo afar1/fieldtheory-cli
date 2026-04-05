@@ -9,16 +9,29 @@ export interface ChromeCookieResult {
   cookieHeader: string;
 }
 
-function getMacOSChromeKey(): Buffer {
-  const candidates = [
-    { service: 'Chrome Safe Storage', account: 'Chrome' },
-    { service: 'Chrome Safe Storage', account: 'Google Chrome' },
-    { service: 'Google Chrome Safe Storage', account: 'Chrome' },
-    { service: 'Google Chrome Safe Storage', account: 'Google Chrome' },
-    { service: 'Chromium Safe Storage', account: 'Chromium' },
-    { service: 'Brave Safe Storage', account: 'Brave' },
-    { service: 'Brave Browser Safe Storage', account: 'Brave Browser' },
-  ];
+function getMacOSChromeKey(userDataDir?: string): Buffer {
+  // Helium (net.imput.helium) is a Chromium fork that stores its v10 cookie
+  // password under a non-"Safe Storage" keychain entry. Detect it from the
+  // user-data dir so we only try its entry when the caller is actually
+  // pointing at a Helium profile — otherwise a stray Helium install would
+  // shadow the real Chrome key.
+  const isHeliumDir = !!userDataDir && /net\.imput\.helium/i.test(userDataDir);
+
+  // When the caller is explicitly pointing at a Helium profile, only try
+  // Helium's keychain entry. Falling through to Chrome's "Safe Storage" key
+  // would silently return the wrong key on machines where both browsers are
+  // installed, producing a "bad decrypt" error.
+  const candidates = isHeliumDir
+    ? [{ service: 'Helium Storage Key', account: 'Helium' }]
+    : [
+        { service: 'Chrome Safe Storage', account: 'Chrome' },
+        { service: 'Chrome Safe Storage', account: 'Google Chrome' },
+        { service: 'Google Chrome Safe Storage', account: 'Chrome' },
+        { service: 'Google Chrome Safe Storage', account: 'Google Chrome' },
+        { service: 'Chromium Safe Storage', account: 'Chromium' },
+        { service: 'Brave Safe Storage', account: 'Brave' },
+        { service: 'Brave Browser Safe Storage', account: 'Brave Browser' },
+      ];
 
   for (const candidate of candidates) {
     try {
@@ -185,7 +198,7 @@ export function extractChromeXCookies(
   }
 
   const dbPath = join(chromeUserDataDir, profileDirectory, 'Cookies');
-  const key = getMacOSChromeKey();
+  const key = getMacOSChromeKey(chromeUserDataDir);
 
   let result = queryCookies(dbPath, '.x.com', ['ct0', 'auth_token']);
   if (result.cookies.length === 0) {

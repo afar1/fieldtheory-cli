@@ -1,4 +1,5 @@
 import { config as loadDotenv } from 'dotenv';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { dataDir } from './paths.js';
@@ -22,22 +23,59 @@ export function loadEnv(): void {
   }
 }
 
-function detectChromeUserDataDir(): string | undefined {
+// Known browser ids accepted by --browser / FT_BROWSER. Kept intentionally
+// small: each entry here must be live-tested against a real install of the
+// browser. Chrome is the implicit default if no id is given.
+const SUPPORTED_BROWSER_IDS = ['chrome', 'helium'] as const;
+type SupportedBrowserId = typeof SUPPORTED_BROWSER_IDS[number];
+
+function normalizeBrowserId(raw: string): SupportedBrowserId {
+  const normalized = raw.trim().toLowerCase();
+  if ((SUPPORTED_BROWSER_IDS as readonly string[]).includes(normalized)) {
+    return normalized as SupportedBrowserId;
+  }
+  throw new Error(
+    `Unknown browser: "${raw}".\n` +
+    `Supported browsers: ${SUPPORTED_BROWSER_IDS.join(', ')}.\n` +
+    `Set via --browser <name> or the FT_BROWSER env var.`
+  );
+}
+
+function detectChromeUserDataDir(browserId?: string): string | undefined {
   const platform = os.platform();
   const home = os.homedir();
-  if (platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'Google', 'Chrome');
+
+  // Explicit browser override: --browser / FT_BROWSER.
+  if (browserId) {
+    const id = normalizeBrowserId(browserId);
+    if (id === 'helium') {
+      if (platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'net.imput.helium');
+      return undefined;
+    }
+    // id === 'chrome' falls through to the default detection below.
+  }
+
+  if (platform === 'darwin') {
+    const chrome = path.join(home, 'Library', 'Application Support', 'Google', 'Chrome');
+    if (existsSync(chrome)) return chrome;
+    // Fall back to Helium if Chrome isn't installed.
+    const helium = path.join(home, 'Library', 'Application Support', 'net.imput.helium');
+    if (existsSync(helium)) return helium;
+    return chrome;
+  }
   if (platform === 'linux') return path.join(home, '.config', 'google-chrome');
   if (platform === 'win32') return path.join(home, 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
   return undefined;
 }
 
-export function loadChromeSessionConfig(): ChromeSessionConfig {
+export function loadChromeSessionConfig(overrides: { browserId?: string } = {}): ChromeSessionConfig {
   loadEnv();
-  const dir = process.env.FT_CHROME_USER_DATA_DIR ?? detectChromeUserDataDir();
+  const browserId = overrides.browserId ?? process.env.FT_BROWSER;
+  const dir = process.env.FT_CHROME_USER_DATA_DIR ?? detectChromeUserDataDir(browserId);
   if (!dir) {
     throw new Error(
-      'Could not detect Chrome user-data directory.\n' +
-      'Set FT_CHROME_USER_DATA_DIR in .env or pass --chrome-user-data-dir.'
+      'Could not detect a browser user-data directory.\n' +
+      'Set FT_CHROME_USER_DATA_DIR in .env or pass --chrome-user-data-dir (or --browser helium).'
     );
   }
   return {

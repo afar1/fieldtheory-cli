@@ -233,6 +233,7 @@ export function buildCli() {
     .option('--target-adds <n>', 'Stop after N new bookmarks', (v: string) => Number(v))
     .option('--delay-ms <n>', 'Delay between requests in ms', (v: string) => Number(v), 600)
     .option('--max-minutes <n>', 'Max runtime in minutes', (v: string) => Number(v), 30)
+    .option('--browser <name>', 'Browser to read session from: chrome (default) or helium')
     .option('--chrome-user-data-dir <path>', 'Chrome user-data directory')
     .option('--chrome-profile-directory <name>', 'Chrome profile name')
     .action(async (options) => {
@@ -262,6 +263,7 @@ export function buildCli() {
             targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
             delayMs: Number(options.delayMs) || 600,
             maxMinutes: Number(options.maxMinutes) || 30,
+            browser: options.browser ? String(options.browser) : undefined,
             chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
             chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
             onProgress: (status: SyncProgress) => {
