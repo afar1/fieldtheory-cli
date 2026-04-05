@@ -43,6 +43,65 @@ function getMacOSChromeKey(): Buffer {
   );
 }
 
+/**
+ * Retrieve the Chrome Safe Storage password from the Linux Secret Service
+ * (GNOME Keyring / Secret Service) and derive the AES-128-CBC key.
+ *
+ * Uses python3 with either gi.repository.Secret (libsecret) or dbus
+ * (dbus-python). Falls back to the hardcoded "peanuts" password (Chrome v10).
+ *
+ * Returns { v11, v10 } — v11 is the keyring-derived key (null if unavailable),
+ * v10 is always the hardcoded "peanuts" key.
+ */
+function getLinuxChromeKeys(): { v11: Buffer | null; v10: Buffer } {
+  const v10Key = pbkdf2Sync('peanuts', 'saltysalt', 1, 16, 'sha1');
+  const applications = ['chrome', 'chromium', 'brave'];
+
+  for (const app of applications) {
+    // Try gi.repository.Secret first (most reliable)
+    const giScript = `
+import gi
+gi.require_version('Secret','1')
+from gi.repository import Secret
+s=Secret.Schema.new('chrome_libsecret_os_crypt_password_v2',Secret.SchemaFlags.NONE,{'application':Secret.SchemaAttributeType.STRING})
+p=Secret.password_lookup_sync(s,{'application':'${app}'},None)
+if p: print(p,end='')
+else: exit(1)
+`.trim();
+
+    // Try dbus-python fallback
+    const dbusScript = `
+import dbus
+bus=dbus.SessionBus()
+svc=bus.get_object('org.freedesktop.secrets','/org/freedesktop/secrets')
+iface=dbus.Interface(svc,'org.freedesktop.Secret.Service')
+_,session=iface.OpenSession('plain',dbus.String('',variant_level=1))
+unlocked,_=iface.SearchItems({'xdg:schema':'chrome_libsecret_os_crypt_password_v2','application':'${app}'})
+if not unlocked: exit(1)
+secrets=iface.GetSecrets(unlocked,session)
+print(bytes(secrets[unlocked[0]][2]).decode(),end='')
+`.trim();
+
+    for (const script of [giScript, dbusScript]) {
+      try {
+        const password = execFileSync('python3', ['-c', script], {
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 10_000,
+        }).trim();
+        if (password) {
+          const v11Key = pbkdf2Sync(password, 'saltysalt', 1, 16, 'sha1');
+          return { v11: v11Key, v10: v10Key };
+        }
+      } catch {
+        // Try next method / application
+      }
+    }
+  }
+
+  return { v11: null, v10: v10Key };
+}
+
 function sanitizeCookieValue(name: string, value: string): string {
   const cleaned = value.replace(/\0+$/g, '').trim();
   if (!cleaned) {
@@ -71,13 +130,27 @@ function sanitizeCookieValue(name: string, value: string): string {
   return cleaned;
 }
 
-export function decryptCookieValue(encryptedValue: Buffer, key: Buffer, dbVersion = 0): string {
+export function decryptCookieValue(
+  encryptedValue: Buffer,
+  key: Buffer | { v11: Buffer | null; v10: Buffer },
+  dbVersion = 0
+): string {
   if (encryptedValue.length === 0) return '';
 
-  if (encryptedValue[0] === 0x76 && encryptedValue[1] === 0x31 && encryptedValue[2] === 0x30) {
+  // v10 and v11 prefixes both use AES-128-CBC; the key source is platform-dependent
+  if (encryptedValue[0] === 0x76 && encryptedValue[1] === 0x31 &&
+      (encryptedValue[2] === 0x30 || encryptedValue[2] === 0x31)) {
+    const isV11 = encryptedValue[2] === 0x31;
+    let decryptionKey: Buffer;
+    if (Buffer.isBuffer(key)) {
+      decryptionKey = key;
+    } else {
+      decryptionKey = (isV11 && key.v11) ? key.v11 : key.v10;
+    }
+
     const iv = Buffer.alloc(16, 0x20); // 16 spaces
     const ciphertext = encryptedValue.subarray(3);
-    const decipher = createDecipheriv('aes-128-cbc', key, iv);
+    const decipher = createDecipheriv('aes-128-cbc', decryptionKey, iv);
     let decrypted = decipher.update(ciphertext);
     decrypted = Buffer.concat([decrypted, decipher.final()]);
 
@@ -176,16 +249,19 @@ export function extractChromeXCookies(
   profileDirectory = 'Default'
 ): ChromeCookieResult {
   const os = platform();
-  if (os !== 'darwin') {
+  if (os !== 'darwin' && os !== 'linux') {
     throw new Error(
-      `Direct cookie extraction is currently supported on macOS only.\n` +
+      `Direct cookie extraction is supported on macOS and Linux only.\n` +
       `Detected platform: ${os}\n` +
-      'Fix: Pass --csrf-token and --cookie-header directly, or contribute Linux/Windows support.'
+      'Fix: Pass --csrf-token and --cookie-header directly, or contribute Windows support.'
     );
   }
 
-  const dbPath = join(chromeUserDataDir, profileDirectory, 'Cookies');
-  const key = getMacOSChromeKey();
+  // Chrome 96+ moved cookies to <profile>/Network/Cookies; try that first
+  const networkDbPath = join(chromeUserDataDir, profileDirectory, 'Network', 'Cookies');
+  const legacyDbPath = join(chromeUserDataDir, profileDirectory, 'Cookies');
+  const dbPath = existsSync(networkDbPath) ? networkDbPath : legacyDbPath;
+  const key = os === 'darwin' ? getMacOSChromeKey() : getLinuxChromeKeys();
 
   let result = queryCookies(dbPath, '.x.com', ['ct0', 'auth_token']);
   if (result.cookies.length === 0) {
