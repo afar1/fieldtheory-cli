@@ -118,10 +118,17 @@ function timeAgo(dateStr: string): string {
 }
 
 function showSyncWelcome(): void {
+  const isWindows = process.platform === 'win32';
+  const isLinux = process.platform === 'linux';
+  const manualNote = (isWindows || isLinux)
+    ? `\n  If auto-extraction fails, grab cookies from Chrome DevTools\n` +
+      `  (Application \u2192 Cookies \u2192 https://x.com) and run:\n` +
+      `    ft sync --csrf-token <ct0> --cookie-header "ct0=...; auth_token=..."\n`
+    : '';
   console.log(`
   Make sure Google Chrome is open and logged into x.com.
   Your Chrome session is used to authenticate \u2014 no passwords
-  are stored or transmitted.
+  are stored or transmitted.${manualNote}
 `);
 }
 
@@ -235,6 +242,8 @@ export function buildCli() {
     .option('--max-minutes <n>', 'Max runtime in minutes', (v: string) => Number(v), 30)
     .option('--chrome-user-data-dir <path>', 'Chrome user-data directory')
     .option('--chrome-profile-directory <name>', 'Chrome profile name')
+    .option('--csrf-token <token>', 'CSRF token (ct0 cookie value) — skips Chrome extraction')
+    .option('--cookie-header <header>', 'Full Cookie header string — skips Chrome extraction')
     .action(async (options) => {
       const firstRun = isFirstRun();
       if (firstRun) showSyncWelcome();
@@ -264,6 +273,8 @@ export function buildCli() {
             maxMinutes: Number(options.maxMinutes) || 30,
             chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
             chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+            csrfToken: options.csrfToken ? String(options.csrfToken) : undefined,
+            cookieHeader: options.cookieHeader ? String(options.cookieHeader) : undefined,
             onProgress: (status: SyncProgress) => {
               renderProgress(status, startTime);
               if (status.done) process.stderr.write('\n');
