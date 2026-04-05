@@ -3,6 +3,7 @@ import { ensureDataDir, twitterBookmarksCachePath, twitterBookmarksMetaPath } fr
 import type { BookmarkCacheMeta, BookmarkRecord } from './types.js';
 import { loadXApiConfig } from './config.js';
 import { loadTwitterOAuthToken } from './xauth.js';
+import { normalizeTimestamp, coalesceTimestamps } from './dates.js';
 
 export interface BookmarkSyncResult {
   mode: 'full' | 'incremental';
@@ -41,7 +42,8 @@ function makeBookmark(record: Partial<BookmarkRecord> & Pick<BookmarkRecord, 'id
     text: record.text,
     authorHandle: record.authorHandle,
     authorName: record.authorName,
-    bookmarkedAt: record.bookmarkedAt,
+    postedAt: normalizeTimestamp(record.postedAt),
+    bookmarkedAt: normalizeTimestamp(record.bookmarkedAt),
     syncedAt: record.syncedAt ?? new Date().toISOString(),
     media: record.media ?? [],
     links: record.links ?? [],
@@ -116,7 +118,7 @@ function normalizeBookmarkPage(page: BookmarkApiResponse, syncedAt: string): Boo
       text: tweet.text ?? '',
       authorHandle: user?.username,
       authorName: user?.name,
-      bookmarkedAt: tweet.created_at,
+      postedAt: tweet.created_at,
       syncedAt,
       links: (tweet.entities?.urls ?? []).map((u) => u.expanded_url ?? u.url ?? '').filter(Boolean),
     });
@@ -152,7 +154,7 @@ async function fetchBookmarksPage(accessToken: string, userId: string, nextToken
 
 export async function syncTwitterBookmarks(
   mode: 'full' | 'incremental',
-  options: { targetAdds?: number } = {}
+  options: { targetAdds?: number; maxPages?: number } = {}
 ): Promise<BookmarkSyncResult> {
   const token = await loadTwitterOAuthToken();
   if (!token?.access_token) {
@@ -174,7 +176,7 @@ export async function syncTwitterBookmarks(
   const allFetched: BookmarkRecord[] = [];
   let nextToken: string | undefined;
   let pages = 0;
-  const maxPages = mode === 'full' ? 20 : 2;
+  const maxPages = options.maxPages ?? Number.POSITIVE_INFINITY;
 
   while (pages < maxPages) {
     const pageResult = await fetchBookmarksPage(token.access_token, me.id, nextToken);
@@ -206,7 +208,11 @@ export async function syncTwitterBookmarks(
     }
   }
 
-  merged.sort((a, b) => String(b.bookmarkedAt ?? b.syncedAt).localeCompare(String(a.bookmarkedAt ?? a.syncedAt)));
+  merged.sort((a, b) =>
+    String(coalesceTimestamps(b.bookmarkedAt, b.postedAt, b.syncedAt) ?? '').localeCompare(
+      String(coalesceTimestamps(a.bookmarkedAt, a.postedAt, a.syncedAt) ?? '')
+    )
+  );
   await writeJsonLines(cachePath, merged);
 
   const previousMeta = (await pathExists(metaPath)) ? await readJson<BookmarkCacheMeta>(metaPath) : undefined;

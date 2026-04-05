@@ -162,8 +162,40 @@ test('convertTweetToRecord: extracts media objects', () => {
 
   assert.equal(result.mediaObjects!.length, 1);
   assert.equal(result.mediaObjects![0].type, 'photo');
+  assert.equal(result.mediaObjects![0].url, 'https://pbs.twimg.com/media/example.jpg');
   assert.equal(result.mediaObjects![0].width, 1200);
   assert.equal(result.mediaObjects![0].altText, 'A test image');
+});
+
+test('convertTweetToRecord: video media uses downloader-compatible fields', () => {
+  const result = convertTweetToRecord(makeTweetResult({
+    legacy: {
+      extended_entities: {
+        media: [
+          {
+            type: 'video',
+            media_url_https: 'https://pbs.twimg.com/ext_tw_video_thumb/example.jpg',
+            expanded_url: 'https://x.com/user/status/1234567890/video/1',
+            original_info: { width: 1280, height: 720 },
+            video_info: {
+              variants: [
+                { content_type: 'application/x-mpegURL', url: 'https://video.example/playlist.m3u8' },
+                { content_type: 'video/mp4', bitrate: 320000, url: 'https://video.example/320.mp4' },
+                { content_type: 'video/mp4', bitrate: 832000, url: 'https://video.example/832.mp4' },
+              ],
+            },
+          },
+        ],
+      },
+    },
+  }), NOW)!;
+
+  assert.equal(result.mediaObjects!.length, 1);
+  assert.equal(result.mediaObjects![0].type, 'video');
+  assert.equal(result.mediaObjects![0].url, 'https://pbs.twimg.com/ext_tw_video_thumb/example.jpg');
+  assert.equal(result.mediaObjects![0].videoVariants?.length, 2);
+  assert.equal(result.mediaObjects![0].videoVariants?.[0].contentType, 'video/mp4');
+  assert.equal(result.mediaObjects![0].videoVariants?.[1].bitrate, 832000);
 });
 
 test('convertTweetToRecord: extracts links, filtering out t.co', () => {
