@@ -741,6 +741,11 @@ export async function getFolderCounts(): Promise<Record<string, number>> {
   const db = await openDb(dbPath);
   ensureMigrations(db);
   try {
+    // Return empty if no bookmarks have folder data yet
+    const hasFolder = db.exec("SELECT 1 FROM bookmarks WHERE x_folder IS NOT NULL LIMIT 1");
+    if (!hasFolder.length || !hasFolder[0].values.length) {
+      return {};
+    }
     const rows = db.exec(
       `SELECT COALESCE(x_folder, '(unfiled)'), COUNT(*) as c FROM bookmarks
        GROUP BY COALESCE(x_folder, '(unfiled)') ORDER BY c DESC`

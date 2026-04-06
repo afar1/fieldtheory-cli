@@ -277,6 +277,7 @@ export function buildCli() {
           console.log(`  ${friendlyStopReason(result.stopReason)}`);
           console.log(`  \u2713 Data: ${dataDir()}\n`);
 
+          let folderAdded = 0;
           if (options.folders) {
             process.stderr.write('\n  Syncing bookmark folders...\n');
             const folderResult = await syncFolders({
@@ -288,6 +289,7 @@ export function buildCli() {
               },
             });
             process.stderr.write('\n');
+            folderAdded = folderResult.added;
             if (folderResult.folders.length > 0) {
               console.log(`  \u2713 ${folderResult.folders.length} folders synced`);
               for (const f of folderResult.folders) {
@@ -299,7 +301,7 @@ export function buildCli() {
             }
           }
 
-          const newCount = await rebuildIndex(result.added);
+          const newCount = await rebuildIndex(result.added + folderAdded);
           if (options.classify && newCount > 0) {
             await classifyNew();
           }
