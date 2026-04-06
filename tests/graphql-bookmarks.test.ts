@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 import {
   convertTweetToRecord,
   parseBookmarksResponse,
+  parseBookmarkFolderResponse,
   scoreRecord,
   mergeBookmarkRecord,
   mergeRecords,
   formatSyncResult,
 } from '../src/graphql-bookmarks.js';
-import type { BookmarkRecord } from '../src/types.js';
+import { resolveFolder } from '../src/cli.js';
+import type { BookmarkFolder, BookmarkRecord } from '../src/types.js';
 
 const NOW = '2026-03-28T00:00:00.000Z';
 
@@ -371,6 +373,7 @@ test('mergeRecords: handles empty inputs', () => {
 test('formatSyncResult: formats all fields', () => {
   const result = formatSyncResult({
     added: 50,
+    touched: 0,
     totalBookmarks: 6000,
     pages: 300,
     stopReason: 'end of bookmarks',
@@ -383,4 +386,152 @@ test('formatSyncResult: formats all fields', () => {
   assert.ok(result.includes('300'));
   assert.ok(result.includes('end of bookmarks'));
   assert.ok(result.includes('/tmp/cache.jsonl'));
+});
+
+// ── Folder support tests ─────────────────────────────────────────────────
+
+test('parseBookmarkFolderResponse: parses folder timeline entries', () => {
+  const tr = makeTweetResult();
+  const resp = {
+    data: {
+      bookmark_collection_timeline: {
+        timeline: {
+          instructions: [
+            {
+              type: 'TimelineAddEntries',
+              entries: [
+                {
+                  entryId: 'tweet-0',
+                  content: { itemContent: { tweet_results: { result: tr } } },
+                },
+                {
+                  entryId: 'cursor-bottom-456',
+                  content: { value: 'folder-cursor-xyz' },
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+  };
+
+  const { records, nextCursor } = parseBookmarkFolderResponse(resp, NOW);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].id, '1234567890');
+  assert.equal(nextCursor, 'folder-cursor-xyz');
+});
+
+test('parseBookmarkFolderResponse: returns empty for missing data', () => {
+  const { records, nextCursor } = parseBookmarkFolderResponse({}, NOW);
+  assert.equal(records.length, 0);
+  assert.equal(nextCursor, undefined);
+});
+
+test('mergeBookmarkRecord: unions folder arrays from both records', () => {
+  const existing = makeRecord({
+    id: '1',
+    folderIds: ['folder-a'],
+    folderNames: ['Coding'],
+  });
+  const incoming = makeRecord({
+    id: '1',
+    folderIds: ['folder-b'],
+    folderNames: ['AI'],
+  });
+  const result = mergeBookmarkRecord(existing, incoming);
+  assert.deepEqual(result.folderIds!.sort(), ['folder-a', 'folder-b']);
+  assert.deepEqual(result.folderNames!.sort(), ['AI', 'Coding']);
+});
+
+test('mergeBookmarkRecord: deduplicates folder arrays', () => {
+  const existing = makeRecord({
+    id: '1',
+    folderIds: ['folder-a', 'folder-b'],
+    folderNames: ['Coding', 'AI'],
+  });
+  const incoming = makeRecord({
+    id: '1',
+    folderIds: ['folder-b', 'folder-c'],
+    folderNames: ['AI', 'Music'],
+  });
+  const result = mergeBookmarkRecord(existing, incoming);
+  assert.deepEqual(result.folderIds!.sort(), ['folder-a', 'folder-b', 'folder-c']);
+  assert.deepEqual(result.folderNames!.sort(), ['AI', 'Coding', 'Music']);
+});
+
+test('mergeBookmarkRecord: handles one side having no folders', () => {
+  const existing = makeRecord({ id: '1' });
+  const incoming = makeRecord({
+    id: '1',
+    folderIds: ['folder-a'],
+    folderNames: ['Coding'],
+  });
+  const result = mergeBookmarkRecord(existing, incoming);
+  assert.deepEqual(result.folderIds, ['folder-a']);
+  assert.deepEqual(result.folderNames, ['Coding']);
+});
+
+test('mergeRecords: counts touched when folder metadata is added to existing record', () => {
+  const existing = [makeRecord({ id: '1', tweetId: '1', postedAt: '2026-01-01' })];
+  const incoming = [makeRecord({
+    id: '1',
+    tweetId: '1',
+    postedAt: '2026-01-01',
+    folderIds: ['folder-a'],
+    folderNames: ['Coding'],
+  })];
+  const { merged, added, touched } = mergeRecords(existing, incoming);
+  assert.equal(merged.length, 1);
+  assert.equal(added, 0);
+  assert.equal(touched, 1);
+  assert.deepEqual(merged[0].folderIds, ['folder-a']);
+});
+
+// ── resolveFolder tests ──────────────────────────────────────────────────
+
+const FOLDERS: BookmarkFolder[] = [
+  { id: 'f1', name: 'Coding' },
+  { id: 'f2', name: 'AI Research' },
+  { id: 'f3', name: 'AI Tools' },
+  { id: 'f4', name: 'Music' },
+];
+
+test('resolveFolder: exact match (case-insensitive)', () => {
+  const result = resolveFolder(FOLDERS, 'coding');
+  assert.equal(result.id, 'f1');
+  assert.equal(result.name, 'Coding');
+});
+
+test('resolveFolder: exact match takes priority over prefix', () => {
+  const result = resolveFolder(FOLDERS, 'Music');
+  assert.equal(result.id, 'f4');
+});
+
+test('resolveFolder: unambiguous prefix match', () => {
+  const result = resolveFolder(FOLDERS, 'Cod');
+  assert.equal(result.id, 'f1');
+});
+
+test('resolveFolder: ambiguous prefix throws with folder names', () => {
+  assert.throws(
+    () => resolveFolder(FOLDERS, 'AI'),
+    (err: Error) => {
+      assert.ok(err.message.includes('Multiple folders'));
+      assert.ok(err.message.includes('AI Research'));
+      assert.ok(err.message.includes('AI Tools'));
+      return true;
+    },
+  );
+});
+
+test('resolveFolder: no match throws with available folders', () => {
+  assert.throws(
+    () => resolveFolder(FOLDERS, 'Nonexistent'),
+    (err: Error) => {
+      assert.ok(err.message.includes('No folder matches'));
+      assert.ok(err.message.includes('Coding'));
+      return true;
+    },
+  );
 });

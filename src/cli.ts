@@ -184,7 +184,7 @@ function safe(fn: (...args: any[]) => Promise<void>): (...args: any[]) => Promis
 
 // ── Folder resolution ───────────────────────────────────────────────────────
 
-function resolveFolder(folders: BookmarkFolder[], query: string): BookmarkFolder {
+export function resolveFolder(folders: BookmarkFolder[], query: string): BookmarkFolder {
   const lower = query.toLowerCase();
   const exact = folders.find(f => f.name.toLowerCase() === lower);
   if (exact) return exact;
