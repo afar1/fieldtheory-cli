@@ -2,37 +2,57 @@ import { ensureDir, readJsonLines, writeJsonLines, readJson, writeJson, pathExis
 import { ensureDataDir, twitterBookmarksCachePath, twitterBookmarksMetaPath, twitterBackfillStatePath } from './paths.js';
 import { loadChromeSessionConfig } from './config.js';
 import { extractChromeXCookies } from './chrome-cookies.js';
-import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkRecord } from './types.js';
+import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkFolder, BookmarkRecord } from './types.js';
 import { exportBookmarksForSyncSeed } from './bookmarks-db.js';
 
 const X_PUBLIC_BEARER =
   'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
 
-const BOOKMARKS_QUERY_ID = 'Z9GWmP0kP2dajyckAaDUBw';
+const BOOKMARKS_QUERY_ID = 'YCrjINs3IPbkSl5FQf_tpA';
 const BOOKMARKS_OPERATION = 'Bookmarks';
+const BOOKMARK_FOLDERS_QUERY_ID = 'i78YDd0Tza-dV4SYs58kRg';
+const BOOKMARK_FOLDERS_OPERATION = 'BookmarkFoldersSlice';
+const BOOKMARK_FOLDER_TIMELINE_QUERY_ID = 'LML09uXDwh87F1zd7pbf2w';
+const BOOKMARK_FOLDER_TIMELINE_OPERATION = 'BookmarkFolderTimeline';
 
 const GRAPHQL_FEATURES = {
   graphql_timeline_v2_bookmark_timeline: true,
-  rweb_tipjar_consumption_enabled: true,
-  responsive_web_graphql_exclude_directive_enabled: true,
+  rweb_video_screen_enabled: false,
+  profile_label_improvements_pcf_label_in_post_enabled: true,
+  responsive_web_profile_redirect_enabled: false,
+  rweb_tipjar_consumption_enabled: false,
   verified_phone_label_enabled: false,
   creator_subscriptions_tweet_preview_api_enabled: true,
   responsive_web_graphql_timeline_navigation_enabled: true,
   responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
+  premium_content_api_read_enabled: false,
   communities_web_enable_tweet_community_results_fetch: true,
   c9s_tweet_anatomy_moderator_badge_enabled: true,
+  responsive_web_grok_analyze_button_fetch_trends_enabled: false,
+  responsive_web_grok_analyze_post_followups_enabled: true,
+  responsive_web_jetfuel_frame: true,
+  responsive_web_grok_share_attachment_enabled: true,
+  responsive_web_grok_annotations_enabled: true,
   articles_preview_enabled: true,
   responsive_web_edit_tweet_api_enabled: true,
-  tweetypie_unmention_optimization_enabled: true,
-  responsive_web_uc_gql_enabled: true,
-  vibe_api_enabled: true,
-  responsive_web_text_conversations_enabled: false,
+  graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
+  view_counts_everywhere_api_enabled: true,
+  longform_notetweets_consumption_enabled: true,
+  responsive_web_twitter_article_tweet_consumption_enabled: true,
+  content_disclosure_indicator_enabled: true,
+  content_disclosure_ai_generated_indicator_enabled: true,
+  responsive_web_grok_show_grok_translated_post: true,
+  responsive_web_grok_analysis_button_from_backend: true,
+  post_ctas_fetch_enabled: true,
   freedom_of_speech_not_reach_fetch_enabled: true,
-  longform_notetweets_rich_text_read_enabled: true,
-  longform_notetweets_inline_media_enabled: true,
-  responsive_web_enhance_cards_enabled: false,
+  standardized_nudges_misinfo: true,
   tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
-  responsive_web_media_download_video_enabled: false,
+  longform_notetweets_rich_text_read_enabled: true,
+  longform_notetweets_inline_media_enabled: false,
+  responsive_web_grok_image_annotation_enabled: true,
+  responsive_web_grok_imagine_annotation_enabled: true,
+  responsive_web_grok_community_note_auto_translation_is_enabled: false,
+  responsive_web_enhance_cards_enabled: false,
 };
 
 export interface SyncOptions {
@@ -60,6 +80,10 @@ export interface SyncOptions {
   onProgress?: (status: SyncProgress) => void;
   /** Flush to disk every N pages. Default: 25 */
   checkpointEvery?: number;
+  /** Sync a specific bookmark folder by ID. */
+  folderId?: string;
+  /** Resolved folder name, attached to records. */
+  folderName?: string;
 }
 
 export interface SyncProgress {
@@ -73,6 +97,7 @@ export interface SyncProgress {
 
 export interface SyncResult {
   added: number;
+  touched: number;
   totalBookmarks: number;
   pages: number;
   stopReason: string;
@@ -129,7 +154,7 @@ async function loadExistingBookmarks(): Promise<BookmarkRecord[]> {
   }
 }
 
-function buildUrl(cursor?: string): string {
+function buildBookmarksUrl(cursor?: string): string {
   const variables: Record<string, unknown> = { count: 20 };
   if (cursor) variables.cursor = cursor;
   const params = new URLSearchParams({
@@ -137,6 +162,20 @@ function buildUrl(cursor?: string): string {
     features: JSON.stringify(GRAPHQL_FEATURES),
   });
   return `https://x.com/i/api/graphql/${BOOKMARKS_QUERY_ID}/${BOOKMARKS_OPERATION}?${params}`;
+}
+
+function buildFolderTimelineUrl(folderId: string, cursor?: string): string {
+  const variables: Record<string, unknown> = {
+    bookmark_collection_id: folderId,
+    count: 20,
+    includePromotedContent: true,
+  };
+  if (cursor) variables.cursor = cursor;
+  const params = new URLSearchParams({
+    variables: JSON.stringify(variables),
+    features: JSON.stringify(GRAPHQL_FEATURES),
+  });
+  return `https://x.com/i/api/graphql/${BOOKMARK_FOLDER_TIMELINE_QUERY_ID}/${BOOKMARK_FOLDER_TIMELINE_OPERATION}?${params}`;
 }
 
 function buildHeaders(csrfToken: string, cookieHeader?: string): Record<string, string> {
@@ -248,9 +287,7 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
   };
 }
 
-export function parseBookmarksResponse(json: any, now?: string): PageResult {
-  const ts = now ?? new Date().toISOString();
-  const instructions = json?.data?.bookmark_timeline_v2?.timeline?.instructions ?? [];
+export function parseTimelineInstructions(instructions: any[], now: string): PageResult {
   const entries: any[] = [];
   for (const inst of instructions) {
     if (inst.type === 'TimelineAddEntries' && Array.isArray(inst.entries)) {
@@ -270,18 +307,31 @@ export function parseBookmarksResponse(json: any, now?: string): PageResult {
     const tweetResult = entry?.content?.itemContent?.tweet_results?.result;
     if (!tweetResult) continue;
 
-    const record = convertTweetToRecord(tweetResult, ts);
+    const record = convertTweetToRecord(tweetResult, now);
     if (record) records.push(record);
   }
 
   return { records, nextCursor };
 }
 
-async function fetchPageWithRetry(csrfToken: string, cursor?: string, cookieHeader?: string): Promise<PageResult> {
+export function parseBookmarksResponse(json: any, now?: string): PageResult {
+  const ts = now ?? new Date().toISOString();
+  const instructions = json?.data?.bookmark_timeline_v2?.timeline?.instructions ?? [];
+  return parseTimelineInstructions(instructions, ts);
+}
+
+export function parseBookmarkFolderResponse(json: any, now?: string): PageResult {
+  const ts = now ?? new Date().toISOString();
+  const instructions = json?.data?.bookmark_collection_timeline?.timeline?.instructions ?? [];
+  return parseTimelineInstructions(instructions, ts);
+}
+
+async function fetchPageWithRetry(csrfToken: string, cursor?: string, cookieHeader?: string, folderId?: string): Promise<PageResult> {
   let lastError: Error | undefined;
 
   for (let attempt = 0; attempt < 4; attempt++) {
-    const response = await fetch(buildUrl(cursor), { headers: buildHeaders(csrfToken, cookieHeader) });
+    const url = folderId ? buildFolderTimelineUrl(folderId, cursor) : buildBookmarksUrl(cursor);
+    const response = await fetch(url, { headers: buildHeaders(csrfToken, cookieHeader) });
 
     if (response.status === 429) {
       const waitSec = Math.min(15 * Math.pow(2, attempt), 120);
@@ -308,7 +358,7 @@ async function fetchPageWithRetry(csrfToken: string, cursor?: string, cookieHead
     }
 
     const json = await response.json();
-    return parseBookmarksResponse(json);
+    return folderId ? parseBookmarkFolderResponse(json) : parseBookmarksResponse(json);
   }
 
   throw lastError ?? new Error('GraphQL Bookmarks API: all retry attempts failed. Try again later.');
@@ -327,25 +377,44 @@ export function scoreRecord(record: BookmarkRecord): number {
 
 export function mergeBookmarkRecord(existing: BookmarkRecord | undefined, incoming: BookmarkRecord): BookmarkRecord {
   if (!existing) return incoming;
-  return scoreRecord(incoming) >= scoreRecord(existing)
+  const merged = scoreRecord(incoming) >= scoreRecord(existing)
     ? { ...existing, ...incoming }
     : { ...incoming, ...existing };
+  // Union folder arrays
+  if (existing.folderIds || incoming.folderIds) {
+    merged.folderIds = [...new Set([...(existing.folderIds ?? []), ...(incoming.folderIds ?? [])])];
+  }
+  if (existing.folderNames || incoming.folderNames) {
+    merged.folderNames = [...new Set([...(existing.folderNames ?? []), ...(incoming.folderNames ?? [])])];
+  }
+  return merged;
 }
 
 export function mergeRecords(
   existing: BookmarkRecord[],
   incoming: BookmarkRecord[]
-): { merged: BookmarkRecord[]; added: number } {
+): { merged: BookmarkRecord[]; added: number; touched: number } {
   const byId = new Map(existing.map((r) => [r.id, r]));
   let added = 0;
+  let touched = 0;
   for (const record of incoming) {
     const prev = byId.get(record.id);
-    if (!prev) added += 1;
+    if (!prev) {
+      added += 1;
+    } else {
+      // Check if folder metadata is being added to an existing record
+      const hadFolders = prev.folderIds?.length ?? 0;
+      const mergedRecord = mergeBookmarkRecord(prev, record);
+      const hasFolders = mergedRecord.folderIds?.length ?? 0;
+      if (hasFolders > hadFolders) touched += 1;
+      byId.set(record.id, mergedRecord);
+      continue;
+    }
     byId.set(record.id, mergeBookmarkRecord(prev, record));
   }
   const merged = Array.from(byId.values());
   merged.sort((a, b) => compareBookmarkChronology(b, a));
-  return { merged, added };
+  return { merged, added, touched };
 }
 
 function updateState(
@@ -375,10 +444,32 @@ export function formatSyncResult(result: SyncResult): string {
   ].join('\n');
 }
 
+export async function fetchBookmarkFolders(csrfToken: string, cookieHeader?: string): Promise<BookmarkFolder[]> {
+  const params = new URLSearchParams({
+    variables: JSON.stringify({}),
+    features: JSON.stringify(GRAPHQL_FEATURES),
+  });
+  const url = `https://x.com/i/api/graphql/${BOOKMARK_FOLDERS_QUERY_ID}/${BOOKMARK_FOLDERS_OPERATION}?${params}`;
+  const response = await fetch(url, { headers: buildHeaders(csrfToken, cookieHeader) });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`BookmarkFoldersSlice API returned ${response.status}: ${text.slice(0, 300)}`);
+  }
+  const json = await response.json();
+  const items = json?.data?.viewer?.user_results?.result?.bookmark_collections_slice?.items ?? [];
+  return items.map((item: any) => ({
+    id: item.id ?? item.rest_id,
+    name: item.name ?? '',
+    mediaUrl: item.media_url ?? item.media?.media_url_https ?? undefined,
+  }));
+}
+
 export async function syncBookmarksGraphQL(
   options: SyncOptions = {}
 ): Promise<SyncResult> {
-  const incremental = options.incremental ?? true;
+  // Folder sync defaults to full crawl (incremental: false) because it needs to tag all
+  // bookmarks in the folder, not just new ones. Main timeline defaults to incremental.
+  const incremental = options.folderId ? (options.incremental ?? false) : (options.incremental ?? true);
   const maxPages = options.maxPages ?? 500;
   const delayMs = options.delayMs ?? 600;
   const maxMinutes = options.maxMinutes ?? 30;
@@ -418,6 +509,7 @@ export async function syncBookmarksGraphQL(
   const started = Date.now();
   let page = 0;
   let totalAdded = 0;
+  let totalTouched = 0;
   let stalePages = 0;
   let cursor: string | undefined;
   const allSeenIds: string[] = [];
@@ -429,21 +521,34 @@ export async function syncBookmarksGraphQL(
       break;
     }
 
-    const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader);
+    const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader, options.folderId);
     page += 1;
+
+    // Stamp folder info on incoming records before merge
+    if (options.folderId && options.folderName) {
+      for (const record of result.records) {
+        record.folderIds = [options.folderId];
+        record.folderNames = [options.folderName];
+      }
+    }
 
     if (result.records.length === 0 && !result.nextCursor) {
       stopReason = 'end of bookmarks';
       break;
     }
 
-    const { merged, added } = mergeRecords(existing, result.records);
+    const { merged, added, touched } = mergeRecords(existing, result.records);
     existing = merged;
     totalAdded += added;
+    totalTouched += touched;
     result.records.forEach((r) => allSeenIds.push(r.id));
     const reachedLatestStored = Boolean(newestKnownId) && result.records.some((record) => record.id === newestKnownId);
 
-    stalePages = added === 0 ? stalePages + 1 : 0;
+    // Folder sync counts "touched" (enriched existing records) as progress,
+    // since its primary purpose is stamping folder metadata on existing bookmarks.
+    stalePages = options.folderId
+      ? (added === 0 && touched === 0 ? stalePages + 1 : 0)
+      : (added === 0 ? stalePages + 1 : 0);
 
     options.onProgress?.({
       page,
@@ -461,7 +566,7 @@ export async function syncBookmarksGraphQL(
       stopReason = 'caught up to newest stored bookmark';
       break;
     }
-    if (incremental && stalePages >= stalePageLimit) {
+    if (stalePages >= stalePageLimit) {
       stopReason = 'no new bookmarks (stale)';
       break;
     }
@@ -503,5 +608,5 @@ export async function syncBookmarksGraphQL(
     stopReason,
   });
 
-  return { added: totalAdded, totalBookmarks: existing.length, pages: page, stopReason, cachePath, statePath };
+  return { added: totalAdded, touched: totalTouched, totalBookmarks: existing.length, pages: page, stopReason, cachePath, statePath };
 }

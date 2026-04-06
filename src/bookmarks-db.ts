@@ -6,7 +6,7 @@ import type { BookmarkRecord } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 export interface SearchResult {
   id: string;
@@ -24,6 +24,7 @@ export interface SearchOptions {
   limit?: number;
   before?: string;
   after?: string;
+  folder?: string;
 }
 
 export interface BookmarkTimelineItem {
@@ -50,6 +51,8 @@ export interface BookmarkTimelineItem {
   quoteCount?: number | null;
   bookmarkCount?: number | null;
   viewCount?: number | null;
+  folderIds: string[];
+  folderNames: string[];
 }
 
 export interface BookmarkTimelineFilters {
@@ -59,6 +62,7 @@ export interface BookmarkTimelineFilters {
   before?: string;
   category?: string;
   domain?: string;
+  folder?: string;
   sort?: 'asc' | 'desc';
   limit?: number;
   offset?: number;
@@ -107,6 +111,8 @@ function mapTimelineRow(row: unknown[]): BookmarkTimelineItem {
     quoteCount: row[20] as number | null,
     bookmarkCount: row[21] as number | null,
     viewCount: row[22] as number | null,
+    folderIds: parseJsonArray(row[23]),
+    folderNames: parseJsonArray(row[24]),
   };
 }
 
@@ -140,6 +146,10 @@ function buildBookmarkWhereClause(filters: BookmarkTimelineFilters): {
   if (filters.domain) {
     conditions.push(`b.domains LIKE ?`);
     params.push(`%${filters.domain}%`);
+  }
+  if (filters.folder) {
+    conditions.push(`EXISTS (SELECT 1 FROM json_each(b.folder_names) WHERE json_each.value = ?)`);
+    params.push(filters.folder);
   }
 
   return {
@@ -194,7 +204,9 @@ function initSchema(db: Database): void {
     primary_category TEXT,
     github_urls TEXT,
     domains TEXT,
-    primary_domain TEXT
+    primary_domain TEXT,
+    folder_ids TEXT,
+    folder_names TEXT
   )`);
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_author ON bookmarks(author_handle)`);
@@ -230,6 +242,14 @@ function ensureMigrations(db: Database): void {
     }
     db.run("REPLACE INTO meta VALUES ('schema_version', '3')");
   }
+  if (version < 4) {
+    const tableExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'");
+    if (tableExists.length && tableExists[0].values.length > 0) {
+      try { db.run('ALTER TABLE bookmarks ADD COLUMN folder_ids TEXT'); } catch { /* already exists */ }
+      try { db.run('ALTER TABLE bookmarks ADD COLUMN folder_names TEXT'); } catch { /* already exists */ }
+    }
+    db.run("REPLACE INTO meta VALUES ('schema_version', '4')");
+  }
 }
 
 function insertRecord(db: Database, r: BookmarkRecord): void {
@@ -240,7 +260,7 @@ function insertRecord(db: Database, r: BookmarkRecord): void {
   const githubUrls = [...new Set([...githubMatches.map((m) => `https://${m}`), ...githubFromLinks])];
 
   db.run(
-    `INSERT OR REPLACE INTO bookmarks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT OR REPLACE INTO bookmarks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       r.id,
       r.tweetId,
@@ -272,7 +292,23 @@ function insertRecord(db: Database, r: BookmarkRecord): void {
       githubUrls.length ? JSON.stringify(githubUrls) : null,
       null, // domains — populated by classify-domains pass
       null, // primary_domain
+      r.folderIds?.length ? JSON.stringify(r.folderIds) : null,   // folder_ids
+      r.folderNames?.length ? JSON.stringify(r.folderNames) : null, // folder_names
     ]
+  );
+}
+
+function updateFolderMetadata(db: Database, id: string, folderIds: string[], folderNames: string[]): void {
+  // Merge with existing folder data rather than overwriting
+  const existing = db.exec(`SELECT folder_ids, folder_names FROM bookmarks WHERE id = ?`, [id]);
+  const row = existing[0]?.values?.[0];
+  const existingIds = parseJsonArray(row?.[0]);
+  const existingNames = parseJsonArray(row?.[1]);
+  const mergedIds = [...new Set([...existingIds, ...folderIds])];
+  const mergedNames = [...new Set([...existingNames, ...folderNames])];
+  db.run(
+    `UPDATE bookmarks SET folder_ids = ?, folder_names = ? WHERE id = ?`,
+    [JSON.stringify(mergedIds), JSON.stringify(mergedNames), id]
   );
 }
 
@@ -307,6 +343,16 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
       db.run('BEGIN TRANSACTION');
       for (const record of newRecords) {
         insertRecord(db, record);
+      }
+      db.run('COMMIT');
+    }
+
+    // Backfill folder metadata for existing records
+    const existingWithFolders = records.filter(r => existingIds.has(r.id) && r.folderIds?.length);
+    if (existingWithFolders.length > 0) {
+      db.run('BEGIN TRANSACTION');
+      for (const record of existingWithFolders) {
+        updateFolderMetadata(db, record.id, record.folderIds!, record.folderNames ?? []);
       }
       db.run('COMMIT');
     }
@@ -347,6 +393,10 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
     if (options.before) {
       conditions.push(`b.posted_at <= ?`);
       params.push(options.before);
+    }
+    if (options.folder) {
+      conditions.push(`EXISTS (SELECT 1 FROM json_each(b.folder_names) WHERE json_each.value = ?)`);
+      params.push(options.folder);
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -432,7 +482,9 @@ export async function listBookmarks(
         b.reply_count,
         b.quote_count,
         b.bookmark_count,
-        b.view_count
+        b.view_count,
+        b.folder_ids,
+        b.folder_names
       FROM bookmarks b
       ${where}
       ${bookmarkSortClause(filters.sort)}
@@ -498,7 +550,9 @@ export async function exportBookmarksForSyncSeed(): Promise<BookmarkRecord[]> {
         b.quote_count,
         b.bookmark_count,
         b.view_count,
-        b.links_json
+        b.links_json,
+        b.folder_ids,
+        b.folder_names
       FROM bookmarks b
       ${bookmarkSortClause('desc')}
     `;
@@ -529,6 +583,8 @@ export async function exportBookmarksForSyncSeed(): Promise<BookmarkRecord[]> {
         viewCount: row[19] as number | undefined,
       },
       links: parseJsonArray(row[20]),
+      folderIds: parseJsonArray(row[21]),
+      folderNames: parseJsonArray(row[22]),
       tags: [],
       ingestedVia: 'graphql',
     }));
@@ -567,7 +623,9 @@ export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem 
         b.reply_count,
         b.quote_count,
         b.bookmark_count,
-        b.view_count
+        b.view_count,
+        b.folder_ids,
+        b.folder_names
       FROM bookmarks b
       WHERE b.id = ?
       LIMIT 1`,
@@ -731,6 +789,27 @@ export async function getDomainCounts(): Promise<Record<string, number>> {
     const counts: Record<string, number> = {};
     for (const row of rows[0]?.values ?? []) {
       counts[row[0] as string] = row[1] as number;
+    }
+    return counts;
+  } finally {
+    db.close();
+  }
+}
+
+export async function getFolderCounts(): Promise<Record<string, number>> {
+  const dbPath = twitterBookmarksIndexPath();
+  const db = await openDb(dbPath);
+  ensureMigrations(db);
+  try {
+    const rows = db.exec(
+      `SELECT folder_names FROM bookmarks WHERE folder_names IS NOT NULL AND folder_names != ''`
+    );
+    const counts: Record<string, number> = {};
+    for (const row of rows[0]?.values ?? []) {
+      const names = parseJsonArray(row[0]);
+      for (const name of names) {
+        counts[name] = (counts[name] ?? 0) + 1;
+      }
     }
     return counts;
   } finally {
