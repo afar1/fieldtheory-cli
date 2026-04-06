@@ -44,29 +44,43 @@ function getMacOSChromeKey(): Buffer {
 }
 
 /**
- * Derive the AES key Chrome uses on Linux to encrypt cookies.
+ * The two AES keys Chrome may use on Linux, selected per-cookie by prefix:
  *
- * Chrome on Linux stores an encryption password in the GNOME Secret Service
- * (via libsecret / secret-tool) under the key `application=chrome`.  It then
- * derives a 16-byte AES-128 key with PBKDF2-HMAC-SHA1, salt "saltysalt",
- * and **1 iteration** (vs. 1003 on macOS).  When no keyring is available
- * Chrome falls back to the hard-coded password "peanuts".
+ *  - `v10` cookies were encrypted with the hard-coded password "peanuts"
+ *    (used before keyring integration, or when no keyring is available).
+ *  - `v11` cookies were encrypted with a password stored in the GNOME
+ *    Secret Service (via `secret-tool lookup application chrome`).
+ *
+ * Both use PBKDF2-HMAC-SHA1 with salt "saltysalt" and **1 iteration**
+ * (vs. 1003 on macOS).  The prefix in each cookie's encrypted_value
+ * determines which key to use — they are not interchangeable.
  */
-function getLinuxChromeKey(): Buffer {
-  // Try GNOME Secret Service first (works on GNOME / KDE with libsecret).
+interface LinuxChromeKeys {
+  v10Key: Buffer; // "peanuts" key — for cookies with v10 prefix
+  v11Key: Buffer; // keyring key  — for cookies with v11 prefix
+}
+
+function getLinuxChromeKeys(): LinuxChromeKeys {
+  // v10 always uses the hard-coded "peanuts" password.
+  const v10Key = pbkdf2Sync('peanuts', 'saltysalt', 1, 16, 'sha1');
+
+  // v11 uses the password stored in the GNOME Secret Service.
+  // Fall back to "peanuts" if no keyring entry is found (e.g. headless systems),
+  // which means v11 cookies won't decrypt — but that matches Chrome's own
+  // behavior (it only writes v11 cookies when the keyring is available).
+  let v11Key = v10Key;
   try {
     const pw = execFileSync(
       'secret-tool',
       ['lookup', 'application', 'chrome'],
       { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 }
     ).trim();
-    if (pw) return pbkdf2Sync(pw, 'saltysalt', 1, 16, 'sha1');
+    if (pw) v11Key = pbkdf2Sync(pw, 'saltysalt', 1, 16, 'sha1');
   } catch {
-    // secret-tool not installed or no entry — fall through to hard-coded default.
+    // secret-tool not installed or no keyring entry.
   }
 
-  // Chrome's hard-coded fallback password when no keyring is present.
-  return pbkdf2Sync('peanuts', 'saltysalt', 1, 16, 'sha1');
+  return { v10Key, v11Key };
 }
 
 function sanitizeCookieValue(name: string, value: string): string {
@@ -97,18 +111,39 @@ function sanitizeCookieValue(name: string, value: string): string {
   return cleaned;
 }
 
-export function decryptCookieValue(encryptedValue: Buffer, key: Buffer, dbVersion = 0): string {
+/**
+ * Decrypt a single Chrome cookie value.
+ *
+ * @param encryptedValue  Raw bytes from the `encrypted_value` column.
+ * @param key             AES key for `v10`-prefixed cookies (macOS) or the
+ *                        caller's chosen key.  On Linux, pass the `v10Key`
+ *                        here and supply `v11Key` separately.
+ * @param dbVersion       Chrome cookie DB schema version (from the `meta`
+ *                        table); >= 24 means a 32-byte SHA256(host_key) prefix
+ *                        is prepended to the plaintext (Chrome ~130+).
+ * @param v11Key          Optional separate key for `v11`-prefixed cookies
+ *                        (Linux keyring key).  When omitted, `key` is used
+ *                        for both prefixes (correct for macOS where only
+ *                        `v10` exists).
+ */
+export function decryptCookieValue(
+  encryptedValue: Buffer,
+  key: Buffer,
+  dbVersion = 0,
+  v11Key?: Buffer,
+): string {
   if (encryptedValue.length === 0) return '';
 
-  // Prefix is "v10" (macOS) or "v11" (Linux). Both use the same AES-128-CBC
-  // scheme; only the key-derivation parameters differ between platforms.
   const isV10 = encryptedValue[0] === 0x76 && encryptedValue[1] === 0x31 && encryptedValue[2] === 0x30;
   const isV11 = encryptedValue[0] === 0x76 && encryptedValue[1] === 0x31 && encryptedValue[2] === 0x31;
 
   if (isV10 || isV11) {
+    // On Linux v10 and v11 use different keys; on macOS only v10 exists and
+    // both parameters point to the same key.
+    const decryptKey = isV11 && v11Key ? v11Key : key;
     const iv = Buffer.alloc(16, 0x20); // 16 spaces
     const ciphertext = encryptedValue.subarray(3);
-    const decipher = createDecipheriv('aes-128-cbc', key, iv);
+    const decipher = createDecipheriv('aes-128-cbc', decryptKey, iv);
     let decrypted = decipher.update(ciphertext);
     decrypted = Buffer.concat([decrypted, decipher.final()]);
 
@@ -216,7 +251,18 @@ export function extractChromeXCookies(
   }
 
   const dbPath = join(chromeUserDataDir, profileDirectory, 'Cookies');
-  const key = os === 'linux' ? getLinuxChromeKey() : getMacOSChromeKey();
+
+  // On Linux, v10 and v11 cookies use different keys; derive both up front.
+  // On macOS only v10 exists, so a single key suffices (v11Key stays undefined).
+  let key: Buffer;
+  let v11Key: Buffer | undefined;
+  if (os === 'linux') {
+    const linuxKeys = getLinuxChromeKeys();
+    key = linuxKeys.v10Key;
+    v11Key = linuxKeys.v11Key;
+  } else {
+    key = getMacOSChromeKey();
+  }
 
   let result = queryCookies(dbPath, '.x.com', ['ct0', 'auth_token']);
   if (result.cookies.length === 0) {
@@ -228,7 +274,7 @@ export function extractChromeXCookies(
     const hexVal = cookie.encrypted_value_hex;
     if (hexVal && hexVal.length > 0) {
       const buf = Buffer.from(hexVal, 'hex');
-      decrypted.set(cookie.name, decryptCookieValue(buf, key, result.dbVersion));
+      decrypted.set(cookie.name, decryptCookieValue(buf, key, result.dbVersion, v11Key));
     } else if (cookie.value) {
       decrypted.set(cookie.name, cookie.value);
     }
