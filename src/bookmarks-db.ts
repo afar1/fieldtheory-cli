@@ -6,7 +6,7 @@ import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 export interface SearchResult {
   id: string;
@@ -213,6 +213,24 @@ function initSchema(db: Database): void {
     tokenize='porter unicode61'
   )`);
 
+  db.run(`CREATE TABLE IF NOT EXISTS x_bookmark_folders (
+    label TEXT PRIMARY KEY,
+    folder_name TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS x_bookmark_folder_sync (
+    tweet_id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    last_attempted_at TEXT,
+    completed_at TEXT
+  )`);
+
   db.run(`REPLACE INTO meta VALUES ('schema_version', '${SCHEMA_VERSION}')`);
 }
 
@@ -236,9 +254,34 @@ function ensureMigrations(db: Database): void {
       try { db.run('ALTER TABLE bookmarks ADD COLUMN quoted_tweet_json TEXT'); } catch { /* already exists */ }
     }
   }
+  if (version < 5) {
+    db.run(`CREATE TABLE IF NOT EXISTS x_bookmark_folders (
+      label TEXT PRIMARY KEY,
+      folder_name TEXT NOT NULL,
+      folder_id TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`);
+    db.run(`CREATE TABLE IF NOT EXISTS x_bookmark_folder_sync (
+      tweet_id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      folder_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      last_attempted_at TEXT,
+      completed_at TEXT
+    )`);
+  }
   if (version < SCHEMA_VERSION) {
     db.run(`REPLACE INTO meta VALUES ('schema_version', '${SCHEMA_VERSION}')`);
   }
+}
+
+export async function openBookmarksIndexDb(): Promise<Database> {
+  const dbPath = twitterBookmarksIndexPath();
+  const db = await openDb(dbPath);
+  ensureMigrations(db);
+  return db;
 }
 
 interface PreservedBookmarkFields {

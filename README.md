@@ -36,6 +36,7 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | Command | Description |
 |---------|-------------|
 | `ft sync` | Download and sync bookmarks (no API required) |
+| `ft sync --folders` | Sync bookmarks, then push local classifications into X bookmark folders |
 | `ft sync --full` | Full history crawl (not just incremental) |
 | `ft sync --gaps` | Backfill missing quoted tweets and expand truncated articles |
 | `ft sync --classify` | Sync then classify new bookmarks with LLM |
@@ -110,6 +111,27 @@ Then ask your agent:
 
 Works with Claude Code, Codex, or any agent with shell access.
 
+## Folder sync
+
+Use your local classifications to organize bookmarks back into X bookmark folders:
+
+```bash
+# Sync inbound bookmarks, then make bounded folder progress
+ft sync --folders
+
+# Preview the broad folders that would be created
+ft folders sync --dry-run
+
+# Resume the backlog until everything eligible has been assigned
+ft folders sync --until-done
+```
+
+Defaults:
+
+- Organizes by `primary_domain`
+- Only creates broad folders with at least 100 bookmarks
+- Adds missing bookmark-to-folder assignments only; it never removes bookmarks from folders
+
 ## Scheduling
 
 ```bash
@@ -118,6 +140,9 @@ Works with Claude Code, Codex, or any agent with shell access.
 
 # Sync and classify every morning
 0 7 * * * ft sync --classify
+
+# Sync inbound bookmarks and make bounded folder progress every morning
+0 7 * * * ft sync --folders
 ```
 
 ## Data
