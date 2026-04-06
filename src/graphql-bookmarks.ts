@@ -156,7 +156,17 @@ interface PageResult {
   nextCursor?: string;
 }
 
-export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRecord | null {
+export function snowflakeToISOString(snowflake: string): string | null {
+  if (!snowflake || !/^\d+$/.test(snowflake)) return null;
+  try {
+    const timestamp = Number(BigInt(snowflake) >> 22n) + 1288834974657;
+    return new Date(timestamp).toISOString();
+  } catch {
+    return null;
+  }
+}
+
+export function convertTweetToRecord(tweetResult: any, now: string, bookmarkedAt?: string | null): BookmarkRecord | null {
   const tweet = tweetResult.tweet ?? tweetResult;
   const legacy = tweet?.legacy;
   if (!legacy) return null;
@@ -223,7 +233,7 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
     authorProfileImageUrl,
     author,
     postedAt: legacy.created_at ?? null,
-    bookmarkedAt: null,
+    bookmarkedAt: bookmarkedAt ?? null,
     syncedAt: now,
     conversationId: legacy.conversation_id_str,
     inReplyToStatusId: legacy.in_reply_to_status_id_str,
@@ -270,7 +280,8 @@ export function parseBookmarksResponse(json: any, now?: string): PageResult {
     const tweetResult = entry?.content?.itemContent?.tweet_results?.result;
     if (!tweetResult) continue;
 
-    const record = convertTweetToRecord(tweetResult, ts);
+    const bookmarkedAt = snowflakeToISOString(entry.sortIndex);
+    const record = convertTweetToRecord(tweetResult, ts, bookmarkedAt);
     if (record) records.push(record);
   }
 
