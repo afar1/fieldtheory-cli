@@ -303,6 +303,59 @@ test('syncBookmarkFolders recovers folder id by re-listing folders after create 
   assert.equal(requests.some((url) => url.includes('/createBookmarkFolder')), true);
 });
 
+test('syncBookmarkFolders persists resumable state to disk', async () => {
+  await setupFolderFixture();
+
+  await syncBookmarkFolders({
+    minFolderSize: 2,
+    maxActions: 0,
+    sleep: async () => {},
+    session: {
+      csrfToken: 'csrf',
+      cookieHeader: 'ct0=csrf; auth_token=token',
+      userAgent: 'TestAgent/1.0',
+      headers: {},
+      transactionIdGenerator: { generate: async () => 'txid-789' },
+    },
+    fetchImpl: async (input: string | URL) => {
+      const url = String(input);
+
+      if (url.includes('/BookmarkFoldersSlice')) {
+        return new Response(JSON.stringify({
+          data: {
+            viewer: {
+              user_results: {
+                result: {
+                  bookmark_collections_slice: {
+                    items: [{ id: 'folder-1', name: 'AI', media: { media_key: '3_1' } }],
+                  },
+                },
+              },
+            },
+          },
+        }), { status: 200 });
+      }
+
+      if (url.includes('/BookmarkFolderTimeline')) {
+        return new Response(JSON.stringify(makeTimelineResponse([])), { status: 200 });
+      }
+
+      throw new Error(`Unexpected request: ${url}`);
+    },
+  });
+
+  const db = await openBookmarksIndexDb();
+  try {
+    const folders = db.exec(`SELECT label, folder_id FROM x_bookmark_folders ORDER BY label`);
+    assert.deepEqual(folders[0].values, [['ai', 'folder-1']]);
+
+    const syncRows = db.exec(`SELECT tweet_id, status FROM x_bookmark_folder_sync ORDER BY tweet_id`);
+    assert.deepEqual(syncRows[0].values, [['1', 'pending'], ['2', 'pending']]);
+  } finally {
+    db.close();
+  }
+});
+
 test('openBookmarksIndexDb exposes folder sync tables after migration', async () => {
   await setupFolderFixture();
   const db = await openBookmarksIndexDb();

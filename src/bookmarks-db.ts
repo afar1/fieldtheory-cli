@@ -248,6 +248,7 @@ function ensureMigrations(db: Database): void {
       db.run('CREATE INDEX IF NOT EXISTS idx_bookmarks_domain ON bookmarks(primary_domain)');
     }
   }
+
   if (version < 4) {
     const tableExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'");
     if (tableExists.length && tableExists[0].values.length > 0) {
