@@ -18,10 +18,13 @@ Requires Node.js 20+. Chrome recommended for session sync; OAuth available for a
 # 1. Sync your bookmarks (needs Chrome logged into X)
 ft sync
 
-# 2. Search them
+# 2. Browse them interactively (needs fzf)
+ft browse
+
+# 3. Search them
 ft search "distributed systems"
 
-# 3. Explore
+# 4. Explore trends
 ft viz
 ft categories
 ft stats
@@ -47,8 +50,10 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | Command | Description |
 |---------|-------------|
 | `ft search <query>` | Full-text search with BM25 ranking |
+| `ft browse` | Interactive browser with live preview (needs `fzf`) |
 | `ft list` | Filter by author, date, category, domain |
 | `ft show <id>` | Show one bookmark in detail |
+| `ft show <id> --open` | Show details and open in your default browser |
 | `ft sample <category>` | Random sample from a category |
 | `ft stats` | Top authors, languages, date range |
 | `ft viz` | Terminal dashboard with sparklines, categories, and domains |
@@ -87,7 +92,7 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 
 | Command | Description |
 |---------|-------------|
-| `ft index` | Rebuild search index from JSONL cache (preserves classifications) |
+| `ft index` | Merge new bookmarks into search index (preserves classifications) |
 | `ft fetch-media` | Download media assets (static images only) |
 | `ft status` | Show sync status and data location |
 | `ft path` | Print data directory path |
