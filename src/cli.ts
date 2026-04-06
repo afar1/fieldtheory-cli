@@ -20,6 +20,7 @@ import {
 } from './bookmarks-db.js';
 import { formatClassificationSummary } from './bookmark-classify.js';
 import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm.js';
+import { enrichBookmarks, getEnrichmentStats } from './bookmark-enrich.js';
 import { renderViz } from './bookmarks-viz.js';
 import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath } from './paths.js';
 import fs from 'node:fs';
@@ -255,6 +256,7 @@ export function buildCli() {
         if (useApi) {
           const result = await syncTwitterBookmarks(mode, {
             targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
+            maxPages: typeof options.maxPages === 'number' && !Number.isNaN(options.maxPages) ? options.maxPages : undefined,
           });
           console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
           console.log(`  \u2713 Data: ${dataDir()}\n`);
@@ -499,6 +501,56 @@ export function buildCli() {
         },
       });
       console.log(`\nDomains: ${result.classified}/${result.totalUnclassified} classified`);
+    }));
+
+  // ── enrich ──────────────────────────────────────────────────────────────
+
+  program
+    .command('enrich')
+    .description('Fetch linked article content for link-heavy bookmarks (makes them searchable)')
+    .option('--limit <n>', 'Max bookmarks to process', (v: string) => Number(v), 50)
+    .option('--force', 'Re-enrich already-processed bookmarks', false)
+    .option('--status', 'Show enrichment stats without fetching', false)
+    .option('--chrome-user-data-dir <path>', 'Chrome user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome profile name')
+    .action(safe(async (options) => {
+      if (!requireIndex()) return;
+
+      if (options.status) {
+        const stats = await getEnrichmentStats();
+        console.log(`  Bookmarks:      ${stats.total}`);
+        console.log(`  Enriched:       ${stats.enriched}`);
+        console.log(`  With articles:  ${stats.withArticles}`);
+        console.log(`  Pending:        ${stats.pending}`);
+        return;
+      }
+
+      const start = Date.now();
+      process.stderr.write('  Enriching link-heavy bookmarks with article content...\n');
+
+      const result = await enrichBookmarks({
+        limit: Number(options.limit) || 50,
+        force: Boolean(options.force),
+        chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+        chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+        onProgress: (done: number, total: number, msg?: string) => {
+          const elapsed = Math.round((Date.now() - start) / 1000);
+          process.stderr.write(`\r\x1b[K  ${done}/${total} \u2502 ${elapsed}s \u2502 ${msg ?? ''}`);
+        },
+      });
+
+      process.stderr.write('\n');
+      console.log(`\n  \u2713 ${result.enriched} bookmarks enriched with article content`);
+      if (result.skipped > 0) console.log(`  \u2022 ${result.skipped} skipped (no external links or enough text)`);
+      if (result.failed > 0) console.log(`  \u2022 ${result.failed} failed (could not fetch content)`);
+      for (const warning of result.warnings) {
+        const formatted = warning
+          .split('\n')
+          .map((line) => `  ${line}`)
+          .join('\n');
+        console.log(`\n${formatted}`);
+      }
+      if (result.enriched > 0) console.log(`\n  Enriched articles are now searchable via: ft search "query"`);
     }));
 
   // ── categories ──────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ import { loadChromeSessionConfig } from './config.js';
 import { extractChromeXCookies } from './chrome-cookies.js';
 import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkRecord } from './types.js';
 import { exportBookmarksForSyncSeed } from './bookmarks-db.js';
+import { normalizeTimestamp } from './dates.js';
 
 const X_PUBLIC_BEARER =
   'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
@@ -204,7 +205,7 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
     videoVariants: Array.isArray(m.video_info?.variants)
       ? m.video_info.variants
           .filter((v: any) => v.content_type === 'video/mp4')
-          .map((v: any) => ({ bitrate: v.bitrate, url: v.url }))
+          .map((v: any) => ({ bitrate: v.bitrate, contentType: v.content_type, url: v.url }))
       : undefined,
   }));
 
@@ -222,7 +223,7 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
     authorName,
     authorProfileImageUrl,
     author,
-    postedAt: legacy.created_at ?? null,
+    postedAt: normalizeTimestamp(legacy.created_at),
     bookmarkedAt: null,
     syncedAt: now,
     conversationId: legacy.conversation_id_str,

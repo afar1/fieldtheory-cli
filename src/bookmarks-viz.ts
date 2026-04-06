@@ -148,7 +148,9 @@ async function queryVizData(): Promise<VizData> {
   try {
     const total = db.exec('SELECT COUNT(*) FROM bookmarks')[0]?.values[0]?.[0] as number;
     const authors = db.exec('SELECT COUNT(DISTINCT author_handle) FROM bookmarks')[0]?.values[0]?.[0] as number;
-    const range = db.exec('SELECT MIN(posted_at), MAX(posted_at) FROM bookmarks WHERE posted_at IS NOT NULL')[0]?.values[0];
+    const range = db.exec(
+      'SELECT MIN(COALESCE(bookmarked_at, posted_at)), MAX(COALESCE(bookmarked_at, posted_at)) FROM bookmarks WHERE COALESCE(bookmarked_at, posted_at) IS NOT NULL'
+    )[0]?.values[0];
 
     const topAuthorsRows = db.exec(
       `SELECT author_handle, COUNT(*) as c FROM bookmarks
@@ -156,29 +158,23 @@ async function queryVizData(): Promise<VizData> {
        GROUP BY author_handle ORDER BY c DESC LIMIT 20`
     );
 
-    // Twitter date format: "Sat Mar 28 18:55:23 +0000 2026"
-    // Year is at end (-4), month name at 5-7, hour at 12-13
-
-    // Build a synthetic YYYY-MonName from the twitter date parts
     const monthlyRows = db.exec(
       `SELECT
-         substr(bookmarked_at, -4) || '-' || substr(bookmarked_at, 5, 3) as ym,
+         substr(COALESCE(bookmarked_at, posted_at), 1, 7) as ym,
          COUNT(*) as c
-       FROM bookmarks WHERE bookmarked_at IS NOT NULL
+       FROM bookmarks WHERE COALESCE(bookmarked_at, posted_at) IS NOT NULL
        GROUP BY ym ORDER BY ym`
     );
 
-    // Day of week — first 3 chars
     const dowRows = db.exec(
-      `SELECT substr(bookmarked_at, 1, 3) as dow, COUNT(*) as c
-       FROM bookmarks WHERE bookmarked_at IS NOT NULL
-       GROUP BY dow ORDER BY c DESC`
+      `SELECT CAST(strftime('%w', COALESCE(bookmarked_at, posted_at)) AS INTEGER) as dow, COUNT(*) as c
+       FROM bookmarks WHERE COALESCE(bookmarked_at, posted_at) IS NOT NULL
+       GROUP BY dow ORDER BY dow`
     );
 
-    // Hour of day — chars 12-13
     const hourRows = db.exec(
-      `SELECT CAST(substr(bookmarked_at, 12, 2) AS INTEGER) as h, COUNT(*) as c
-       FROM bookmarks WHERE bookmarked_at IS NOT NULL AND length(bookmarked_at) > 13
+      `SELECT CAST(strftime('%H', COALESCE(bookmarked_at, posted_at)) AS INTEGER) as h, COUNT(*) as c
+       FROM bookmarks WHERE COALESCE(bookmarked_at, posted_at) IS NOT NULL
        GROUP BY h ORDER BY h`
     );
 
@@ -219,22 +215,44 @@ async function queryVizData(): Promise<VizData> {
 
     const avgLen = db.exec('SELECT AVG(length(text)) FROM bookmarks')[0]?.values[0]?.[0] as number;
 
-    // Recent 30 days top authors
-    const recentAuthorsRows = db.exec(
-      `SELECT author_handle, COUNT(*) as c FROM bookmarks
-       WHERE author_handle IS NOT NULL
-       AND bookmarked_at >= (SELECT MAX(bookmarked_at) FROM bookmarks)
-       GROUP BY author_handle ORDER BY c DESC LIMIT 10`
-    );
+    const latestActivity = db.exec(
+      `SELECT MAX(COALESCE(bookmarked_at, posted_at)) FROM bookmarks
+       WHERE COALESCE(bookmarked_at, posted_at) IS NOT NULL`
+    )[0]?.values[0]?.[0] as string | null;
+    const recentCutoff = latestActivity
+      ? new Date(new Date(latestActivity).getTime() - 30 * 24 * 60 * 60 * 1000).toISOString()
+      : null;
+    const recentAuthorsRows = recentCutoff
+      ? db.exec(
+          `SELECT author_handle, COUNT(*) as c FROM bookmarks
+           WHERE author_handle IS NOT NULL
+           AND COALESCE(bookmarked_at, posted_at) >= ?
+           GROUP BY author_handle ORDER BY c DESC LIMIT 10`,
+          [recentCutoff]
+        )
+      : [];
 
     // Time capsules: oldest posts, one per year to spread the range
     const capsuleRows = db.exec(
-      `SELECT author_handle, text, tweet_id, posted_at, substr(posted_at, -4) as yr
-       FROM bookmarks
-       WHERE posted_at IS NOT NULL
-       AND CAST(substr(posted_at, -4) AS INTEGER) < 2023
-       GROUP BY substr(posted_at, -4)
-       ORDER BY posted_at ASC
+      `WITH ranked_capsules AS (
+         SELECT
+           author_handle,
+           text,
+           tweet_id,
+           COALESCE(posted_at, bookmarked_at) as effective_at,
+           substr(COALESCE(posted_at, bookmarked_at), 1, 4) as yr,
+           ROW_NUMBER() OVER (
+             PARTITION BY substr(COALESCE(posted_at, bookmarked_at), 1, 4)
+             ORDER BY COALESCE(posted_at, bookmarked_at) ASC, CAST(tweet_id AS INTEGER) ASC
+           ) as rn
+         FROM bookmarks
+         WHERE COALESCE(posted_at, bookmarked_at) IS NOT NULL
+         AND CAST(substr(COALESCE(posted_at, bookmarked_at), 1, 4) AS INTEGER) < 2023
+       )
+       SELECT author_handle, text, tweet_id, effective_at, yr
+       FROM ranked_capsules
+       WHERE rn = 1
+       ORDER BY effective_at ASC
        LIMIT 8`
     );
     const timeCapsules: GemBookmark[] = (capsuleRows[0]?.values ?? []).map((r) => ({
@@ -266,9 +284,9 @@ async function queryVizData(): Promise<VizData> {
 
     // Rising voices: authors with 3+ bookmarks, all from the most recent month
     const latestMonth = db.exec(
-      `SELECT substr(bookmarked_at, -4) || '-' || substr(bookmarked_at, 5, 3)
-       FROM bookmarks WHERE bookmarked_at IS NOT NULL
-       ORDER BY bookmarked_at DESC LIMIT 1`
+      `SELECT substr(COALESCE(bookmarked_at, posted_at), 1, 7)
+       FROM bookmarks WHERE COALESCE(bookmarked_at, posted_at) IS NOT NULL
+       ORDER BY COALESCE(bookmarked_at, posted_at) DESC LIMIT 1`
     )[0]?.values[0]?.[0] as string | undefined;
 
     let risingVoices: { handle: string; count: number }[] = [];
@@ -278,7 +296,7 @@ async function queryVizData(): Promise<VizData> {
          WHERE author_handle IS NOT NULL
          GROUP BY author_handle
          HAVING c >= 3
-         AND MIN(substr(bookmarked_at, -4) || '-' || substr(bookmarked_at, 5, 3)) = ?
+         AND MIN(substr(COALESCE(bookmarked_at, posted_at), 1, 7)) = ?
          ORDER BY c DESC LIMIT 8`,
         [latestMonth]
       );
@@ -288,16 +306,14 @@ async function queryVizData(): Promise<VizData> {
       }));
     }
 
-    // Convert "2026-Mar" to "2026-03" for proper sorting
-    const monthNumMap: Record<string, string> = {
-      Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06',
-      Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12',
-    };
     const rawMonthly = (monthlyRows[0]?.values ?? []).map((r) => {
-      const raw = r[0] as string; // "2026-Mar"
-      const [year, monName] = raw.split('-');
-      const num = monthNumMap[monName] ?? '00';
-      return { month: `${year}-${num}`, label: `${monName} ${year}`, count: r[1] as number };
+      const raw = r[0] as string;
+      const [year, month] = raw.split('-');
+      const labelDate = new Date(`${raw}-01T00:00:00Z`);
+      const label = Number.isNaN(labelDate.getTime())
+        ? raw
+        : labelDate.toLocaleString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+      return { month: raw, label, count: r[1] as number };
     });
     rawMonthly.sort((a, b) => a.month.localeCompare(b.month));
 
@@ -344,10 +360,14 @@ async function queryVizData(): Promise<VizData> {
         month: r.label,
         count: r.count,
       })),
-      dayOfWeekActivity: (dowRows[0]?.values ?? []).map((r) => ({
-        day: r[0] as string,
-        count: r[1] as number,
-      })),
+      dayOfWeekActivity: (dowRows[0]?.values ?? []).map((r) => {
+        const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        const dayIndex = Number(r[0] ?? 0);
+        return {
+          day: dayNames[dayIndex] ?? 'Sun',
+          count: r[1] as number,
+        };
+      }),
       hourActivity: (hourRows[0]?.values ?? []).map((r) => ({
         hour: r[0] as number,
         count: r[1] as number,
@@ -671,8 +691,22 @@ function truncateText(text: string, max: number): string {
   return clean.slice(0, max - 1) + '…';
 }
 
-function twitterDateYear(date: string): string {
-  return date.slice(-4);
+function formatCapsuleDateParts(date: string): { year: string; monthDay: string } {
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) {
+    return {
+      year: date.slice(0, 4) || '????',
+      monthDay: date.slice(5, 10) || '??-??',
+    };
+  }
+  return {
+    year: parsed.getUTCFullYear().toString(),
+    monthDay: parsed.toLocaleString('en-US', {
+      month: 'short',
+      day: '2-digit',
+      timeZone: 'UTC',
+    }),
+  };
 }
 
 function renderTimeCapsules(data: VizData): string[] {
@@ -685,8 +719,7 @@ function renderTimeCapsules(data: VizData): string[] {
   lines.push('');
 
   for (const b of data.timeCapsules) {
-    const year = twitterDateYear(b.postedAt);
-    const monthDay = b.postedAt.slice(4, 10); // " Mar 28"
+    const { year, monthDay } = formatCapsuleDateParts(b.postedAt);
     const color = lerpColor([240, 200, 100], [200, 160, 80], 0.5);
     const url = `x.com/${b.author}/status/${b.tweetId}`;
     lines.push(`  ${color}${year}${RESET}${C.dim}${monthDay}${RESET}  ${C.text}@${b.author}${RESET}`);

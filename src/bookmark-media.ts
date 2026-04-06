@@ -79,12 +79,13 @@ export async function fetchBookmarkMediaBatch(
     if (bookmark.mediaObjects?.length) {
       for (const mo of bookmark.mediaObjects) {
         if (mo.type === 'video' || mo.type === 'animated_gif') {
-          const mp4s = (mo.variants ?? [])
-            .filter((v) => v.contentType === 'video/mp4' && v.url)
+          const mp4s = (mo.videoVariants ?? (mo as { variants?: typeof mo.videoVariants }).variants ?? [])
+            .filter((v) => (!v.contentType || v.contentType === 'video/mp4') && v.url)
             .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
           if (mp4s.length > 0 && mp4s[0].url) { mediaUrls.push(mp4s[0].url); continue; }
         }
-        if (mo.mediaUrl) mediaUrls.push(mo.mediaUrl);
+        const mediaUrl = mo.url ?? (mo as { mediaUrl?: string }).mediaUrl;
+        if (mediaUrl) mediaUrls.push(mediaUrl);
       }
     } else {
       mediaUrls.push(...(bookmark.media ?? []));

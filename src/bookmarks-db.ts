@@ -5,8 +5,9 @@ import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js
 import type { BookmarkRecord } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
+import { normalizeTimestamp } from './dates.js';
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 5;
 
 export interface SearchResult {
   id: string;
@@ -127,11 +128,11 @@ function buildBookmarkWhereClause(filters: BookmarkTimelineFilters): {
   }
   if (filters.after) {
     conditions.push(`COALESCE(b.posted_at, b.bookmarked_at) >= ?`);
-    params.push(filters.after);
+    params.push(normalizeTimestamp(filters.after) ?? filters.after);
   }
   if (filters.before) {
     conditions.push(`COALESCE(b.posted_at, b.bookmarked_at) <= ?`);
-    params.push(filters.before);
+    params.push(normalizeTimestamp(filters.before) ?? filters.before);
   }
   if (filters.category) {
     conditions.push(`b.categories LIKE ?`);
@@ -152,16 +153,12 @@ function bookmarkSortClause(direction: 'asc' | 'desc' = 'desc'): string {
   const normalized = direction === 'asc' ? 'ASC' : 'DESC';
   return `
     ORDER BY
-      CASE
-        WHEN b.bookmarked_at GLOB '____-__-__*' THEN b.bookmarked_at
-        WHEN b.posted_at GLOB '____-__-__*' THEN b.posted_at
-        ELSE ''
-      END ${normalized},
+      COALESCE(b.posted_at, b.bookmarked_at, b.synced_at, '') ${normalized},
       CAST(b.tweet_id AS INTEGER) ${normalized}
   `;
 }
 
-function initSchema(db: Database): void {
+function createCurrentSchema(db: Database): void {
   db.run(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)`);
 
   db.run(`CREATE TABLE IF NOT EXISTS bookmarks (
@@ -194,7 +191,11 @@ function initSchema(db: Database): void {
     primary_category TEXT,
     github_urls TEXT,
     domains TEXT,
-    primary_domain TEXT
+    primary_domain TEXT,
+    article_title TEXT,
+    article_text TEXT,
+    article_site TEXT,
+    enriched_at TEXT
   )`);
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_author ON bookmarks(author_handle)`);
@@ -207,6 +208,7 @@ function initSchema(db: Database): void {
     text,
     author_handle,
     author_name,
+    article_text,
     content=bookmarks,
     content_rowid=rowid,
     tokenize='porter unicode61'
@@ -215,21 +217,63 @@ function initSchema(db: Database): void {
   db.run(`REPLACE INTO meta VALUES ('schema_version', '${SCHEMA_VERSION}')`);
 }
 
-function ensureMigrations(db: Database): void {
-  // Ensure meta table exists (may not on a fresh/empty DB)
+function normalizeStoredDates(db: Database): void {
+  const rows = db.exec(`SELECT id, posted_at, bookmarked_at FROM bookmarks`);
+  const values = rows[0]?.values ?? [];
+  if (values.length === 0) return;
+
+  const stmt = db.prepare(`UPDATE bookmarks SET posted_at = ?, bookmarked_at = ? WHERE id = ?`);
+  for (const row of values) {
+    const id = row[0] as string;
+    const postedAt = normalizeTimestamp((row[1] as string | null) ?? null);
+    const bookmarkedAt = normalizeTimestamp((row[2] as string | null) ?? null);
+    if (postedAt !== row[1] || bookmarkedAt !== row[2]) {
+      stmt.run([postedAt, bookmarkedAt, id]);
+    }
+  }
+  stmt.free();
+}
+
+export function ensureMigrations(db: Database): void {
   db.run('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)');
+  const tableExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'");
+  if (!tableExists.length || tableExists[0].values.length === 0) {
+    createCurrentSchema(db);
+    return;
+  }
+
   const rows = db.exec("SELECT value FROM meta WHERE key = 'schema_version'");
   const version = rows.length ? Number(rows[0].values[0]?.[0] ?? 0) : 0;
   if (version < 3) {
-    // bookmarks table may not exist yet (first run before index build)
-    const tableExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'");
-    if (tableExists.length && tableExists[0].values.length > 0) {
-      try { db.run('ALTER TABLE bookmarks ADD COLUMN domains TEXT'); } catch { /* already exists */ }
-      try { db.run('ALTER TABLE bookmarks ADD COLUMN primary_domain TEXT'); } catch { /* already exists */ }
-      db.run('CREATE INDEX IF NOT EXISTS idx_bookmarks_domain ON bookmarks(primary_domain)');
-    }
+    try { db.run('ALTER TABLE bookmarks ADD COLUMN domains TEXT'); } catch { /* already exists */ }
+    try { db.run('ALTER TABLE bookmarks ADD COLUMN primary_domain TEXT'); } catch { /* already exists */ }
+    db.run('CREATE INDEX IF NOT EXISTS idx_bookmarks_domain ON bookmarks(primary_domain)');
     db.run("REPLACE INTO meta VALUES ('schema_version', '3')");
   }
+  if (version < 4) {
+    try { db.run('ALTER TABLE bookmarks ADD COLUMN article_title TEXT'); } catch { /* already exists */ }
+    try { db.run('ALTER TABLE bookmarks ADD COLUMN article_text TEXT'); } catch { /* already exists */ }
+    try { db.run('ALTER TABLE bookmarks ADD COLUMN article_site TEXT'); } catch { /* already exists */ }
+    try { db.run('ALTER TABLE bookmarks ADD COLUMN enriched_at TEXT'); } catch { /* already exists */ }
+    db.run('DROP TABLE IF EXISTS bookmarks_fts');
+    db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
+      text, author_handle, author_name, article_text,
+      content=bookmarks, content_rowid=rowid,
+      tokenize='porter unicode61'
+    )`);
+    db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
+    db.run("REPLACE INTO meta VALUES ('schema_version', '4')");
+  }
+  if (version < 5) {
+    normalizeStoredDates(db);
+    db.run("REPLACE INTO meta VALUES ('schema_version', '5')");
+  }
+
+  db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_author ON bookmarks(author_handle)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_posted ON bookmarks(posted_at)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_language ON bookmarks(language)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_category ON bookmarks(primary_category)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_domain ON bookmarks(primary_domain)`);
 }
 
 function insertRecord(db: Database, r: BookmarkRecord): void {
@@ -239,8 +283,11 @@ function insertRecord(db: Database, r: BookmarkRecord): void {
   const githubFromLinks = (r.links ?? []).filter((l) => /github\.com/i.test(l));
   const githubUrls = [...new Set([...githubMatches.map((m) => `https://${m}`), ...githubFromLinks])];
 
+  const postedAt = normalizeTimestamp(r.postedAt);
+  const bookmarkedAt = normalizeTimestamp(r.bookmarkedAt);
+
   db.run(
-    `INSERT OR REPLACE INTO bookmarks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT OR REPLACE INTO bookmarks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       r.id,
       r.tweetId,
@@ -249,8 +296,8 @@ function insertRecord(db: Database, r: BookmarkRecord): void {
       r.authorHandle ?? null,
       r.authorName ?? null,
       r.authorProfileImageUrl ?? null,
-      r.postedAt ?? null,
-      r.bookmarkedAt ?? null,
+      postedAt,
+      bookmarkedAt,
       r.syncedAt,
       r.conversationId ?? null,
       r.inReplyToStatusId ?? null,
@@ -272,6 +319,10 @@ function insertRecord(db: Database, r: BookmarkRecord): void {
       githubUrls.length ? JSON.stringify(githubUrls) : null,
       null, // domains — populated by classify-domains pass
       null, // primary_domain
+      null, // article_title — populated by enrich pass
+      null, // article_text
+      null, // article_site
+      null, // enriched_at
     ]
   );
 }
@@ -289,7 +340,6 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
       db.run('DROP TABLE IF EXISTS meta');
     }
 
-    initSchema(db);
     ensureMigrations(db);
 
     // Get existing IDs to skip
@@ -341,27 +391,28 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
       params.push(options.author);
     }
     if (options.after) {
-      conditions.push(`b.posted_at >= ?`);
-      params.push(options.after);
+      conditions.push(`COALESCE(b.posted_at, b.bookmarked_at) >= ?`);
+      params.push(normalizeTimestamp(options.after) ?? options.after);
     }
     if (options.before) {
-      conditions.push(`b.posted_at <= ?`);
-      params.push(options.before);
+      conditions.push(`COALESCE(b.posted_at, b.bookmarked_at) <= ?`);
+      params.push(normalizeTimestamp(options.before) ?? options.before);
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     // If we have an FTS query, use bm25 for ranking; otherwise sort by posted_at
+    // BM25 weights: text=5.0, author_handle=1.0, author_name=1.0, article_text=3.0
     const orderBy = options.query
-      ? `ORDER BY bm25(bookmarks_fts, 5.0, 1.0, 1.0) ASC`
-      : `ORDER BY b.posted_at DESC`;
+      ? `ORDER BY bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0) ASC`
+      : `ORDER BY COALESCE(b.posted_at, b.bookmarked_at) DESC`;
 
     // For FTS ranking we need to join with the FTS table for bm25
     let sql: string;
     if (options.query) {
       sql = `
-        SELECT b.id, b.url, b.text, b.author_handle, b.author_name, b.posted_at,
-               bm25(bookmarks_fts, 5.0, 1.0, 1.0) as score
+        SELECT b.id, b.url, b.text, b.author_handle, b.author_name, COALESCE(b.posted_at, b.bookmarked_at) as posted_at,
+               bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0) as score
         FROM bookmarks b
         JOIN bookmarks_fts ON bookmarks_fts.rowid = b.rowid
         ${where}
@@ -370,11 +421,11 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
       `;
     } else {
       sql = `
-        SELECT b.id, b.url, b.text, b.author_handle, b.author_name, b.posted_at,
+        SELECT b.id, b.url, b.text, b.author_handle, b.author_name, COALESCE(b.posted_at, b.bookmarked_at) as posted_at,
                0 as score
         FROM bookmarks b
         ${where}
-        ORDER BY b.posted_at DESC
+        ORDER BY COALESCE(b.posted_at, b.bookmarked_at) DESC
         LIMIT ?
       `;
     }
@@ -593,7 +644,9 @@ export async function getStats(): Promise<{
   try {
     const total = db.exec('SELECT COUNT(*) FROM bookmarks')[0]?.values[0]?.[0] as number;
     const authors = db.exec('SELECT COUNT(DISTINCT author_handle) FROM bookmarks')[0]?.values[0]?.[0] as number;
-    const range = db.exec('SELECT MIN(posted_at), MAX(posted_at) FROM bookmarks WHERE posted_at IS NOT NULL')[0]?.values[0];
+    const range = db.exec(
+      'SELECT MIN(COALESCE(posted_at, bookmarked_at)), MAX(COALESCE(posted_at, bookmarked_at)) FROM bookmarks WHERE COALESCE(posted_at, bookmarked_at) IS NOT NULL'
+    )[0]?.values[0];
 
     const topAuthorsRows = db.exec(
       `SELECT author_handle, COUNT(*) as c FROM bookmarks
