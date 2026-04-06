@@ -20,6 +20,7 @@ import {
   getFolderCounts,
   listBookmarks,
   getBookmarkById,
+  getFzfList,
 } from './bookmarks-db.js';
 import { formatClassificationSummary } from './bookmark-classify.js';
 import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm.js';
@@ -41,10 +42,16 @@ import { getPathReport } from './field-status.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { execSync, spawnSync } from 'node:child_process';
 
 configureHttpProxyFromEnv();
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Create a clickable terminal hyperlink (OSC 8) */
+function link(url: string, text?: string): string {
+  return `\x1b]8;;${url}\x1b\\${text ?? url}\x1b]8;;\x1b\\`;
+}
 
 const SPINNER = ['\u280b', '\u2819', '\u2839', '\u2838', '\u283c', '\u2834', '\u2826', '\u2827', '\u2807', '\u280f'];
 let spinnerIdx = 0;
@@ -381,7 +388,7 @@ export async function showDashboard(): Promise<void> {
     console.log(`
   \x1b[2mSync now:\x1b[0m     ft sync
   \x1b[2mSearch:\x1b[0m       ft search "query"
-  \x1b[2mExplore:\x1b[0m      ft viz
+  \x1b[2mExplore:\x1b[0m      ft viz, ft browse
   \x1b[2mAll commands:\x1b[0m  ft --help
 `);
   } catch {
@@ -1036,6 +1043,7 @@ export function buildCli() {
     .description('Show one bookmark in detail')
     .argument('<id>', 'Bookmark id')
     .option('--json', 'JSON output')
+    .option('--open', 'Open the bookmark URL in your default browser')
     .action(safe(async (id: string, options) => {
       if (!requireIndex()) return;
       const item = await getBookmarkById(String(id));
@@ -1044,19 +1052,61 @@ export function buildCli() {
         process.exitCode = 1;
         return;
       }
+      if (options.open) {
+        try {
+          execSync(`open "${item.url}"`);
+        } catch {
+          console.error(`  Error: Could not open browser for ${item.url}`);
+        }
+      }
       if (options.json) {
         console.log(JSON.stringify(item, null, 2));
         return;
       }
       console.log(`${item.id} \u00b7 ${item.authorHandle ? `@${item.authorHandle}` : '@?'}`);
-      console.log(item.url);
+      console.log(link(item.url));
       console.log(item.text);
       if (item.quotedTweet) {
         console.log(formatQuotedTweetLines(item.quotedTweet).join('\n'));
       }
-      if (item.links.length) console.log(`links: ${item.links.join(', ')}`);
-      if (item.categories) console.log(`categories: ${item.categories}`);
-      if (item.domains) console.log(`domains: ${item.domains}`);
+      if (item.links.length) console.log(`links: ${item.links.map(l => link(l)).join(', ')}`);
+      if (item.categories.length) console.log(`categories: ${item.categories.join(', ')}`);
+      if (item.domains.length) console.log(`domains: ${item.domains.join(', ')}`);
+    }));
+
+  // ── browse ──────────────────────────────────────────────────────────────
+
+  program
+    .command('browse')
+    .description('Interactive browser for your bookmarks using fzf')
+    .action(safe(async () => {
+      if (!requireIndex()) return;
+      const list = await getFzfList();
+      if (!list.length) {
+        console.log('  No bookmarks to browse. Run: ft sync');
+        return;
+      }
+
+      // We use a temporary command that fzf can call for the preview.
+      // The current binary is globally linked as 'ft'.
+      const fzf = spawnSync('fzf', [
+        '--layout=reverse',
+        '--header', 'Enter: View & Open | Ctrl-/: Toggle Preview | Ctrl-W: Resize | ESC: Quit',
+        '--preview', 'ft show {-1}',
+        '--preview-window', 'right:50%:wrap',
+        '--ansi',
+        '--bind', 'ctrl-/:change-preview-window(hidden|)',
+        '--bind', 'ctrl-w:change-preview-window(right,60%|right,70%|right,40%|right,50%)',
+        '--bind', 'enter:execute(ft show {-1} --open)+abort',
+      ], {
+        input: list.join('\n'),
+        stdio: ['pipe', 'inherit', 'inherit'],
+        encoding: 'utf-8',
+      });
+
+      const selected = fzf.stdout?.trim();
+      // fzf's execute() binding will naturally print the output of `ft show`
+      // before exiting, so we don't need to manually re-parse and print it here.
     }));
 
   // ── stats ───────────────────────────────────────────────────────────────

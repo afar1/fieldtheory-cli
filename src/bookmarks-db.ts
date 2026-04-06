@@ -773,6 +773,79 @@ export async function exportBookmarksForSyncSeed(): Promise<BookmarkRecord[]> {
   }
 }
 
+export async function getFzfList(): Promise<string[]> {
+  const dbPath = twitterBookmarksIndexPath();
+  const db = await openDb(dbPath);
+  ensureMigrations(db);
+
+  try {
+    const sql = `
+      SELECT
+        posted_at,
+        bookmarked_at,
+        author_handle,
+        text,
+        id,
+        tweet_id
+      FROM bookmarks
+    `;
+    const rows = db.exec(sql);
+    if (!rows.length) return [];
+
+    const items = rows[0].values.map((row) => {
+      const postedAtStr = row[0] as string | null;
+      const bookmarkedAtStr = row[1] as string | null;
+      const authorHandle = row[2] as string | null;
+      const text = row[3] as string | null;
+      const id = row[4] as string;
+      const tweetId = row[5] as string;
+
+      // Parse timestamp
+      let timestamp = 0;
+      if (bookmarkedAtStr && /^\d{4}-/.test(bookmarkedAtStr)) {
+        timestamp = new Date(bookmarkedAtStr).getTime();
+      } else if (postedAtStr) {
+        timestamp = new Date(postedAtStr).getTime();
+      }
+      
+      // Fallback to decoding the Snowflake ID
+      if (isNaN(timestamp) || timestamp === 0) {
+        try {
+          timestamp = Number(BigInt(tweetId) >> 22n) + 1288834974657;
+        } catch {
+          timestamp = 0;
+        }
+      }
+
+      const cleanText = String(text ?? '')
+        .replace(/\s+/g, ' ') // Collapse all whitespace including newlines
+        .trim()
+        .slice(0, 300);
+
+      return {
+        date: new Date(timestamp),
+        author: String(authorHandle ?? 'unknown').padEnd(15),
+        text: cleanText,
+        id,
+        timestamp
+      };
+    });
+
+    // Sort newest to oldest
+    items.sort((a, b) => b.timestamp - a.timestamp);
+
+    return items.map((item) => {
+      const yyyy = item.date.getFullYear();
+      const mm = String(item.date.getMonth() + 1).padStart(2, '0');
+      const dd = String(item.date.getDate()).padStart(2, '0');
+      const shortDate = isNaN(yyyy) ? '????-??-??' : `${yyyy}-${mm}-${dd}`;
+      return `[${shortDate}] @${item.author} ${item.text} ${item.id}`;
+    });
+  } finally {
+    db.close();
+  }
+}
+
 export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem | null> {
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);

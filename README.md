@@ -18,10 +18,13 @@ Requires Node.js 20+. A Chrome-family browser or Firefox is recommended for sess
 # 1. Sync your bookmarks (needs a supported browser logged into X)
 ft sync
 
-# 2. Search them
+# 2. Browse them interactively (needs fzf)
+ft browse
+
+# 3. Search them
 ft search "distributed systems"
 
-# 3. Explore
+# 4. Explore trends
 ft viz
 ft categories
 ft stats
@@ -52,9 +55,11 @@ On first run, `ft sync` extracts your X session from your browser and downloads 
 | Command | Description |
 |---------|-------------|
 | `ft search <query>` | Full-text search with BM25 ranking |
+| `ft browse` | Interactive browser with live preview (needs `fzf`) |
 | `ft list` | Filter by author, date, category, domain, or folder |
 | `ft list --folder <name>` | Show bookmarks in an X bookmark folder |
 | `ft show <id>` | Show one bookmark in detail |
+| `ft show <id> --open` | Show details and open in your default browser |
 | `ft sample <category>` | Random sample from a category |
 | `ft stats` | Top authors, languages, date range |
 | `ft viz` | Terminal dashboard with sparklines, categories, and domains |
