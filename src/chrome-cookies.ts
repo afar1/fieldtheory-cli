@@ -11,6 +11,7 @@ export interface ChromeCookieResult {
 
 function getMacOSChromeKey(): Buffer {
   const candidates = [
+    { service: 'Comet Safe Storage', account: 'Comet' },
     { service: 'Chrome Safe Storage', account: 'Chrome' },
     { service: 'Chrome Safe Storage', account: 'Google Chrome' },
     { service: 'Google Chrome Safe Storage', account: 'Chrome' },
