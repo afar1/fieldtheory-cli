@@ -467,6 +467,8 @@ export async function fetchBookmarkFolders(csrfToken: string, cookieHeader?: str
 export async function syncBookmarksGraphQL(
   options: SyncOptions = {}
 ): Promise<SyncResult> {
+  // Folder sync defaults to full crawl (incremental: false) because it needs to tag all
+  // bookmarks in the folder, not just new ones. Main timeline defaults to incremental.
   const incremental = options.folderId ? (options.incremental ?? false) : (options.incremental ?? true);
   const maxPages = options.maxPages ?? 500;
   const delayMs = options.delayMs ?? 600;
@@ -542,6 +544,8 @@ export async function syncBookmarksGraphQL(
     result.records.forEach((r) => allSeenIds.push(r.id));
     const reachedLatestStored = Boolean(newestKnownId) && result.records.some((record) => record.id === newestKnownId);
 
+    // Folder sync counts "touched" (enriched existing records) as progress,
+    // since its primary purpose is stamping folder metadata on existing bookmarks.
     stalePages = options.folderId
       ? (added === 0 && touched === 0 ? stalePages + 1 : 0)
       : (added === 0 ? stalePages + 1 : 0);
