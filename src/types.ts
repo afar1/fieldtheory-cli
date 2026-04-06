@@ -61,6 +61,8 @@ export interface BookmarkRecord {
   links?: string[];
   tags?: string[];
   ingestedVia?: 'api' | 'browser' | 'graphql';
+  folderIds?: string[];
+  folderNames?: string[];
 }
 
 export interface BookmarkCacheMeta {
@@ -78,6 +80,12 @@ export interface XOAuthTokenSet {
   scope?: string;
   token_type?: string;
   obtained_at: string;
+}
+
+export interface BookmarkFolder {
+  id: string;
+  name: string;
+  mediaUrl?: string;
 }
 
 export interface BookmarkBackfillState {

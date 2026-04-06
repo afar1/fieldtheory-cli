@@ -3,8 +3,12 @@ import { Command } from 'commander';
 import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
 import { runTwitterOAuthFlow } from './xauth.js';
-import { syncBookmarksGraphQL } from './graphql-bookmarks.js';
+import { syncBookmarksGraphQL, fetchBookmarkFolders } from './graphql-bookmarks.js';
 import type { SyncProgress } from './graphql-bookmarks.js';
+import { getFolderCounts } from './bookmarks-db.js';
+import type { BookmarkFolder } from './types.js';
+import { loadChromeSessionConfig } from './config.js';
+import { extractChromeXCookies } from './chrome-cookies.js';
 import { fetchBookmarkMediaBatch } from './bookmark-media.js';
 import {
   buildIndex,
@@ -178,13 +182,27 @@ function safe(fn: (...args: any[]) => Promise<void>): (...args: any[]) => Promis
   };
 }
 
+// ── Folder resolution ───────────────────────────────────────────────────────
+
+function resolveFolder(folders: BookmarkFolder[], query: string): BookmarkFolder {
+  const lower = query.toLowerCase();
+  const exact = folders.find(f => f.name.toLowerCase() === lower);
+  if (exact) return exact;
+  const prefix = folders.filter(f => f.name.toLowerCase().startsWith(lower));
+  if (prefix.length === 1) return prefix[0];
+  if (prefix.length > 1) {
+    throw new Error(`Multiple folders match "${query}": ${prefix.map(f => f.name).join(', ')}`);
+  }
+  throw new Error(`No folder matches "${query}". Available: ${folders.map(f => f.name).join(', ')}`);
+}
+
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
 export function buildCli() {
   const program = new Command();
 
-  async function rebuildIndex(added: number): Promise<number> {
-    if (added <= 0) return 0;
+  async function rebuildIndex(added: number, touched: number = 0): Promise<number> {
+    if (added + touched <= 0) return 0;
     process.stderr.write('  Building search index...\n');
     const idx = await buildIndex();
     process.stderr.write(`  \u2713 ${idx.recordCount} bookmarks indexed (${idx.newRecords} new)\n`);
@@ -243,7 +261,20 @@ export function buildCli() {
     .option('--max-minutes <n>', 'Max runtime in minutes', (v: string) => Number(v), 30)
     .option('--chrome-user-data-dir <path>', 'Chrome user-data directory')
     .option('--chrome-profile-directory <name>', 'Chrome profile name')
+    .option('--folder <name>', 'Sync bookmarks from a specific folder')
+    .option('--all-folders', 'Sync all folders plus main timeline')
     .action(async (options) => {
+      if (options.folder && options.allFolders) {
+        console.error('\n  Error: Cannot use --folder and --all-folders together.\n');
+        process.exitCode = 1;
+        return;
+      }
+      if ((options.folder || options.allFolders) && options.api) {
+        console.error('\n  Error: Folder sync requires Chrome session (GraphQL). Remove --api.\n');
+        process.exitCode = 1;
+        return;
+      }
+
       const firstRun = isFirstRun();
       if (firstRun) showSyncWelcome();
       ensureDataDir();
@@ -264,30 +295,103 @@ export function buildCli() {
             await classifyNew();
           }
         } else {
-          const startTime = Date.now();
-          const result = await syncBookmarksGraphQL({
-            incremental: !Boolean(options.full),
+          // Extract cookies once — reused for main sync and folder operations
+          const chromeConfig = loadChromeSessionConfig();
+          const chromeDir = options.chromeUserDataDir ? String(options.chromeUserDataDir) : chromeConfig.chromeUserDataDir;
+          const chromeProfile = options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : chromeConfig.chromeProfileDirectory;
+          const cookies = extractChromeXCookies(chromeDir, chromeProfile);
+
+          const commonSyncOpts = {
             maxPages: Number(options.maxPages) || 500,
-            targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
             delayMs: Number(options.delayMs) || 600,
             maxMinutes: Number(options.maxMinutes) || 30,
-            chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
-            chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
-            onProgress: (status: SyncProgress) => {
-              renderProgress(status, startTime);
-              if (status.done) process.stderr.write('\n');
-            },
-          });
+            csrfToken: cookies.csrfToken,
+            cookieHeader: cookies.cookieHeader,
+          };
 
-          console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
-          console.log(`  ${friendlyStopReason(result.stopReason)}`);
-          console.log(`  \u2713 Data: ${dataDir()}\n`);
+          // ── Main timeline sync (skip when --folder is specified) ────────
+          if (!options.folder && !options.allFolders) {
+            const startTime = Date.now();
+            const result = await syncBookmarksGraphQL({
+              ...commonSyncOpts,
+              incremental: !Boolean(options.full),
+              targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
+              onProgress: (status: SyncProgress) => {
+                renderProgress(status, startTime);
+                if (status.done) process.stderr.write('\n');
+              },
+            });
 
-          warnIfEmpty(result.totalBookmarks);
+            console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
+            console.log(`  ${friendlyStopReason(result.stopReason)}`);
+            console.log(`  \u2713 Data: ${dataDir()}\n`);
 
-          const newCount = await rebuildIndex(result.added);
-          if (options.classify && newCount > 0) {
-            await classifyNew();
+            warnIfEmpty(result.totalBookmarks);
+
+            const newCount = await rebuildIndex(result.added, result.touched);
+            if (options.classify && newCount > 0) {
+              await classifyNew();
+            }
+          }
+
+          // ── --all-folders: sync main timeline first, then all folders ──
+          if (options.allFolders) {
+            const startTime = Date.now();
+            const result = await syncBookmarksGraphQL({
+              ...commonSyncOpts,
+              incremental: !Boolean(options.full),
+              onProgress: (status: SyncProgress) => {
+                renderProgress(status, startTime);
+                if (status.done) process.stderr.write('\n');
+              },
+            });
+            console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
+            console.log(`  ${friendlyStopReason(result.stopReason)}`);
+          }
+
+          // ── Folder sync paths ──────────────────────────────────────────
+          if (options.allFolders || options.folder) {
+            const allFolders = await fetchBookmarkFolders(cookies.csrfToken, cookies.cookieHeader);
+
+            const foldersToSync: BookmarkFolder[] = [];
+            if (options.folder) {
+              foldersToSync.push(resolveFolder(allFolders, String(options.folder)));
+            } else {
+              foldersToSync.push(...allFolders);
+            }
+
+            let totalFolderAdded = 0;
+            let totalFolderTouched = 0;
+            const folderResults: { name: string; added: number; touched: number; total: number }[] = [];
+            for (const folder of foldersToSync) {
+              console.log(`\n  Syncing folder: ${folder.name}...`);
+              const folderStartTime = Date.now();
+              const folderResult = await syncBookmarksGraphQL({
+                ...commonSyncOpts,
+                folderId: folder.id,
+                folderName: folder.name,
+                onProgress: (status: SyncProgress) => {
+                  renderProgress(status, folderStartTime);
+                  if (status.done) process.stderr.write('\n');
+                },
+              });
+              folderResults.push({ name: folder.name, added: folderResult.added, touched: folderResult.touched, total: folderResult.totalBookmarks });
+              totalFolderAdded += folderResult.added;
+              totalFolderTouched += folderResult.touched;
+              // 2-second delay between folders to reduce rate limit risk
+              if (foldersToSync.indexOf(folder) < foldersToSync.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+              }
+            }
+
+            // Single rebuild after all folders complete
+            await rebuildIndex(totalFolderAdded, totalFolderTouched);
+
+            console.log(`\n  Folder sync results:`);
+            for (const fr of folderResults) {
+              const touchedStr = fr.touched > 0 ? `, ${fr.touched} enriched` : '';
+              console.log(`    ${fr.name.padEnd(24)} ${fr.added} new${touchedStr}`);
+            }
           }
         }
 
@@ -333,6 +437,7 @@ export function buildCli() {
     .option('--author <handle>', 'Filter by author handle')
     .option('--after <date>', 'Bookmarks posted after this date (YYYY-MM-DD)')
     .option('--before <date>', 'Bookmarks posted before this date (YYYY-MM-DD)')
+    .option('--folder <name>', 'Filter by bookmark folder')
     .option('--limit <n>', 'Max results', (v: string) => Number(v), 20)
     .action(safe(async (query: string, options) => {
       if (!requireIndex()) return;
@@ -341,6 +446,7 @@ export function buildCli() {
         author: options.author ? String(options.author) : undefined,
         after: options.after ? String(options.after) : undefined,
         before: options.before ? String(options.before) : undefined,
+        folder: options.folder ? String(options.folder) : undefined,
         limit: Number(options.limit) || 20,
       });
       console.log(formatSearchResults(results));
@@ -357,6 +463,7 @@ export function buildCli() {
     .option('--before <date>', 'Posted before (YYYY-MM-DD)')
     .option('--category <category>', 'Filter by category')
     .option('--domain <domain>', 'Filter by domain')
+    .option('--folder <name>', 'Filter by bookmark folder')
     .option('--limit <n>', 'Max results', (v: string) => Number(v), 30)
     .option('--offset <n>', 'Offset into results', (v: string) => Number(v), 0)
     .option('--json', 'JSON output')
@@ -369,6 +476,7 @@ export function buildCli() {
         before: options.before ? String(options.before) : undefined,
         category: options.category ? String(options.category) : undefined,
         domain: options.domain ? String(options.domain) : undefined,
+        folder: options.folder ? String(options.folder) : undefined,
         limit: Number(options.limit) || 30,
         offset: Number(options.offset) || 0,
       });
@@ -574,6 +682,45 @@ export function buildCli() {
       console.log(formatBookmarkStatus(view));
     }));
 
+  // ── folders ──────────────────────────────────────────────────────────────
+
+  program
+    .command('folders')
+    .description('List bookmark folders')
+    .option('--refresh', 'Fetch folder list from X (requires Chrome session)')
+    .action(safe(async (options) => {
+      // Try local counts first
+      let localCounts: Record<string, number> = {};
+      try {
+        localCounts = await getFolderCounts();
+      } catch { /* index may not exist */ }
+
+      if (Object.keys(localCounts).length > 0 && !options.refresh) {
+        console.log('  Bookmark folders (local index):\n');
+        const sorted = Object.entries(localCounts).sort((a, b) => b[1] - a[1]);
+        for (const [name, count] of sorted) {
+          console.log(`  ${name.padEnd(24)} ${String(count).padStart(5)}`);
+        }
+        console.log(`\n  Use --refresh to fetch the latest folder list from X.`);
+      } else {
+        const chromeConfig = loadChromeSessionConfig();
+        const cookies = extractChromeXCookies(chromeConfig.chromeUserDataDir, chromeConfig.chromeProfileDirectory);
+        const folders = await fetchBookmarkFolders(cookies.csrfToken, cookies.cookieHeader);
+        if (folders.length === 0) {
+          console.log('  No bookmark folders found.');
+          return;
+        }
+        console.log(`  ${folders.length} bookmark folders:\n`);
+        for (const f of folders) {
+          const localCount = localCounts[f.name];
+          const countStr = localCount != null ? `  (${localCount} synced)` : '';
+          console.log(`  ${f.name.padEnd(24)} id: ${f.id}${countStr}`);
+        }
+        console.log(`\n  Sync a folder:  ft sync --folder "Coding"`);
+        console.log(`  Sync all:       ft sync --all-folders`);
+      }
+    }));
+
   // ── path ────────────────────────────────────────────────────────────────
 
   program
@@ -624,7 +771,7 @@ export function buildCli() {
 
   const bookmarksAlias = program.command('bookmarks').description('(alias) Bookmark commands').helpOption(false);
   for (const cmd of ['sync', 'search', 'list', 'show', 'stats', 'viz', 'classify', 'classify-domains',
-    'categories', 'domains', 'index', 'auth', 'status', 'path', 'sample', 'fetch-media']) {
+    'categories', 'domains', 'folders', 'index', 'auth', 'status', 'path', 'sample', 'fetch-media']) {
     bookmarksAlias.command(cmd).description(`Alias for: ft ${cmd}`).allowUnknownOption(true)
       .action(async () => {
         const args = ['node', 'ft', cmd, ...process.argv.slice(4)];

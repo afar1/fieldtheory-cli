@@ -140,6 +140,7 @@ interface VizData {
   risingVoices: { handle: string; count: number }[];
   categories: { name: string; count: number }[];
   domains: { name: string; count: number }[];
+  folders: { name: string; count: number }[];
 }
 
 async function queryVizData(): Promise<VizData> {
@@ -329,6 +330,30 @@ async function queryVizData(): Promise<VizData> {
       }));
     } catch { /* column may not exist in v2 */ }
 
+    // Folders
+    let folders: { name: string; count: number }[] = [];
+    try {
+      const folderRows = db.exec(
+        `SELECT folder_names FROM bookmarks WHERE folder_names IS NOT NULL AND folder_names != ''`
+      );
+      const folderCounts = new Map<string, number>();
+      for (const row of folderRows[0]?.values ?? []) {
+        let names: string[] = [];
+        try {
+          const parsed = JSON.parse(row[0] as string);
+          names = Array.isArray(parsed) ? parsed.filter((s: unknown): s is string => typeof s === 'string') : [];
+        } catch {
+          names = (row[0] as string).split(',').map(s => s.trim()).filter(Boolean);
+        }
+        for (const name of names) {
+          folderCounts.set(name, (folderCounts.get(name) ?? 0) + 1);
+        }
+      }
+      folders = [...folderCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([name, count]) => ({ name, count }));
+    } catch { /* column may not exist */ }
+
     return {
       total,
       uniqueAuthors: authors,
@@ -368,6 +393,7 @@ async function queryVizData(): Promise<VizData> {
       risingVoices,
       categories,
       domains,
+      folders,
     };
   } finally {
     db.close();
@@ -635,6 +661,28 @@ function renderDomainBreakdown(data: VizData): string[] {
   return lines;
 }
 
+function renderFolders(data: VizData): string[] {
+  const lines: string[] = [];
+  if (data.folders.length === 0) return [];
+
+  const maxCount = data.folders[0].count;
+
+  lines.push('');
+  lines.push(`  ${C.gold}${BOLD}FOLDERS${RESET}`);
+  lines.push(`  ${C.dim}bookmark collections${RESET}`);
+  lines.push('');
+
+  for (let i = 0; i < data.folders.length; i++) {
+    const f = data.folders[i];
+    const barLen = Math.max(1, Math.round((f.count / maxCount) * 30));
+    const fade = Math.max(0.3, 1 - (i / data.folders.length) * 0.7);
+    const r = Math.round(240 * fade), g = Math.round(200 * fade), b = Math.round(100 * fade);
+    const barStr = rgb(r, g, b) + '\u2588'.repeat(barLen) + RESET;
+    lines.push(`  ${C.gold}${f.name.padEnd(18)}${RESET} ${barStr} ${C.dim}${f.count}${RESET}`);
+  }
+  return lines;
+}
+
 function renderFingerprint(data: VizData): string[] {
   const lines: string[] = [];
 
@@ -746,6 +794,7 @@ export async function renderViz(): Promise<string> {
     ...renderTopAuthors(data),
     ...renderCategories(data),
     ...renderDomainBreakdown(data),
+    ...renderFolders(data),
     ...renderActivity(data),
     ...renderDayOfWeek(data),
     ...renderHourOfDay(data),
