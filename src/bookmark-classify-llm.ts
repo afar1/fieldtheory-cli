@@ -27,18 +27,45 @@ interface LlmClassification {
 
 // ── Engine detection ────────────────────────────────────────────────────
 
-type Engine = 'claude' | 'codex';
+export const LLM_ENGINE_CHOICES = ['auto', 'claude', 'codex'] as const;
+export type LlmEngineSelection = typeof LLM_ENGINE_CHOICES[number];
+type Engine = Exclude<LlmEngineSelection, 'auto'>;
 
-function detectEngine(): Engine | null {
+function isEngineAvailable(engine: Engine): boolean {
   try {
-    execFileSync('which', ['claude'], { stdio: 'ignore' });
-    return 'claude';
-  } catch { /* not found */ }
-  try {
-    execFileSync('which', ['codex'], { stdio: 'ignore' });
-    return 'codex';
-  } catch { /* not found */ }
-  return null;
+    execFileSync('which', [engine], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getNoSupportedEngineError(): Error {
+  return new Error(
+    'No supported LLM CLI found.\n' +
+    'Install one of the following and log in:\n' +
+    '  - Claude Code: https://docs.anthropic.com/en/docs/claude-code\n' +
+    '  - Codex CLI:   https://github.com/openai/codex'
+  );
+}
+
+export function resolveLlmEngine(
+  selection: LlmEngineSelection = 'auto',
+  isAvailable: (engine: Engine) => boolean = isEngineAvailable,
+): Engine {
+  if (selection === 'auto') {
+    if (isAvailable('claude')) return 'claude';
+    if (isAvailable('codex')) return 'codex';
+    throw getNoSupportedEngineError();
+  }
+
+  if (isAvailable(selection)) return selection;
+
+  const alternatives = LLM_ENGINE_CHOICES.filter((engine) => engine !== selection).join('|');
+  throw new Error(
+    `Requested LLM engine "${selection}" is not available in PATH.\n` +
+    `Install it and log in, or choose a different engine with --engine ${alternatives}.`
+  );
 }
 
 function invokeEngine(engine: Engine, prompt: string): string {
@@ -139,17 +166,9 @@ export interface LlmClassifyResult {
 }
 
 export async function classifyWithLlm(
-  options: { onBatch?: (done: number, total: number) => void } = {},
+  options: { engine?: LlmEngineSelection; onBatch?: (done: number, total: number) => void } = {},
 ): Promise<LlmClassifyResult> {
-  const engine = detectEngine();
-  if (!engine) {
-    throw new Error(
-      'No supported LLM CLI found.\n' +
-      'Install one of the following and log in:\n' +
-      '  - Claude Code: https://docs.anthropic.com/en/docs/claude-code\n' +
-      '  - Codex CLI:   https://github.com/openai/codex'
-    );
-  }
+  const engine = resolveLlmEngine(options.engine);
 
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
@@ -260,17 +279,9 @@ ${items}`;
 }
 
 export async function classifyDomainsWithLlm(
-  options: { all?: boolean; onBatch?: (done: number, total: number) => void } = {},
+  options: { engine?: LlmEngineSelection; all?: boolean; onBatch?: (done: number, total: number) => void } = {},
 ): Promise<LlmClassifyResult> {
-  const engine = detectEngine();
-  if (!engine) {
-    throw new Error(
-      'No supported LLM CLI found.\n' +
-      'Install one of the following and log in:\n' +
-      '  - Claude Code: https://docs.anthropic.com/en/docs/claude-code\n' +
-      '  - Codex CLI:   https://github.com/openai/codex'
-    );
-  }
+  const engine = resolveLlmEngine(options.engine);
 
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);

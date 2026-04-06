@@ -34,12 +34,13 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | Command | Description |
 |---------|-------------|
 | `ft sync` | Download and sync all bookmarks (no API required) |
-| `ft sync --classify` | Sync then classify new bookmarks with LLM |
+| `ft sync --classify [--engine <auto\|claude\|codex>]` | Sync then classify new bookmarks with LLM |
 | `ft sync --full` | Full history crawl (not just incremental) |
 | `ft search <query>` | Full-text search with BM25 ranking |
 | `ft viz` | Terminal dashboard with sparklines, categories, and domains |
-| `ft classify` | Classify by category and domain using LLM |
+| `ft classify [--engine <auto\|claude\|codex>]` | Classify by category and domain using LLM |
 | `ft classify --regex` | Classify by category using simple regex |
+| `ft classify-domains [--engine <auto\|claude\|codex>]` | Classify bookmarks by subject domain using LLM |
 | `ft categories` | Show category distribution |
 | `ft domains` | Subject domain distribution |
 | `ft stats` | Top authors, languages, date range |
@@ -74,6 +75,8 @@ Works with Claude Code, Codex, or any agent with shell access. Just tell your ag
 0 7 * * * ft sync --classify
 ```
 
+LLM classification defaults to `--engine auto`, which preserves the current behavior: prefer Claude when available, otherwise use Codex. If you explicitly pass `--engine claude` or `--engine codex`, Field Theory will fail immediately if that CLI is not installed or not on your `PATH`.
+
 ## Data
 
 All data is stored locally at `~/.ft-bookmarks/`:
@@ -107,6 +110,14 @@ To remove all data: `rm -rf ~/.ft-bookmarks`
 | **commerce** | Products, shopping, physical goods |
 
 Use `ft classify` for LLM-powered classification that catches what regex misses.
+
+Examples:
+
+```bash
+ft classify --engine claude
+ft classify-domains --engine codex
+ft sync --classify --engine auto
+```
 
 ## Platform support
 
