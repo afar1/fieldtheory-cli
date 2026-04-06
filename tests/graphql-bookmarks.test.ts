@@ -217,6 +217,68 @@ test('convertTweetToRecord: handles tweet with no user results', () => {
   assert.equal(result.url, 'https://x.com/_/status/999');
 });
 
+test('convertTweetToRecord: extracts quoted tweet snapshot', () => {
+  const tr = makeTweetResult({
+    legacy: { quoted_status_id_str: '5555555' },
+    tweet: {
+      quoted_status_result: {
+        result: {
+          rest_id: '5555555',
+          legacy: {
+            id_str: '5555555',
+            full_text: 'This is the quoted tweet text',
+            created_at: 'Mon Mar 09 10:00:00 +0000 2026',
+            entities: { urls: [] },
+            extended_entities: {
+              media: [
+                {
+                  type: 'photo',
+                  media_url_https: 'https://pbs.twimg.com/media/quoted.jpg',
+                  expanded_url: 'https://x.com/quoteduser/status/5555555/photo/1',
+                  original_info: { width: 800, height: 600 },
+                },
+              ],
+            },
+          },
+          core: {
+            user_results: {
+              result: {
+                rest_id: '6666',
+                core: { screen_name: 'quoteduser', name: 'Quoted User' },
+                avatar: { image_url: 'https://pbs.twimg.com/profile_images/6666/qt.jpg' },
+                legacy: {},
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  const result = convertTweetToRecord(tr, NOW);
+  assert.ok(result);
+  assert.equal(result.quotedStatusId, '5555555');
+  assert.ok(result.quotedTweet);
+  assert.equal(result.quotedTweet!.id, '5555555');
+  assert.equal(result.quotedTweet!.text, 'This is the quoted tweet text');
+  assert.equal(result.quotedTweet!.authorHandle, 'quoteduser');
+  assert.equal(result.quotedTweet!.authorName, 'Quoted User');
+  assert.equal(result.quotedTweet!.authorProfileImageUrl, 'https://pbs.twimg.com/profile_images/6666/qt.jpg');
+  assert.equal(result.quotedTweet!.url, 'https://x.com/quoteduser/status/5555555');
+  assert.equal(result.quotedTweet!.media?.length, 1);
+  assert.equal(result.quotedTweet!.media?.[0], 'https://pbs.twimg.com/media/quoted.jpg');
+});
+
+test('convertTweetToRecord: handles missing quoted tweet gracefully', () => {
+  const tr = makeTweetResult({
+    legacy: { quoted_status_id_str: '7777777' },
+    // No quoted_status_result — tweet may have been deleted
+  });
+  const result = convertTweetToRecord(tr, NOW);
+  assert.ok(result);
+  assert.equal(result.quotedStatusId, '7777777');
+  assert.equal(result.quotedTweet, undefined);
+});
+
 test('parseBookmarksResponse: parses entries and cursor', () => {
   const tr1 = makeTweetResult();
   const tr2 = makeTweetResult({ legacy: { id_str: '2222222', full_text: 'Second tweet' } });

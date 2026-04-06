@@ -36,6 +36,18 @@ export interface BookmarkEngagementSnapshot {
   viewCount?: number;
 }
 
+export interface QuotedTweetSnapshot {
+  id: string;
+  text: string;
+  authorHandle?: string;
+  authorName?: string;
+  authorProfileImageUrl?: string;
+  postedAt?: string | null;
+  media?: string[];
+  mediaObjects?: BookmarkMediaObject[];
+  url: string;
+}
+
 export interface BookmarkRecord {
   id: string;
   tweetId: string;
@@ -52,6 +64,7 @@ export interface BookmarkRecord {
   inReplyToStatusId?: string;
   inReplyToUserId?: string;
   quotedStatusId?: string;
+  quotedTweet?: QuotedTweetSnapshot;
   language?: string;
   sourceApp?: string;
   possiblySensitive?: boolean;

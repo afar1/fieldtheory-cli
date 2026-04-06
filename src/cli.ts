@@ -20,6 +20,7 @@ import {
 } from './bookmarks-db.js';
 import { formatClassificationSummary } from './bookmark-classify.js';
 import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm.js';
+import { enrichQuotedTweets } from './bookmark-enrich.js';
 import { renderViz } from './bookmarks-viz.js';
 import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath } from './paths.js';
 import fs from 'node:fs';
@@ -525,6 +526,34 @@ export function buildCli() {
       for (const [dom, count] of Object.entries(counts).sort((a, b) => b[1] - a[1])) {
         const pct = ((count / total) * 100).toFixed(1);
         console.log(`  ${dom.padEnd(20)} ${String(count).padStart(5)}  (${pct}%)`);
+      }
+    }));
+
+  // ── enrich ──────────────────────────────────────────────────────────────
+
+  program
+    .command('enrich')
+    .description('Fetch quoted tweet content for bookmarks that are missing it')
+    .option('--delay-ms <n>', 'Delay between requests in ms', (v: string) => Number(v), 300)
+    .action(safe(async (options) => {
+      if (!requireData()) return;
+      const start = Date.now();
+      process.stderr.write('Enriching bookmarks with quoted tweet content...\n');
+      const result = await enrichQuotedTweets({
+        delayMs: Number(options.delayMs) || 300,
+        onProgress: (progress) => {
+          const pct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+          const elapsed = Math.round((Date.now() - start) / 1000);
+          const spin = SPINNER[spinnerIdx++ % SPINNER.length];
+          process.stderr.write(`\r\x1b[K  ${spin} ${progress.done}/${progress.total} (${pct}%) \u2502 ${progress.fetched} fetched \u2502 ${progress.failed} failed \u2502 ${elapsed}s`);
+        },
+      });
+      process.stderr.write('\n');
+      if (result.total === 0) {
+        console.log('  All quote tweets already enriched (or no quote tweets found).');
+      } else {
+        console.log(`  \u2713 ${result.enriched} quoted tweets enriched`);
+        if (result.failed > 0) console.log(`  ${result.failed} unavailable (deleted or private)`);
       }
     }));
 

@@ -213,6 +213,39 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
     .map((u: any) => u.expanded_url)
     .filter((u: string | undefined) => u && !u.includes('t.co'));
 
+  // Extract quoted tweet if present
+  const quotedResult = tweet?.quoted_status_result?.result;
+  let quotedTweet: BookmarkRecord['quotedTweet'] | undefined;
+  if (quotedResult) {
+    const qtLegacy = (quotedResult.tweet ?? quotedResult)?.legacy;
+    const qtUser = (quotedResult.tweet ?? quotedResult)?.core?.user_results?.result;
+    if (qtLegacy) {
+      const qtId = qtLegacy.id_str ?? (quotedResult.tweet ?? quotedResult)?.rest_id;
+      const qtHandle = qtUser?.core?.screen_name ?? qtUser?.legacy?.screen_name;
+      const qtMediaEntities = qtLegacy?.extended_entities?.media ?? qtLegacy?.entities?.media ?? [];
+      quotedTweet = {
+        id: qtId,
+        text: qtLegacy.full_text ?? qtLegacy.text ?? '',
+        authorHandle: qtHandle,
+        authorName: qtUser?.core?.name ?? qtUser?.legacy?.name,
+        authorProfileImageUrl:
+          qtUser?.avatar?.image_url ??
+          qtUser?.legacy?.profile_image_url_https ??
+          qtUser?.legacy?.profile_image_url,
+        postedAt: qtLegacy.created_at ?? null,
+        media: qtMediaEntities.map((m: any) => m.media_url_https ?? m.media_url).filter(Boolean),
+        mediaObjects: qtMediaEntities.map((m: any) => ({
+          type: m.type,
+          url: m.media_url_https ?? m.media_url,
+          expandedUrl: m.expanded_url,
+          width: m.original_info?.width,
+          height: m.original_info?.height,
+        })),
+        url: `https://x.com/${qtHandle ?? '_'}/status/${qtId}`,
+      };
+    }
+  }
+
   return {
     id: tweetId,
     tweetId,
@@ -229,6 +262,7 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
     inReplyToStatusId: legacy.in_reply_to_status_id_str,
     inReplyToUserId: legacy.in_reply_to_user_id_str,
     quotedStatusId: legacy.quoted_status_id_str,
+    quotedTweet,
     language: legacy.lang,
     sourceApp: legacy.source,
     possiblySensitive: legacy.possibly_sensitive,
