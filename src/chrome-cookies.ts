@@ -56,8 +56,9 @@ function getMacOSChromeKey(): Buffer {
  * determines which key to use — they are not interchangeable.
  */
 interface LinuxChromeKeys {
-  v10Key: Buffer; // "peanuts" key — for cookies with v10 prefix
-  v11Key: Buffer; // keyring key  — for cookies with v11 prefix
+  v10Key: Buffer;        // "peanuts" key — for cookies with v10 prefix
+  v11Key: Buffer | null; // keyring key  — for cookies with v11 prefix;
+                         // null when the keyring password could not be read
 }
 
 function getLinuxChromeKeys(): LinuxChromeKeys {
@@ -65,10 +66,12 @@ function getLinuxChromeKeys(): LinuxChromeKeys {
   const v10Key = pbkdf2Sync('peanuts', 'saltysalt', 1, 16, 'sha1');
 
   // v11 uses the password stored in the GNOME Secret Service.
-  // Fall back to "peanuts" if no keyring entry is found (e.g. headless systems),
-  // which means v11 cookies won't decrypt — but that matches Chrome's own
-  // behavior (it only writes v11 cookies when the keyring is available).
-  let v11Key = v10Key;
+  // Chrome writes v11 cookies only when the keyring is available, but it
+  // accesses the keyring via libsecret directly — not the secret-tool CLI.
+  // If secret-tool is absent or returns nothing we set v11Key to null so
+  // that any attempt to decrypt a v11 cookie produces a clear error rather
+  // than a silent wrong-key AES crash (ERR_OSSL_EVP_BAD_DECRYPT).
+  let v11Key: Buffer | null = null;
   try {
     const pw = execFileSync(
       'secret-tool',
@@ -77,7 +80,7 @@ function getLinuxChromeKeys(): LinuxChromeKeys {
     ).trim();
     if (pw) v11Key = pbkdf2Sync(pw, 'saltysalt', 1, 16, 'sha1');
   } catch {
-    // secret-tool not installed or no keyring entry.
+    // secret-tool not installed or no keyring entry — v11Key stays null.
   }
 
   return { v10Key, v11Key };
@@ -115,22 +118,22 @@ function sanitizeCookieValue(name: string, value: string): string {
  * Decrypt a single Chrome cookie value.
  *
  * @param encryptedValue  Raw bytes from the `encrypted_value` column.
- * @param key             AES key for `v10`-prefixed cookies (macOS) or the
- *                        caller's chosen key.  On Linux, pass the `v10Key`
- *                        here and supply `v11Key` separately.
+ * @param key             AES key for `v10`-prefixed cookies.  On macOS this
+ *                        is the only key needed.  On Linux pass `v10Key` here.
  * @param dbVersion       Chrome cookie DB schema version (from the `meta`
  *                        table); >= 24 means a 32-byte SHA256(host_key) prefix
  *                        is prepended to the plaintext (Chrome ~130+).
- * @param v11Key          Optional separate key for `v11`-prefixed cookies
- *                        (Linux keyring key).  When omitted, `key` is used
- *                        for both prefixes (correct for macOS where only
- *                        `v10` exists).
+ * @param v11Key          Key for `v11`-prefixed cookies (Linux keyring key).
+ *                        Pass `null` when the keyring password could not be
+ *                        read — a clear error is thrown rather than attempting
+ *                        decryption with the wrong key.  Omit on macOS (only
+ *                        `v10` cookies exist there).
  */
 export function decryptCookieValue(
   encryptedValue: Buffer,
   key: Buffer,
   dbVersion = 0,
-  v11Key?: Buffer,
+  v11Key?: Buffer | null,
 ): string {
   if (encryptedValue.length === 0) return '';
 
@@ -138,14 +141,40 @@ export function decryptCookieValue(
   const isV11 = encryptedValue[0] === 0x76 && encryptedValue[1] === 0x31 && encryptedValue[2] === 0x31;
 
   if (isV10 || isV11) {
+    if (isV11 && v11Key === null) {
+      // The cookie was encrypted with the GNOME keyring key, but we couldn't
+      // read the keyring password (secret-tool missing or no entry).
+      // Throwing here avoids a cryptic ERR_OSSL_EVP_BAD_DECRYPT crash.
+      throw new Error(
+        'Chrome stored this cookie with a GNOME keyring key (v11), but the\n' +
+        'keyring password could not be retrieved.\n\n' +
+        'Fix:\n' +
+        '  1. Install libsecret-tools:  sudo apt-get install libsecret-tools\n' +
+        '  2. Confirm the entry exists: secret-tool lookup application chrome\n' +
+        '  3. Or use the API method:    ft auth && ft sync --api'
+      );
+    }
+
     // On Linux v10 and v11 use different keys; on macOS only v10 exists and
-    // both parameters point to the same key.
+    // v11Key is undefined, so key is used for both (unchanged behaviour).
     const decryptKey = isV11 && v11Key ? v11Key : key;
     const iv = Buffer.alloc(16, 0x20); // 16 spaces
     const ciphertext = encryptedValue.subarray(3);
     const decipher = createDecipheriv('aes-128-cbc', decryptKey, iv);
-    let decrypted = decipher.update(ciphertext);
-    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    let decrypted: Buffer;
+    try {
+      decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    } catch (err: any) {
+      throw new Error(
+        `AES decryption failed for a ${isV11 ? 'v11' : 'v10'} cookie.\n` +
+        'This usually means the wrong key was used.\n\n' +
+        'Fix:\n' +
+        '  1. Close Chrome completely and run ft sync again\n' +
+        '  2. Confirm the keyring entry: secret-tool lookup application chrome\n' +
+        '  3. Or use the API method:     ft auth && ft sync --api\n\n' +
+        `OpenSSL detail: ${err.message}`
+      );
+    }
 
     // Chrome DB version >= 24 (Chrome ~130+) prepends SHA256(host_key) to plaintext
     if (dbVersion >= 24 && decrypted.length > 32) {
@@ -253,13 +282,14 @@ export function extractChromeXCookies(
   const dbPath = join(chromeUserDataDir, profileDirectory, 'Cookies');
 
   // On Linux, v10 and v11 cookies use different keys; derive both up front.
-  // On macOS only v10 exists, so a single key suffices (v11Key stays undefined).
+  // On macOS only v10 exists, so v11Key is left undefined (decryptCookieValue
+  // treats undefined as "same as key", which is correct for macOS).
   let key: Buffer;
-  let v11Key: Buffer | undefined;
+  let v11Key: Buffer | null | undefined;
   if (os === 'linux') {
     const linuxKeys = getLinuxChromeKeys();
     key = linuxKeys.v10Key;
-    v11Key = linuxKeys.v11Key;
+    v11Key = linuxKeys.v11Key; // Buffer when keyring found, null when not
   } else {
     key = getMacOSChromeKey();
   }
