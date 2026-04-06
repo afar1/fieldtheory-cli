@@ -36,6 +36,11 @@ export interface BookmarkEngagementSnapshot {
   viewCount?: number;
 }
 
+export interface BookmarkFolder {
+  id: string;
+  name: string;
+}
+
 export interface BookmarkRecord {
   id: string;
   tweetId: string;
@@ -61,6 +66,8 @@ export interface BookmarkRecord {
   links?: string[];
   tags?: string[];
   ingestedVia?: 'api' | 'browser' | 'graphql';
+  xFolder?: string;
+  xFolderId?: string;
 }
 
 export interface BookmarkCacheMeta {

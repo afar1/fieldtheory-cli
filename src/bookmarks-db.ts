@@ -6,7 +6,7 @@ import type { BookmarkRecord } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 export interface SearchResult {
   id: string;
@@ -50,6 +50,7 @@ export interface BookmarkTimelineItem {
   quoteCount?: number | null;
   bookmarkCount?: number | null;
   viewCount?: number | null;
+  xFolder?: string | null;
 }
 
 export interface BookmarkTimelineFilters {
@@ -107,6 +108,7 @@ function mapTimelineRow(row: unknown[]): BookmarkTimelineItem {
     quoteCount: row[20] as number | null,
     bookmarkCount: row[21] as number | null,
     viewCount: row[22] as number | null,
+    xFolder: (row[23] as string) ?? null,
   };
 }
 
@@ -194,7 +196,9 @@ function initSchema(db: Database): void {
     primary_category TEXT,
     github_urls TEXT,
     domains TEXT,
-    primary_domain TEXT
+    primary_domain TEXT,
+    x_folder TEXT,
+    x_folder_id TEXT
   )`);
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_author ON bookmarks(author_handle)`);
@@ -202,6 +206,7 @@ function initSchema(db: Database): void {
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_language ON bookmarks(language)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_category ON bookmarks(primary_category)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_domain ON bookmarks(primary_domain)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_x_folder ON bookmarks(x_folder)`);
 
   db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
     text,
@@ -230,6 +235,15 @@ function ensureMigrations(db: Database): void {
     }
     db.run("REPLACE INTO meta VALUES ('schema_version', '3')");
   }
+  if (version < 4) {
+    const tableExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'");
+    if (tableExists.length && tableExists[0].values.length > 0) {
+      try { db.run('ALTER TABLE bookmarks ADD COLUMN x_folder TEXT'); } catch { /* already exists */ }
+      try { db.run('ALTER TABLE bookmarks ADD COLUMN x_folder_id TEXT'); } catch { /* already exists */ }
+      db.run('CREATE INDEX IF NOT EXISTS idx_bookmarks_x_folder ON bookmarks(x_folder)');
+    }
+    db.run("REPLACE INTO meta VALUES ('schema_version', '4')");
+  }
 }
 
 function insertRecord(db: Database, r: BookmarkRecord): void {
@@ -240,7 +254,7 @@ function insertRecord(db: Database, r: BookmarkRecord): void {
   const githubUrls = [...new Set([...githubMatches.map((m) => `https://${m}`), ...githubFromLinks])];
 
   db.run(
-    `INSERT OR REPLACE INTO bookmarks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT OR REPLACE INTO bookmarks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       r.id,
       r.tweetId,
@@ -272,6 +286,8 @@ function insertRecord(db: Database, r: BookmarkRecord): void {
       githubUrls.length ? JSON.stringify(githubUrls) : null,
       null, // domains — populated by classify-domains pass
       null, // primary_domain
+      r.xFolder ?? null,
+      r.xFolderId ?? null,
     ]
   );
 }
@@ -432,7 +448,8 @@ export async function listBookmarks(
         b.reply_count,
         b.quote_count,
         b.bookmark_count,
-        b.view_count
+        b.view_count,
+        b.x_folder
       FROM bookmarks b
       ${where}
       ${bookmarkSortClause(filters.sort)}
@@ -567,7 +584,8 @@ export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem 
         b.reply_count,
         b.quote_count,
         b.bookmark_count,
-        b.view_count
+        b.view_count,
+        b.x_folder
       FROM bookmarks b
       WHERE b.id = ?
       LIMIT 1`,
@@ -707,6 +725,30 @@ export async function getCategoryCounts(): Promise<Record<string, number>> {
       `SELECT primary_category, COUNT(*) as c FROM bookmarks
        WHERE primary_category IS NOT NULL
        GROUP BY primary_category ORDER BY c DESC`
+    );
+    const counts: Record<string, number> = {};
+    for (const row of rows[0]?.values ?? []) {
+      counts[row[0] as string] = row[1] as number;
+    }
+    return counts;
+  } finally {
+    db.close();
+  }
+}
+
+export async function getFolderCounts(): Promise<Record<string, number>> {
+  const dbPath = twitterBookmarksIndexPath();
+  const db = await openDb(dbPath);
+  ensureMigrations(db);
+  try {
+    // Return empty if no bookmarks have folder data yet
+    const hasFolder = db.exec("SELECT 1 FROM bookmarks WHERE x_folder IS NOT NULL LIMIT 1");
+    if (!hasFolder.length || !hasFolder[0].values.length) {
+      return {};
+    }
+    const rows = db.exec(
+      `SELECT COALESCE(x_folder, '(unfiled)'), COUNT(*) as c FROM bookmarks
+       GROUP BY COALESCE(x_folder, '(unfiled)') ORDER BY c DESC`
     );
     const counts: Record<string, number> = {};
     for (const row of rows[0]?.values ?? []) {

@@ -15,9 +15,11 @@ import {
   getCategoryCounts,
   sampleByCategory,
   getDomainCounts,
+  getFolderCounts,
   listBookmarks,
   getBookmarkById,
 } from './bookmarks-db.js';
+import { syncFolders } from './graphql-bookmark-folders.js';
 import { formatClassificationSummary } from './bookmark-classify.js';
 import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm.js';
 import { renderViz } from './bookmarks-viz.js';
@@ -235,6 +237,7 @@ export function buildCli() {
     .option('--max-minutes <n>', 'Max runtime in minutes', (v: string) => Number(v), 30)
     .option('--chrome-user-data-dir <path>', 'Chrome user-data directory')
     .option('--chrome-profile-directory <name>', 'Chrome profile name')
+    .option('--folders', 'Also sync bookmark folder assignments', false)
     .action(async (options) => {
       const firstRun = isFirstRun();
       if (firstRun) showSyncWelcome();
@@ -274,7 +277,31 @@ export function buildCli() {
           console.log(`  ${friendlyStopReason(result.stopReason)}`);
           console.log(`  \u2713 Data: ${dataDir()}\n`);
 
-          const newCount = await rebuildIndex(result.added);
+          let folderAdded = 0;
+          if (options.folders) {
+            process.stderr.write('\n  Syncing bookmark folders...\n');
+            const folderResult = await syncFolders({
+              chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+              chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+              delayMs: Number(options.delayMs) || 600,
+              onProgress: (status) => {
+                process.stderr.write(`\r\x1b[K  ${status.folder}: page ${status.page}, ${status.added} new`);
+              },
+            });
+            process.stderr.write('\n');
+            folderAdded = folderResult.added;
+            if (folderResult.folders.length > 0) {
+              console.log(`  \u2713 ${folderResult.folders.length} folders synced`);
+              for (const f of folderResult.folders) {
+                const count = folderResult.addedPerFolder[f.name] ?? 0;
+                console.log(`    ${f.name}: ${count} new`);
+              }
+            } else {
+              console.log('  No bookmark folders found.');
+            }
+          }
+
+          const newCount = await rebuildIndex(result.added + folderAdded);
           if (options.classify && newCount > 0) {
             await classifyNew();
           }
@@ -525,6 +552,25 @@ export function buildCli() {
       for (const [dom, count] of Object.entries(counts).sort((a, b) => b[1] - a[1])) {
         const pct = ((count / total) * 100).toFixed(1);
         console.log(`  ${dom.padEnd(20)} ${String(count).padStart(5)}  (${pct}%)`);
+      }
+    }));
+
+  // ── folders ─────────────────────────────────────────────────────────────
+
+  program
+    .command('folders')
+    .description('Show bookmark folder distribution')
+    .action(safe(async () => {
+      if (!requireIndex()) return;
+      const counts = await getFolderCounts();
+      if (Object.keys(counts).length === 0) {
+        console.log('  No folder data. Run: ft sync --folders');
+        return;
+      }
+      const total = Object.values(counts).reduce((a, b) => a + b, 0);
+      for (const [folder, count] of Object.entries(counts).sort((a, b) => b[1] - a[1])) {
+        const pct = ((count / total) * 100).toFixed(1);
+        console.log(`  ${folder.padEnd(20)} ${String(count).padStart(5)}  (${pct}%)`);
       }
     }));
 
