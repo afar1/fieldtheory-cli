@@ -5,10 +5,19 @@ import { tmpdir, platform } from 'node:os';
 import { pbkdf2Sync, createDecipheriv, randomUUID } from 'node:crypto';
 import type { BrowserDef } from './browsers.js';
 import { getKeychainEntries } from './browsers.js';
+import { extractChromiumXCookiesViaRuntime } from './chromium-runtime-cookies.js';
 
 export interface ChromeCookieResult {
   csrfToken: string;
   cookieHeader: string;
+}
+
+function isWindowsAppBoundCookie(encryptedValue: Buffer): boolean {
+  return encryptedValue.length > 3 && encryptedValue.subarray(0, 3).toString('ascii') === 'v20';
+}
+
+function canUseWindowsChromiumRuntimeFallback(os: string, browser: BrowserDef): boolean {
+  return os === 'win32' && browser.cookieBackend === 'chromium';
 }
 
 // ── macOS Keychain ───────────────────────────────────────────────────────────
@@ -53,6 +62,7 @@ function getLinuxKeys(browser: BrowserDef): LinuxKeys {
     chrome: ['chrome'],
     chromium: ['chromium'],
     brave: ['brave'],
+    edge: ['microsoft-edge', 'chrome'],
     helium: ['chrome'], // Helium typically uses Chrome's keyring entry
     comet: ['chrome'],
   };
@@ -113,6 +123,7 @@ function getWindowsKey(chromeUserDataDir: string, browser: BrowserDef): Buffer {
   const result = spawnSync(
     'powershell',
     ['-NonInteractive', '-NoProfile', '-Command', [
+      'Add-Type -AssemblyName System.Security',
       '$input | ForEach-Object {',
       '  $bytes = [System.Convert]::FromBase64String($_)',
       '  $dec = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)',
@@ -160,6 +171,7 @@ function decryptWindowsCookie(encryptedValue: Buffer, key: Buffer): string {
   const result = spawnSync(
     'powershell',
     ['-NonInteractive', '-NoProfile', '-Command', [
+      'Add-Type -AssemblyName System.Security',
       '$input | ForEach-Object {',
       '  $bytes = [System.Convert]::FromBase64String($_)',
       '  $dec = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)',
@@ -342,17 +354,48 @@ function queryCookies(dbPath: string, domain: string, names: string[], browser: 
 
 // ── Main export ──────────────────────────────────────────────────────────────
 
-export function extractChromeXCookies(
+export async function extractChromeXCookies(
   chromeUserDataDir: string,
   profileDirectory = 'Default',
   browser: BrowserDef | undefined = undefined
-): ChromeCookieResult {
+): Promise<ChromeCookieResult> {
   const os = platform();
 
   // Default browser for error messages if none provided
   const br = browser ?? { id: 'chrome', displayName: 'Google Chrome', cookieBackend: 'chromium' as const, keychainEntries: [] };
 
   const dbPath = resolveCookieDbPath(chromeUserDataDir, profileDirectory);
+
+  if (os !== 'darwin' && os !== 'linux' && os !== 'win32') {
+    throw new Error(
+      `Automatic cookie extraction is not supported on ${os}.\n` +
+      'Pass cookies manually:  ft sync --cookies <ct0> <auth_token>'
+    );
+  }
+
+  let result;
+  try {
+    result = queryCookies(dbPath, '.x.com', ['ct0', 'auth_token'], br);
+    if (result.cookies.length === 0) {
+      result = queryCookies(dbPath, '.twitter.com', ['ct0', 'auth_token'], br);
+    }
+  } catch (error) {
+    if (canUseWindowsChromiumRuntimeFallback(os, br)) {
+      return extractChromiumXCookiesViaRuntime(chromeUserDataDir, profileDirectory, br);
+    }
+    throw error;
+  }
+
+  if (canUseWindowsChromiumRuntimeFallback(os, br)) {
+    const hasAppBoundCookie = result.cookies.some((cookie) => {
+      const hexValue = cookie.encrypted_value_hex;
+      return Boolean(hexValue) && isWindowsAppBoundCookie(Buffer.from(hexValue, 'hex'));
+    });
+
+    if (hasAppBoundCookie) {
+      return extractChromiumXCookiesViaRuntime(chromeUserDataDir, profileDirectory, br);
+    }
+  }
 
   let key: Buffer;
   let v11Key: Buffer | null | undefined;
@@ -364,19 +407,9 @@ export function extractChromeXCookies(
     const linuxKeys = getLinuxKeys(br);
     key = linuxKeys.v10;
     v11Key = linuxKeys.v11;
-  } else if (os === 'win32') {
+  } else {
     key = getWindowsKey(chromeUserDataDir, br);
     isWindows = true;
-  } else {
-    throw new Error(
-      `Automatic cookie extraction is not supported on ${os}.\n` +
-      'Pass cookies manually:  ft sync --cookies <ct0> <auth_token>'
-    );
-  }
-
-  let result = queryCookies(dbPath, '.x.com', ['ct0', 'auth_token'], br);
-  if (result.cookies.length === 0) {
-    result = queryCookies(dbPath, '.twitter.com', ['ct0', 'auth_token'], br);
   }
 
   const decrypted = new Map<string, string>();
