@@ -828,6 +828,7 @@ export async function getStats(options?: { source?: string }): Promise<{
 }> {
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
+  ensureMigrations(db);
 
   const src = options?.source;
   const sourceFilter = src ? 'WHERE source = ?' : '';
