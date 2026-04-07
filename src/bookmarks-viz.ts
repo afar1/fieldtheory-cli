@@ -159,26 +159,41 @@ async function queryVizData(): Promise<VizData> {
     // Twitter date format: "Sat Mar 28 18:55:23 +0000 2026"
     // Year is at end (-4), month name at 5-7, hour at 12-13
 
-    // Build a synthetic YYYY-MonName from the twitter date parts
+    // Build a synthetic YYYY-MonName from the twitter date parts or YYYY-MM from ISO
     const monthlyRows = db.exec(
       `SELECT
-         substr(bookmarked_at, -4) || '-' || substr(bookmarked_at, 5, 3) as ym,
+         CASE
+           WHEN bookmarked_at GLOB '____-__-__*' THEN substr(bookmarked_at, 1, 7)
+           ELSE substr(bookmarked_at, -4) || '-' || substr(bookmarked_at, 5, 3)
+         END as ym,
          COUNT(*) as c
        FROM bookmarks WHERE bookmarked_at IS NOT NULL
        GROUP BY ym ORDER BY ym`
     );
 
-    // Day of week — first 3 chars
+    // Day of week — first 3 chars for legacy, strftime('%w') for ISO
+    // SQLite %w: 0=Sunday, 1=Monday... We can map them if we want, but the chart just uses 'dow' as a string key
     const dowRows = db.exec(
-      `SELECT substr(bookmarked_at, 1, 3) as dow, COUNT(*) as c
+      `SELECT 
+         CASE
+           WHEN bookmarked_at GLOB '____-__-__*' THEN 
+             CASE strftime('%w', bookmarked_at)
+               WHEN '0' THEN 'Sun' WHEN '1' THEN 'Mon' WHEN '2' THEN 'Tue'
+               WHEN '3' THEN 'Wed' WHEN '4' THEN 'Thu' WHEN '5' THEN 'Fri' WHEN '6' THEN 'Sat' END
+           ELSE substr(bookmarked_at, 1, 3)
+         END as dow, COUNT(*) as c
        FROM bookmarks WHERE bookmarked_at IS NOT NULL
        GROUP BY dow ORDER BY c DESC`
     );
 
-    // Hour of day — chars 12-13
+    // Hour of day — chars 12-13 for legacy, strftime('%H') for ISO
     const hourRows = db.exec(
-      `SELECT CAST(substr(bookmarked_at, 12, 2) AS INTEGER) as h, COUNT(*) as c
-       FROM bookmarks WHERE bookmarked_at IS NOT NULL AND length(bookmarked_at) > 13
+      `SELECT 
+         CASE
+           WHEN bookmarked_at GLOB '____-__-__*' THEN CAST(strftime('%H', bookmarked_at) AS INTEGER)
+           ELSE CAST(substr(bookmarked_at, 12, 2) AS INTEGER)
+         END as h, COUNT(*) as c
+       FROM bookmarks WHERE bookmarked_at IS NOT NULL
        GROUP BY h ORDER BY h`
     );
 
@@ -288,17 +303,46 @@ async function queryVizData(): Promise<VizData> {
       }));
     }
 
-    // Convert "2026-Mar" to "2026-03" for proper sorting
+    // Convert "2026-Mar" or "2026-03" to "2026-03" for proper sorting
     const monthNumMap: Record<string, string> = {
       Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06',
       Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12',
     };
-    const rawMonthly = (monthlyRows[0]?.values ?? []).map((r) => {
-      const raw = r[0] as string; // "2026-Mar"
-      const [year, monName] = raw.split('-');
-      const num = monthNumMap[monName] ?? '00';
-      return { month: `${year}-${num}`, label: `${monName} ${year}`, count: r[1] as number };
-    });
+    const revMonthMap: Record<string, string> = Object.fromEntries(
+      Object.entries(monthNumMap).map(([k, v]) => [v, k])
+    );
+
+    const monthMap = new Map<string, { month: string; label: string; count: number }>();
+
+    for (const r of monthlyRows[0]?.values ?? []) {
+      const raw = r[0] as string; // "2026-Mar" or "2026-03"
+      const [part1, part2] = raw.split('-');
+      
+      let year = part1;
+      let monthKey = '';
+      let label = '';
+      
+      const numFromLegacy = monthNumMap[part2];
+      if (numFromLegacy) {
+        // Legacy format: YYYY-MonName
+        monthKey = `${year}-${numFromLegacy}`;
+        label = `${part2} ${year}`;
+      } else {
+        // ISO format: YYYY-MM
+        monthKey = `${year}-${part2}`;
+        const nameFromISO = revMonthMap[part2] ?? part2;
+        label = `${nameFromISO} ${year}`;
+      }
+
+      const existing = monthMap.get(monthKey);
+      if (existing) {
+        existing.count += r[1] as number;
+      } else {
+        monthMap.set(monthKey, { month: monthKey, label, count: r[1] as number });
+      }
+    }
+
+    const rawMonthly = Array.from(monthMap.values());
     rawMonthly.sort((a, b) => a.month.localeCompare(b.month));
 
     // Categories
