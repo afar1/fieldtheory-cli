@@ -48,6 +48,42 @@ export function twitterBookmarksIndexPath(): string {
   return path.join(dataDir(), 'bookmarks.db');
 }
 
+export function twitterLikesCachePath(): string {
+  return path.join(dataDir(), 'likes.jsonl');
+}
+
+export function twitterLikesMetaPath(): string {
+  return path.join(dataDir(), 'likes-meta.json');
+}
+
+export function twitterLikesBackfillStatePath(): string {
+  return path.join(dataDir(), 'likes-backfill-state.json');
+}
+
+export function twitterTimelineCachePath(): string {
+  return path.join(dataDir(), 'timeline.jsonl');
+}
+
+export function twitterTimelineMetaPath(): string {
+  return path.join(dataDir(), 'timeline-meta.json');
+}
+
+export function twitterTimelineBackfillStatePath(): string {
+  return path.join(dataDir(), 'timeline-backfill-state.json');
+}
+
+export function twitterFeedCachePath(): string {
+  return path.join(dataDir(), 'feed.jsonl');
+}
+
+export function twitterFeedMetaPath(): string {
+  return path.join(dataDir(), 'feed-meta.json');
+}
+
+export function twitterFeedBackfillStatePath(): string {
+  return path.join(dataDir(), 'feed-backfill-state.json');
+}
+
 export function preferencesPath(): string {
   return path.join(dataDir(), '.preferences');
 }
