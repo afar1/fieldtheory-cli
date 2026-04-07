@@ -73,7 +73,8 @@ export interface BookmarkRecord {
   mediaObjects?: BookmarkMediaObject[];
   links?: string[];
   tags?: string[];
-  ingestedVia?: 'api' | 'browser' | 'graphql';
+  likedAt?: string | null;
+  ingestedVia?: 'api' | 'browser' | 'graphql' | 'graphql-likes' | 'graphql-timeline' | 'graphql-feed';
 }
 
 export interface BookmarkCacheMeta {

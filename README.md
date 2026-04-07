@@ -18,13 +18,12 @@ Requires Node.js 20+ and Google Chrome.
 # 1. Sync your bookmarks (needs Chrome logged into X)
 ft sync
 
-# 2. Search them
-ft search "distributed systems"
+# 2. Sync likes, your timeline, or your feed
+ft sync-likes yourhandle
+ft sync-feed
 
-# 3. Explore
-ft viz
-ft categories
-ft stats
+# 3. Search them
+ft search "distributed systems"
 ```
 
 On first run, `ft sync` extracts your X session from Chrome and downloads your bookmarks into `~/.ft-bookmarks/`.
@@ -36,14 +35,18 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | `ft sync` | Download and sync all bookmarks (no API required) |
 | `ft sync --classify` | Sync then classify new bookmarks with LLM |
 | `ft sync --full` | Full history crawl (not just incremental) |
+| `ft sync-likes <user>` | Sync liked tweets (no API required) |
+| `ft sync-timeline <user>` | Sync your own tweets (no API required) |
+| `ft sync-feed` | Sync your Following feed (no API required) |
 | `ft search <query>` | Full-text search with BM25 ranking |
+| `ft search --source likes` | Search within a specific source |
 | `ft viz` | Terminal dashboard with sparklines, categories, and domains |
 | `ft classify` | Classify by category and domain using LLM |
 | `ft classify --regex` | Classify by category using simple regex |
 | `ft categories` | Show category distribution |
 | `ft domains` | Subject domain distribution |
 | `ft stats` | Top authors, languages, date range |
-| `ft list` | Filter by author, date, category, domain |
+| `ft list` | Filter by author, date, category, domain, source |
 | `ft show <id>` | Show one bookmark in detail |
 | `ft index` | Merge new bookmarks into search index (preserves classifications) |
 | `ft auth` | Set up OAuth for API-based sync (optional) |
@@ -60,6 +63,8 @@ Now you can ask your agent:
 
 > "I bookmarked a number of new open source AI memory tools. Pick the best one and figure out how to incorporate it in this repo."
 
+> "What topics have I liked the most this month?"
+>
 > "Every day please sync any new X bookmarks using the Field Theory CLI."
 
 Works with Claude Code, Codex, or any agent with shell access. Just tell your agent to use the `ft` CLI.
@@ -67,8 +72,14 @@ Works with Claude Code, Codex, or any agent with shell access. Just tell your ag
 ## Scheduling
 
 ```bash
-# Sync every morning at 7am
+# Sync bookmarks every morning at 7am
 0 7 * * * ft sync
+
+# Sync likes daily
+0 7 * * * ft sync-likes yourhandle
+
+# Sync feed every 6 hours
+0 */6 * * * ft sync-feed
 
 # Sync and classify every morning
 0 7 * * * ft sync --classify
@@ -81,6 +92,9 @@ All data is stored locally at `~/.ft-bookmarks/`:
 ```
 ~/.ft-bookmarks/
   bookmarks.jsonl         # raw bookmark cache (one per line)
+  likes.jsonl             # liked tweets cache
+  timeline.jsonl          # your own tweets cache
+  feed.jsonl              # Following feed cache
   bookmarks.db            # SQLite FTS5 search index
   bookmarks-meta.json     # sync metadata
   oauth-token.json        # OAuth token (if using API mode, chmod 600)

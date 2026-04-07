@@ -1,12 +1,18 @@
 import type { Database } from 'sql.js';
 import { openDb, saveDb } from './db.js';
 import { readJsonLines } from './fs.js';
-import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js';
+import {
+  twitterBookmarksCachePath,
+  twitterBookmarksIndexPath,
+  twitterLikesCachePath,
+  twitterTimelineCachePath,
+  twitterFeedCachePath,
+} from './paths.js';
 import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 export interface SearchResult {
   id: string;
@@ -24,6 +30,8 @@ export interface SearchOptions {
   limit?: number;
   before?: string;
   after?: string;
+  /** Filter by source: bookmarks, likes, timeline, feed */
+  source?: string;
 }
 
 export interface BookmarkTimelineItem {
@@ -59,6 +67,8 @@ export interface BookmarkTimelineFilters {
   before?: string;
   category?: string;
   domain?: string;
+  /** Filter by source: bookmarks, likes, timeline, feed */
+  source?: string;
   sort?: 'asc' | 'desc';
   limit?: number;
   offset?: number;
@@ -141,6 +151,10 @@ function buildBookmarkWhereClause(filters: BookmarkTimelineFilters): {
     conditions.push(`b.domains LIKE ?`);
     params.push(`%${filters.domain}%`);
   }
+  if (filters.source) {
+    conditions.push(`b.source = ?`);
+    params.push(filters.source);
+  }
 
   return {
     where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '',
@@ -195,10 +209,12 @@ function initSchema(db: Database): void {
     github_urls TEXT,
     domains TEXT,
     primary_domain TEXT,
-    quoted_tweet_json TEXT
+    quoted_tweet_json TEXT,
+    source TEXT DEFAULT 'bookmarks'
   )`);
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_author ON bookmarks(author_handle)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_source ON bookmarks(source)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_posted ON bookmarks(posted_at)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_language ON bookmarks(language)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_category ON bookmarks(primary_category)`);
@@ -236,12 +252,19 @@ function ensureMigrations(db: Database): void {
       try { db.run('ALTER TABLE bookmarks ADD COLUMN quoted_tweet_json TEXT'); } catch { /* already exists */ }
     }
   }
+  if (version < 5) {
+    const tableExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'");
+    if (tableExists.length && tableExists[0].values.length > 0) {
+      try { db.run("ALTER TABLE bookmarks ADD COLUMN source TEXT DEFAULT 'bookmarks'"); } catch { /* already exists */ }
+      db.run('CREATE INDEX IF NOT EXISTS idx_bookmarks_source ON bookmarks(source)');
+    }
+  }
   if (version < SCHEMA_VERSION) {
     db.run(`REPLACE INTO meta VALUES ('schema_version', '${SCHEMA_VERSION}')`);
   }
 }
 
-function insertRecord(db: Database, r: BookmarkRecord): void {
+function insertRecord(db: Database, r: BookmarkRecord, source: string = 'bookmarks'): void {
   // Extract GitHub URLs (kept inline — no LLM needed for URL parsing)
   const text = r.text ?? '';
   const githubMatches = text.match(/github\.com\/[\w.-]+\/[\w.-]+/gi) ?? [];
@@ -249,7 +272,7 @@ function insertRecord(db: Database, r: BookmarkRecord): void {
   const githubUrls = [...new Set([...githubMatches.map((m) => `https://${m}`), ...githubFromLinks])];
 
   db.run(
-    `INSERT OR REPLACE INTO bookmarks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT OR REPLACE INTO bookmarks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       r.id,
       r.tweetId,
@@ -282,14 +305,31 @@ function insertRecord(db: Database, r: BookmarkRecord): void {
       null, // domains — populated by classify-domains pass
       null, // primary_domain
       r.quotedTweet ? JSON.stringify(r.quotedTweet) : null,
+      source,
     ]
   );
 }
 
 export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPath: string; recordCount: number; newRecords: number }> {
-  const cachePath = twitterBookmarksCachePath();
   const dbPath = twitterBookmarksIndexPath();
-  const records = await readJsonLines<BookmarkRecord>(cachePath);
+
+  // Collect records from all sources
+  const sources: Array<{ path: string; source: string }> = [
+    { path: twitterBookmarksCachePath(), source: 'bookmarks' },
+    { path: twitterLikesCachePath(), source: 'likes' },
+    { path: twitterTimelineCachePath(), source: 'timeline' },
+    { path: twitterFeedCachePath(), source: 'feed' },
+  ];
+
+  const taggedRecords: Array<{ record: BookmarkRecord; source: string }> = [];
+  for (const { path, source } of sources) {
+    try {
+      const records = await readJsonLines<BookmarkRecord>(path);
+      for (const record of records) {
+        taggedRecords.push({ record, source });
+      }
+    } catch { /* file may not exist */ }
+  }
 
   const db = await openDb(dbPath);
   try {
@@ -311,13 +351,13 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
       }
     } catch { /* table may be empty */ }
 
-    const newRecords: BookmarkRecord[] = records.filter(r => !existingIds.has(r.id));
+    const newEntries = taggedRecords.filter(({ record }) => !existingIds.has(record.id));
 
-    if (newRecords.length > 0) {
+    if (newEntries.length > 0) {
       db.run('BEGIN TRANSACTION');
       try {
-        for (const record of newRecords) {
-          insertRecord(db, record);
+        for (const { record, source } of newEntries) {
+          insertRecord(db, record, source);
         }
         db.run('COMMIT');
       } catch (err) {
@@ -331,7 +371,7 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
 
     saveDb(db, dbPath);
     const totalRows = db.exec('SELECT COUNT(*) FROM bookmarks')[0]?.values[0]?.[0] as number;
-    return { dbPath, recordCount: totalRows, newRecords: newRecords.length };
+    return { dbPath, recordCount: totalRows, newRecords: newEntries.length };
   } finally {
     db.close();
   }
@@ -362,6 +402,10 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
     if (options.before) {
       conditions.push(`b.posted_at <= ?`);
       params.push(options.before);
+    }
+    if (options.source) {
+      conditions.push(`b.source = ?`);
+      params.push(options.source);
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -604,7 +648,7 @@ export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem 
   }
 }
 
-export async function getStats(): Promise<{
+export async function getStats(options?: { source?: string }): Promise<{
   totalBookmarks: number;
   uniqueAuthors: number;
   dateRange: { earliest: string | null; latest: string | null };
@@ -614,15 +658,20 @@ export async function getStats(): Promise<{
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
 
+  const src = options?.source;
+  const sourceFilter = src ? 'WHERE source = ?' : '';
+  const sourceAnd = src ? 'AND source = ?' : '';
+
   try {
-    const total = db.exec('SELECT COUNT(*) FROM bookmarks')[0]?.values[0]?.[0] as number;
-    const authors = db.exec('SELECT COUNT(DISTINCT author_handle) FROM bookmarks')[0]?.values[0]?.[0] as number;
-    const range = db.exec('SELECT MIN(posted_at), MAX(posted_at) FROM bookmarks WHERE posted_at IS NOT NULL')[0]?.values[0];
+    const total = db.exec(`SELECT COUNT(*) FROM bookmarks ${sourceFilter}`, src ? [src] : [])[0]?.values[0]?.[0] as number;
+    const authors = db.exec(`SELECT COUNT(DISTINCT author_handle) FROM bookmarks ${sourceFilter}`, src ? [src] : [])[0]?.values[0]?.[0] as number;
+    const range = db.exec(`SELECT MIN(posted_at), MAX(posted_at) FROM bookmarks WHERE posted_at IS NOT NULL ${sourceAnd}`, src ? [src] : [])[0]?.values[0];
 
     const topAuthorsRows = db.exec(
       `SELECT author_handle, COUNT(*) as c FROM bookmarks
-       WHERE author_handle IS NOT NULL
-       GROUP BY author_handle ORDER BY c DESC LIMIT 15`
+       WHERE author_handle IS NOT NULL ${sourceAnd}
+       GROUP BY author_handle ORDER BY c DESC LIMIT 15`,
+      src ? [src] : []
     );
     const topAuthors = (topAuthorsRows[0]?.values ?? []).map((r) => ({
       handle: r[0] as string,
@@ -631,8 +680,9 @@ export async function getStats(): Promise<{
 
     const langRows = db.exec(
       `SELECT language, COUNT(*) as c FROM bookmarks
-       WHERE language IS NOT NULL
-       GROUP BY language ORDER BY c DESC LIMIT 10`
+       WHERE language IS NOT NULL ${sourceAnd}
+       GROUP BY language ORDER BY c DESC LIMIT 10`,
+      src ? [src] : []
     );
     const languageBreakdown = (langRows[0]?.values ?? []).map((r) => ({
       language: r[0] as string,
