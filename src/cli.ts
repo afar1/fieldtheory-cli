@@ -7,6 +7,18 @@ import { syncBookmarksGraphQL, syncGaps, syncBookmarkFolders } from './graphql-b
 import type { SyncProgress, GapFillProgress, FolderSyncProgress } from './graphql-bookmarks.js';
 import type { BookmarkFolder } from './types.js';
 import { fetchBookmarkMediaBatch } from './bookmark-media.js';
+import { syncUserTimeline, type UserSyncOptions } from './graphql-user-sync.js';
+import {
+  twitterLikesCachePath,
+  twitterLikesMetaPath,
+  twitterLikesBackfillStatePath,
+  twitterTimelineCachePath,
+  twitterTimelineMetaPath,
+  twitterTimelineBackfillStatePath,
+  twitterFeedCachePath,
+  twitterFeedMetaPath,
+  twitterFeedBackfillStatePath,
+} from './paths.js';
 import {
   buildIndex,
   searchBookmarks,
@@ -89,9 +101,18 @@ const FRIENDLY_STOP_REASONS: Record<string, string> = {
   'caught up to newest stored bookmark': 'All caught up \u2014 no new bookmarks since last sync.',
   'no new bookmarks (stale)': 'Sync complete \u2014 reached the end of new bookmarks.',
   'end of bookmarks': 'Sync complete \u2014 all bookmarks fetched.',
+  'caught up to newest stored like': 'All caught up \u2014 no new likes since last sync.',
+  'no new likes (stale)': 'Sync complete \u2014 reached the end of new likes.',
+  'end of likes': 'Sync complete \u2014 all likes fetched.',
+  'caught up to newest stored tweet': 'All caught up \u2014 no new tweets since last sync.',
+  'no new tweets (stale)': 'Sync complete \u2014 reached the end of new tweets.',
+  'end of tweets': 'Sync complete \u2014 all tweets fetched.',
+  'caught up to newest stored feed item': 'All caught up \u2014 no new feed items since last sync.',
+  'no new feed items (stale)': 'Sync complete \u2014 reached the end of new feed items.',
+  'end of feed items': 'Sync complete \u2014 all feed items fetched.',
   'max runtime reached': 'Paused after 30 minutes. Run again to continue.',
   'max pages reached': 'Paused after reaching page limit. Run again to continue.',
-  'target additions reached': 'Reached target bookmark count.',
+  'target additions reached': 'Reached target count.',
 };
 
 function friendlyStopReason(raw?: string): string {
@@ -788,6 +809,118 @@ export function buildCli() {
       }
     });
 
+  // ── sync-likes / sync-timeline / sync-feed ─────────────────────────────
+  //
+  // Shared helper: extracts cookies from --cookies flag, builds sync options,
+  // runs syncUserTimeline with a spinner, and prints the result.
+  //
+
+  const VALID_SOURCES = ['bookmarks', 'likes', 'timeline', 'feed'] as const;
+
+  function parseSource(value: string): string {
+    if (!(VALID_SOURCES as readonly string[]).includes(value)) {
+      throw new Error(`Invalid source: ${value}. Valid values: ${VALID_SOURCES.join(', ')}`);
+    }
+    return value;
+  }
+
+  interface UserSyncCmdConfig {
+    type: import('./graphql-user-sync.js').UserSyncType;
+    label: string;
+    paths: { cache: string; meta: string; state: string };
+  }
+
+  function parseCookieOptions(options: any): { csrfToken?: string; cookieHeader?: string } {
+    if (!options.cookies || !Array.isArray(options.cookies) || options.cookies.length === 0) {
+      return {};
+    }
+    const csrfToken = String(options.cookies[0]);
+    const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
+    const parts = [`ct0=${csrfToken}`];
+    if (authToken) parts.push(`auth_token=${authToken}`);
+    return { csrfToken, cookieHeader: parts.join('; ') };
+  }
+
+  function addBrowserOptions(cmd: import('commander').Command): import('commander').Command {
+    return cmd
+      .option('--max-pages <n>', 'Max pages to fetch', (v: string) => Number(v), 500)
+      .option('--target-adds <n>', 'Stop after N new items', (v: string) => Number(v))
+      .option('--delay-ms <n>', 'Delay between requests in ms', (v: string) => Number(v), 600)
+      .option('--max-minutes <n>', 'Max runtime in minutes', (v: string) => Number(v), 30)
+      .option('--browser <name>', 'Browser to read session from (chrome, chromium, brave, firefox, ...)')
+      .option('--cookies <values...>', 'Pass ct0 and auth_token directly (skips browser extraction)')
+      .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+      .option('--chrome-profile-directory <name>', 'Chrome-family profile name')
+      .option('--firefox-profile-dir <path>', 'Firefox profile directory');
+  }
+
+  function registerUserSyncCommand(cfg: UserSyncCmdConfig, description: string, hasScreenNameArg: boolean): void {
+    let cmd = program.command(cfg.type === 'timeline' ? 'sync-timeline' : cfg.type === 'likes' ? 'sync-likes' : 'sync-feed')
+      .description(description);
+    if (hasScreenNameArg) {
+      cmd = cmd.argument('<screen-name>', 'Your X screen name (without @)');
+    }
+    cmd = addBrowserOptions(cmd);
+    cmd.action(safe(async (...args: any[]) => {
+      const screenName = hasScreenNameArg ? String(args[0]) : undefined;
+      const options = hasScreenNameArg ? args[1] : args[0];
+      ensureDataDir();
+      const startTime = Date.now();
+      let lastSync: SyncProgress = { page: 0, totalFetched: 0, newAdded: 0, running: true, done: false };
+      const spinner = createSpinner(() => {
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        return `Syncing ${cfg.label}...  ${lastSync.newAdded} new  \u2502  page ${lastSync.page}  \u2502  ${elapsed}s`;
+      });
+
+      const { csrfToken, cookieHeader } = parseCookieOptions(options);
+
+      const result = await runWithSpinner(spinner, () => syncUserTimeline(
+        cfg.type,
+        cfg.paths,
+        {
+          screenName,
+          incremental: true,
+          maxPages: Number(options.maxPages) || 500,
+          targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
+          delayMs: Number(options.delayMs) || 600,
+          maxMinutes: Number(options.maxMinutes) || 30,
+          browser: options.browser ? String(options.browser) : undefined,
+          csrfToken,
+          cookieHeader,
+          chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+          chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+          firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+          onProgress: (status: SyncProgress) => {
+            lastSync = status;
+            spinner.update();
+          },
+        }
+      ));
+
+      console.log(`\n  \u2713 ${result.added} new ${cfg.label} synced (${result.totalBookmarks} total)`);
+      console.log(`  ${friendlyStopReason(result.stopReason)}`);
+      console.log(`  \u2713 Data: ${dataDir()}\n`);
+    }));
+  }
+
+  registerUserSyncCommand(
+    { type: 'likes', label: 'likes', paths: { cache: twitterLikesCachePath(), meta: twitterLikesMetaPath(), state: twitterLikesBackfillStatePath() } },
+    'Sync liked tweets from X into your local database',
+    true,
+  );
+
+  registerUserSyncCommand(
+    { type: 'timeline', label: 'tweets', paths: { cache: twitterTimelineCachePath(), meta: twitterTimelineMetaPath(), state: twitterTimelineBackfillStatePath() } },
+    'Sync your own tweets from X into your local database',
+    true,
+  );
+
+  registerUserSyncCommand(
+    { type: 'feed', label: 'feed items', paths: { cache: twitterFeedCachePath(), meta: twitterFeedMetaPath(), state: twitterFeedBackfillStatePath() } },
+    'Sync your Following feed from X into your local database',
+    false,
+  );
+
   // ── search ──────────────────────────────────────────────────────────────
 
   program
@@ -797,6 +930,7 @@ export function buildCli() {
     .option('--author <handle>', 'Filter by author handle')
     .option('--after <date>', 'Bookmarks posted after this date (YYYY-MM-DD)')
     .option('--before <date>', 'Bookmarks posted before this date (YYYY-MM-DD)')
+    .option('--source <source>', 'Filter by source (bookmarks, likes, timeline, feed)', parseSource)
     .option('--limit <n>', 'Max results', (v: string) => Number(v), 20)
     .action(safe(async (query: string, options) => {
       if (!requireIndex()) return;
@@ -805,6 +939,7 @@ export function buildCli() {
         author: options.author ? String(options.author) : undefined,
         after: options.after ? String(options.after) : undefined,
         before: options.before ? String(options.before) : undefined,
+        source: options.source ? String(options.source) : undefined,
         limit: Number(options.limit) || 20,
       });
       console.log(formatSearchResults(results));
@@ -822,6 +957,7 @@ export function buildCli() {
     .option('--category <category>', 'Filter by category')
     .option('--domain <domain>', 'Filter by domain')
     .option('--folder <name>', 'Filter by X bookmark folder name (exact or unambiguous prefix)')
+    .option('--source <source>', 'Filter by source (bookmarks, likes, timeline, feed)', parseSource)
     .option('--limit <n>', 'Max results', (v: string) => Number(v), 30)
     .option('--offset <n>', 'Offset into results', (v: string) => Number(v), 0)
     .option('--json', 'JSON output')
@@ -851,6 +987,7 @@ export function buildCli() {
         category: options.category ? String(options.category) : undefined,
         domain: options.domain ? String(options.domain) : undefined,
         folder: resolvedFolder,
+        source: options.source ? String(options.source) : undefined,
         limit: Number(options.limit) || 30,
         offset: Number(options.offset) || 0,
       });
@@ -900,9 +1037,10 @@ export function buildCli() {
   program
     .command('stats')
     .description('Aggregate statistics from your bookmarks')
-    .action(safe(async () => {
+    .option('--source <source>', 'Filter by source (bookmarks, likes, timeline, feed)', parseSource)
+    .action(safe(async (options: any) => {
       if (!requireIndex()) return;
-      const stats = await getStats();
+      const stats = await getStats({ source: options.source ? String(options.source) : undefined });
       console.log(`Bookmarks: ${stats.totalBookmarks}`);
       console.log(`Unique authors: ${stats.uniqueAuthors}`);
       console.log(`Date range: ${stats.dateRange.earliest?.slice(0, 10) ?? '?'} to ${stats.dateRange.latest?.slice(0, 10) ?? '?'}`);

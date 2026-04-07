@@ -29,16 +29,21 @@ Single CLI application built with Commander.js. All data stored in `~/.ft-bookma
 | `src/bookmarks-viz.ts` | ANSI terminal dashboard |
 | `src/chrome-cookies.ts` | Chrome cookie extraction (macOS Keychain) |
 | `src/xauth.ts` | OAuth 2.0 flow |
+| `src/graphql-user-sync.ts` | GraphQL sync for likes, timeline, and feed |
 | `src/db.ts` | WASM SQLite layer (sql.js-fts5) |
 
 ### Data flow
 
 ```
-Chrome cookies → GraphQL API → JSONL cache → SQLite FTS5 index
-                                    ↓
-                           Regex classification
-                                    ↓
-                         Search / List / Viz
+Chrome cookies → GraphQL API → JSONL caches → SQLite FTS5 index
+                   │              (bookmarks.jsonl,
+                   │               likes.jsonl,
+                   │               timeline.jsonl,
+                   │               feed.jsonl)
+                   ↓
+           Regex classification
+                   ↓
+         Search / List / Viz
 ```
 
 ### Dependencies
