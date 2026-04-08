@@ -561,7 +561,10 @@ export async function syncBookmarksGraphQL(
     result.records.forEach((r) => allSeenIds.push(r.id));
     const reachedLatestStored = Boolean(newestKnownId) && result.records.some((record) => record.id === newestKnownId);
 
-    stalePages = added === 0 ? stalePages + 1 : 0;
+    // In incremental mode, a stale page is one that didn't add any *new* bookmarks.
+    // In rebuild mode, we expect added to be 0 (just merging), so a stale page is
+    // one that returned no records at all from the API.
+    stalePages = (incremental ? added === 0 : result.records.length === 0) ? stalePages + 1 : 0;
 
     options.onProgress?.({
       page,
