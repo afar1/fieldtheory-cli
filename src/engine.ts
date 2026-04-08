@@ -20,7 +20,7 @@ export interface EngineConfig {
 
 const KNOWN_ENGINES: Record<string, EngineConfig> = {
   claude: { bin: 'claude', args: (p) => ['-p', '--output-format', 'text', p] },
-  codex:  { bin: 'codex',  args: (p) => ['exec', p] },
+  codex:  { bin: 'codex',  args: (p) => ['exec', '--skip-git-repo-check', p] },
 };
 
 /** Order used when auto-detecting. */
