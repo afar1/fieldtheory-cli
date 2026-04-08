@@ -31,49 +31,77 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 
 ## Commands
 
+### Sync
+
 | Command | Description |
 |---------|-------------|
-| `ft sync` | Download and sync all bookmarks (no API required) |
-| `ft sync --classify` | Sync then classify new bookmarks with LLM |
+| `ft sync` | Download and sync bookmarks (no API required) |
 | `ft sync --full` | Full history crawl (not just incremental) |
+| `ft sync --gaps` | Backfill missing quoted tweets and expand truncated articles |
+| `ft sync --classify` | Sync then classify new bookmarks with LLM |
+| `ft sync --api` | Sync via OAuth API (cross-platform) |
+| `ft auth` | Set up OAuth for API-based sync (optional) |
+
+### Search and browse
+
+| Command | Description |
+|---------|-------------|
 | `ft search <query>` | Full-text search with BM25 ranking |
-| `ft viz` | Terminal dashboard with sparklines, categories, and domains |
-| `ft classify` | Classify by category and domain using LLM |
-| `ft classify --regex` | Classify by category using simple regex |
-| `ft categories` | Show category distribution |
-| `ft domains` | Subject domain distribution |
-| `ft stats` | Top authors, languages, date range |
 | `ft list` | Filter by author, date, category, domain |
 | `ft show <id>` | Show one bookmark in detail |
-| `ft index` | Merge new bookmarks into search index (preserves classifications) |
-| `ft auth` | Set up OAuth for API-based sync (optional) |
-| `ft sync --api` | Sync via OAuth API (cross-platform) |
-| `ft fetch-media` | Download media assets (static images only) |
+| `ft sample <category>` | Random sample from a category |
+| `ft stats` | Top authors, languages, date range |
+| `ft viz` | Terminal dashboard with sparklines, categories, and domains |
+| `ft categories` | Show category distribution |
+| `ft domains` | Subject domain distribution |
+
+### Classification
+
+| Command | Description |
+|---------|-------------|
+| `ft classify` | Classify by category and domain using LLM |
+| `ft classify --regex` | Classify by category using simple regex |
+| `ft classify-domains` | Classify by subject domain only (LLM) |
+| `ft model` | View or change the default LLM engine |
+
+### Knowledge base
+
+| Command | Description |
+|---------|-------------|
 | `ft md` | Export bookmarks as individual markdown files |
-| `ft wiki` | Compile a Karpathy-style interlinked knowledge base from bookmarks |
+| `ft wiki` | Compile a Karpathy-style interlinked knowledge base |
 | `ft ask <question>` | Ask questions against the knowledge base |
 | `ft ask <question> --save` | Ask and save the answer as a concept page |
 | `ft lint` | Health-check the wiki for broken links and missing pages |
 | `ft lint --fix` | Auto-fix fixable wiki issues |
+
+### Adjacent possible
+
+| Command | Description |
+|---------|-------------|
+| `ft adjacent explore <seed>` | LLM-driven 2x2 idea expansion from a seed |
+| `ft adjacent list` | List recent considerations |
+| `ft adjacent show <id>` | Show a consideration and its dots |
+| `ft adjacent artifacts` | List stored artifacts |
+| `ft adjacent status` | Show Adjacent store stats |
+| `ft adjacent frames` | List available expansion frames |
+
+### Agent integration
+
+| Command | Description |
+|---------|-------------|
 | `ft skill install` | Install `/fieldtheory` skill for Claude Code and Codex |
 | `ft skill show` | Print skill content to stdout |
 | `ft skill uninstall` | Remove installed skill files |
-| `ft model` | Set or change the default LLM engine |
+
+### Utilities
+
+| Command | Description |
+|---------|-------------|
+| `ft index` | Rebuild search index from JSONL cache (preserves classifications) |
+| `ft fetch-media` | Download media assets (static images only) |
 | `ft status` | Show sync status and data location |
 | `ft path` | Print data directory path |
-
-## Knowledge base
-
-Turn your bookmarks into an interlinked markdown wiki:
-
-```bash
-ft wiki              # Compile knowledge base (categories, domains, entities, concepts)
-ft ask "What AI tools have I been saving?"
-ft lint --fix        # Fix broken links and orphan pages
-ft md                # Export as flat markdown files
-```
-
-The wiki uses LLM synthesis to produce category pages, domain overviews, entity profiles, and concept maps — all cross-linked. Incremental compilation with resume on Ctrl-C.
 
 ## Agent integration
 
