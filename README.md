@@ -51,9 +51,10 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | `ft fetch-media` | Download media assets (static images only) |
 | `ft md` | Export bookmarks as individual markdown files |
 | `ft wiki` | Compile a Karpathy-style interlinked knowledge base from bookmarks |
-| `ft wiki ask <question>` | Ask questions against the knowledge base |
-| `ft wiki lint` | Health-check the wiki for broken links and missing pages |
-| `ft wiki lint --fix` | Auto-fix fixable wiki issues |
+| `ft ask <question>` | Ask questions against the knowledge base |
+| `ft ask <question> --save` | Ask and save the answer as a concept page |
+| `ft lint` | Health-check the wiki for broken links and missing pages |
+| `ft lint --fix` | Auto-fix fixable wiki issues |
 | `ft skill install` | Install `/fieldtheory` skill for Claude Code and Codex |
 | `ft skill show` | Print skill content to stdout |
 | `ft skill uninstall` | Remove installed skill files |
@@ -67,8 +68,8 @@ Turn your bookmarks into an interlinked markdown wiki:
 
 ```bash
 ft wiki              # Compile knowledge base (categories, domains, entities, concepts)
-ft wiki ask "What AI tools have I been saving?"
-ft wiki lint --fix   # Fix broken links and orphan pages
+ft ask "What AI tools have I been saving?"
+ft lint --fix        # Fix broken links and orphan pages
 ft md                # Export as flat markdown files
 ```
 
