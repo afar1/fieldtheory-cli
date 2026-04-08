@@ -1,21 +1,17 @@
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, unlinkSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir, homedir, platform } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { ChromeCookieResult } from './chrome-cookies.js';
-
-// ── Profile detection ────────────────────────────────────────────────────────
+import { openDb } from './db.js';
 
 function firefoxBaseDir(): string {
   const os = platform();
   const home = homedir();
   if (os === 'darwin') return join(home, 'Library', 'Application Support', 'Firefox');
   if (os === 'linux') return join(home, '.mozilla', 'firefox');
-  throw new Error(
-    `Firefox cookie extraction is currently supported on macOS and Linux only (detected: ${os}).\n` +
-    'Pass cookies manually:  ft sync --cookies <ct0> <auth_token>'
-  );
+  if (os === 'win32') return join(home, 'AppData', 'Roaming', 'Mozilla', 'Firefox');
+  throw new Error(`Firefox cookie extraction is not supported on ${os}.`);
 }
 
 export function detectFirefoxProfileDir(): string {
@@ -51,7 +47,6 @@ export function detectFirefoxProfileDir(): string {
   const resolve = (p: { path: string; isRelative: boolean }) =>
     p.isRelative ? join(base, p.path) : p.path;
 
-  // Prefer default-release, then any profile with cookies.sqlite
   const defaultRelease = profiles.find(p => p.name === 'default-release');
   if (defaultRelease) {
     const dir = resolve(defaultRelease);
@@ -69,13 +64,11 @@ export function detectFirefoxProfileDir(): string {
   );
 }
 
-// ── Cookie query ─────────────────────────────────────────────────────────────
-
-function queryFirefoxCookies(
+async function queryFirefoxCookies(
   dbPath: string,
   host: string,
   names: string[],
-): { name: string; value: string }[] {
+): Promise<{ name: string; value: string }[]> {
   if (!existsSync(dbPath)) {
     throw new Error(
       `Firefox cookies.sqlite not found at: ${dbPath}\n` +
@@ -83,32 +76,32 @@ function queryFirefoxCookies(
     );
   }
 
-  // Build parameterized-safe SQL. host and names are hardcoded by callers,
-  // but we escape anyway to prevent injection if the API is ever widened.
   const safeHost = host.replace(/'/g, "''");
   const nameList = names.map(n => `'${n.replace(/'/g, "''")}'`).join(',');
   const sql = `SELECT name, value FROM moz_cookies WHERE host LIKE '%${safeHost}' AND name IN (${nameList});`;
 
-  const tryQuery = (path: string): string =>
-    execFileSync('sqlite3', ['-json', path, sql], {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 10000,
-    }).trim();
+  const tryQuery = async (path: string): Promise<{ name: string; value: string }[]> => {
+    const db = await openDb(path);
+    try {
+      const result = db.exec(sql);
+      if (result.length === 0) return [];
+      const [table] = result;
+      return table.values.map(([name, value]) => ({
+        name: String(name ?? ''),
+        value: String(value ?? ''),
+      }));
+    } finally {
+      db.close();
+    }
+  };
 
-  let output: string;
   try {
-    output = tryQuery(dbPath);
+    return await tryQuery(dbPath);
   } catch {
-    // Firefox may hold a WAL lock — copy the DB and query the copy
     const tmpDb = join(tmpdir(), `ft-ff-cookies-${randomUUID()}.db`);
     try {
       copyFileSync(dbPath, tmpDb);
-      const walPath = dbPath + '-wal';
-      const shmPath = dbPath + '-shm';
-      if (existsSync(walPath)) copyFileSync(walPath, tmpDb + '-wal');
-      if (existsSync(shmPath)) copyFileSync(shmPath, tmpDb + '-shm');
-      output = tryQuery(tmpDb);
+      return await tryQuery(tmpDb);
     } catch (e2: any) {
       throw new Error(
         `Could not read Firefox cookies database.\n` +
@@ -118,28 +111,17 @@ function queryFirefoxCookies(
       );
     } finally {
       try { unlinkSync(tmpDb); } catch {}
-      try { unlinkSync(tmpDb + '-wal'); } catch {}
-      try { unlinkSync(tmpDb + '-shm'); } catch {}
     }
-  }
-
-  if (!output || output === '[]') return [];
-  try {
-    return JSON.parse(output);
-  } catch {
-    return [];
   }
 }
 
-// ── Main export ──────────────────────────────────────────────────────────────
-
-export function extractFirefoxXCookies(profileDir?: string): ChromeCookieResult {
+export async function extractFirefoxXCookies(profileDir?: string): Promise<ChromeCookieResult> {
   const dir = profileDir ?? detectFirefoxProfileDir();
   const dbPath = join(dir, 'cookies.sqlite');
 
-  let cookies = queryFirefoxCookies(dbPath, '.x.com', ['ct0', 'auth_token']);
+  let cookies = await queryFirefoxCookies(dbPath, '.x.com', ['ct0', 'auth_token']);
   if (cookies.length === 0) {
-    cookies = queryFirefoxCookies(dbPath, '.twitter.com', ['ct0', 'auth_token']);
+    cookies = await queryFirefoxCookies(dbPath, '.twitter.com', ['ct0', 'auth_token']);
   }
 
   const cookieMap = new Map(cookies.map(c => [c.name, c.value]));
@@ -157,7 +139,6 @@ export function extractFirefoxXCookies(profileDir?: string): ChromeCookieResult 
     );
   }
 
-  // Validate cookie values are printable ASCII (same check as Chrome path)
   const validateCookie = (name: string, value: string): string => {
     const cleaned = value.trim();
     if (!cleaned || !/^[\x21-\x7E]+$/.test(cleaned)) {

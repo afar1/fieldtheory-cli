@@ -504,7 +504,7 @@ export async function syncBookmarksGraphQL(
     const config = loadChromeSessionConfig({ browserId: options.browser });
 
     if (config.browser.cookieBackend === 'firefox') {
-      const cookies = extractFirefoxXCookies(options.firefoxProfileDir);
+      const cookies = await extractFirefoxXCookies(options.firefoxProfileDir);
       csrfToken = cookies.csrfToken;
       cookieHeader = cookies.cookieHeader;
     } else {
