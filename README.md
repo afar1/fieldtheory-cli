@@ -75,17 +75,6 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | `ft lint` | Health-check the wiki for broken links and missing pages |
 | `ft lint --fix` | Auto-fix fixable wiki issues |
 
-### Adjacent possible
-
-| Command | Description |
-|---------|-------------|
-| `ft adjacent explore <seed>` | LLM-driven 2x2 idea expansion from a seed |
-| `ft adjacent list` | List recent considerations |
-| `ft adjacent show <id>` | Show a consideration and its dots |
-| `ft adjacent artifacts` | List stored artifacts |
-| `ft adjacent status` | Show Adjacent store stats |
-| `ft adjacent frames` | List available expansion frames |
-
 ### Agent integration
 
 | Command | Description |
