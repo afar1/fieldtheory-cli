@@ -540,6 +540,24 @@ test('sanitizeBookmarkedAt: clears timestamps too far after syncedAt', () => {
   assert.equal(record.bookmarkedAt, null);
 });
 
+test('sanitizeBookmarkedAt: preserves valid timestamp within range', () => {
+  const record = sanitizeBookmarkedAt(makeRecord({
+    postedAt: 'Tue Mar 10 12:00:00 +0000 2026',
+    syncedAt: '2026-03-28T00:00:00.000Z',
+    bookmarkedAt: '2026-03-15T00:00:00.000Z',
+  }));
+
+  assert.equal(record.bookmarkedAt, '2026-03-15T00:00:00.000Z');
+});
+
+test('sanitizeBookmarkedAt: returns record unchanged when bookmarkedAt is null', () => {
+  const input = makeRecord({ postedAt: '2026-03-10', bookmarkedAt: null });
+  const result = sanitizeBookmarkedAt(input);
+
+  assert.equal(result.bookmarkedAt, null);
+  assert.strictEqual(result, input); // same reference — no unnecessary copy
+});
+
 test('formatSyncResult: formats all fields', () => {
   const result = formatSyncResult({
     added: 50,
