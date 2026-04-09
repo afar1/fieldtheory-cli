@@ -690,7 +690,7 @@ export function buildCli(partialDeps: Partial<CliDeps> = {}) {
           // stale limit is fine.
           const continueWithoutCursor = Boolean(options.continue) && !resumeCursor;
 
-          const result = await runWithSpinner(spinner, () => syncBookmarksGraphQL({
+          const result = await runWithSpinner(spinner, () => deps.syncBookmarksGraphQL({
             incremental: !Boolean(options.rebuild) && !Boolean(options.continue),
             resumeCursor,
             stalePageLimit: continueWithoutCursor ? Infinity : undefined,

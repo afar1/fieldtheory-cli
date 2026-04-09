@@ -2,7 +2,7 @@ import { ensureDir, readJsonLines, writeJsonLines, readJson, writeJson, pathExis
 import { ensureDataDir, twitterBookmarksCachePath, twitterBookmarksMetaPath, twitterBackfillStatePath } from './paths.js';
 import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText } from './bookmarks-db.js';
-import { createXSessionContext, type XSessionContext } from './x-session.js';
+import { createXSessionContext, DEFAULT_X_USER_AGENT, type XSessionContext } from './x-session.js';
 
 const BOOKMARKS_QUERY_ID = 'Z9GWmP0kP2dajyckAaDUBw';
 const BOOKMARKS_OPERATION = 'Bookmarks';
@@ -716,7 +716,7 @@ async function fetchTweetViaSyndication(tweetId: string): Promise<SyndicationRes
   for (let attempt = 0; attempt < 4; attempt++) {
     const response = await fetch(`${SYNDICATION_URL}?id=${tweetId}&token=x`, {
       headers: {
-        'user-agent': CHROME_UA,
+        'user-agent': DEFAULT_X_USER_AGENT,
       },
     });
 

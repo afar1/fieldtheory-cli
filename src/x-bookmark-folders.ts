@@ -264,7 +264,7 @@ function throwResponseError(action: string, response: GraphqlResponse): never {
   }
   if (isSessionExpired(response)) {
     throw new GraphqlRequestError(
-      `${action} failed because your X browser session appears to be expired. Open Chrome, visit https://x.com, make sure you're logged in, then retry.`,
+      `${action} failed because your X browser session appears to be expired. Open your browser, visit https://x.com, make sure you're logged in, then retry.`,
       'session',
       response.status,
     );
