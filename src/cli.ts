@@ -31,6 +31,13 @@ import { listBrowserIds } from './browsers.js';
 import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir } from './paths.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
+import {
+  syncBookmarkFolders,
+  formatBookmarkFolderSyncResult,
+  type FolderBy,
+  type BookmarkFolderSyncProgress,
+  type BookmarkFolderSyncOptions,
+} from './x-bookmark-folders.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -81,6 +88,23 @@ export async function runWithSpinner<T>(
   } finally {
     spinner.stop();
   }
+}
+
+function renderFolderSyncProgress(status: BookmarkFolderSyncProgress, startTime: number): void {
+  const elapsed = Math.round((Date.now() - startTime) / 1000);
+  const spin = SPINNER[spinnerIdx++ % SPINNER.length];
+  const phaseLabel = {
+    planning: 'Planning folders',
+    folders: 'Preparing folders',
+    reconcile: 'Reconciling existing',
+    assigning: 'Assigning bookmarks',
+  }[status.phase];
+  const total = Math.max(status.total, 0);
+  const completed = Math.max(status.completed, 0);
+  const pct = total > 0 ? `${Math.round((Math.min(completed, total) / total) * 100)}%` : '--';
+  const detail = status.detail ? `  \u2502  ${status.detail}` : '';
+  const line = `  ${spin} ${phaseLabel}...  ${completed}/${total}${total > 0 ? ` (${pct})` : ''}  \u2502  ${elapsed}s${detail}`;
+  process.stderr.write(`\r\x1b[K${line}`);
 }
 
 const FRIENDLY_STOP_REASONS: Record<string, string> = {
@@ -353,9 +377,117 @@ function safe(fn: (...args: any[]) => Promise<void>): (...args: any[]) => Promis
   };
 }
 
+function collectValues(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+function resolveCookieOverrides(options: any): { csrfToken?: string; cookieHeader?: string } {
+  if (!options.cookies || !Array.isArray(options.cookies) || options.cookies.length === 0) {
+    return {};
+  }
+  const csrfToken = String(options.cookies[0]);
+  const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
+  const parts = [`ct0=${csrfToken}`];
+  if (authToken) parts.push(`auth_token=${authToken}`);
+  return { csrfToken, cookieHeader: parts.join('; ') };
+}
+
+function buildFolderSyncOptions(
+  options: any,
+  defaults: {
+    maxActions: number;
+    maxMinutes: number;
+    allowUntilDone: boolean;
+    maxActionsProvided?: boolean;
+    maxMinutesProvided?: boolean;
+  },
+): BookmarkFolderSyncOptions {
+  return {
+    folderBy: (options.folderBy ? String(options.folderBy) : 'domain') as FolderBy,
+    minFolderSize: Number(options.minFolderSize) || 100,
+    includeLabels: Array.isArray(options.includeLabel) ? options.includeLabel.map(String) : [],
+    excludeLabels: Array.isArray(options.excludeLabel) ? options.excludeLabel.map(String) : [],
+    dryRun: Boolean(options.dryRun),
+    maxActions: defaults.maxActionsProvided && typeof options.maxActions === 'number' && !Number.isNaN(options.maxActions)
+      ? options.maxActions
+      : defaults.maxActions,
+    maxMinutes: defaults.maxMinutesProvided && typeof options.maxMinutes === 'number' && !Number.isNaN(options.maxMinutes)
+      ? options.maxMinutes
+      : defaults.maxMinutes,
+    untilDone: defaults.allowUntilDone ? Boolean(options.untilDone) : false,
+    browser: options.browser ? String(options.browser) : undefined,
+    ...resolveCookieOverrides(options),
+    chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+    chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+    firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+  };
+}
+
+function withFolderSyncProgress(
+  folderOptions: BookmarkFolderSyncOptions,
+  enabled: boolean,
+): BookmarkFolderSyncOptions {
+  if (!enabled) return folderOptions;
+  const startTime = Date.now();
+  return {
+    ...folderOptions,
+    onProgress: (status: BookmarkFolderSyncProgress) => {
+      renderFolderSyncProgress(status, startTime);
+    },
+  };
+}
+
+function addSyncFolderFlag(command: Command): Command {
+  return command.option('--folders', 'Push local classifications into X bookmark folders after sync', false);
+}
+
+function addBrowserSessionFlags(command: Command): Command {
+  return command
+    .option('--browser <name>', 'Browser to read session from (chrome, chromium, brave, firefox, ...)')
+    .option('--cookies <values...>', 'Pass ct0 and auth_token directly (skips browser extraction)')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory');
+}
+
+function addAdvancedFolderSyncFlags(
+  command: Command,
+  defaults: { allowUntilDone: boolean; includeMaxMinutes?: boolean },
+): Command {
+  command
+    .option('--folder-by <domain|category>', 'Choose whether folders are derived from domains or categories', 'domain')
+    .option('--min-folder-size <n>', 'Only create folders for labels with at least N bookmarks', (v: string) => Number(v), 100)
+    .option('--include-label <slug>', 'Force-include a label', collectValues, [])
+    .option('--exclude-label <slug>', 'Exclude a label', collectValues, [])
+    .option('--dry-run', 'Preview folder changes without mutating X', false)
+    .option('--max-actions <n>', 'Maximum bookmark-folder assignments to attempt', (v: string) => Number(v));
+
+  if (defaults.includeMaxMinutes !== false) {
+    command.option('--max-minutes <n>', 'Maximum runtime for folder sync in minutes', (v: string) => Number(v));
+  }
+
+  if (defaults.allowUntilDone) {
+    command.option('--until-done', 'Keep resuming folder assignment work until the backlog is exhausted', false);
+  }
+
+  return command;
+}
+
+interface CliDeps {
+  syncTwitterBookmarks: typeof syncTwitterBookmarks;
+  syncBookmarksGraphQL: typeof syncBookmarksGraphQL;
+  syncBookmarkFolders: typeof syncBookmarkFolders;
+}
+
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
-export function buildCli() {
+export function buildCli(partialDeps: Partial<CliDeps> = {}) {
+  const deps: CliDeps = {
+    syncTwitterBookmarks,
+    syncBookmarksGraphQL,
+    syncBookmarkFolders,
+    ...partialDeps,
+  };
   const program = new Command();
 
   async function rebuildIndex(): Promise<number> {
@@ -410,7 +542,8 @@ export function buildCli() {
 
   // ── sync ────────────────────────────────────────────────────────────────
 
-  program
+  addSyncFolderFlag(
+    addBrowserSessionFlags(program
     .command('sync')
     .description('Sync bookmarks from X into your local database')
     .option('--api', 'Use OAuth v2 API instead of Chrome session', false)
@@ -422,13 +555,8 @@ export function buildCli() {
     .option('--max-pages <n>', 'Max pages to fetch (default: unlimited)', (v: string) => Number(v))
     .option('--target-adds <n>', 'Stop after N new bookmarks', (v: string) => Number(v))
     .option('--delay-ms <n>', 'Delay between requests in ms', (v: string) => Number(v), 600)
-    .option('--max-minutes <n>', 'Max runtime in minutes', (v: string) => Number(v), 30)
-    .option('--browser <name>', 'Browser to read session from (chrome, chromium, brave, firefox, ...)')
-    .option('--cookies <values...>', 'Pass ct0 and auth_token directly (skips browser extraction)')
-    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
-    .option('--chrome-profile-directory <name>', 'Chrome-family profile name')
-    .option('--firefox-profile-dir <path>', 'Firefox profile directory')
-    .action(async (options) => {
+    .option('--max-minutes <n>', 'Max runtime in minutes', (v: string) => Number(v), 30))
+  ).action(async (options) => {
       const firstRun = isFirstRun();
       if (firstRun) showSyncWelcome();
       ensureDataDir();
@@ -519,7 +647,7 @@ export function buildCli() {
         const mode = Boolean(options.rebuild) ? 'full' : 'incremental';
 
         if (useApi) {
-          const result = await syncTwitterBookmarks(mode, {
+          const result = await deps.syncTwitterBookmarks(mode, {
             targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
           });
           console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
@@ -539,16 +667,7 @@ export function buildCli() {
             }
             return `Syncing bookmarks...  ${lastSync.newAdded} new  \u2502  page ${lastSync.page}  \u2502  ${elapsed}s`;
           });
-          // Parse --cookies <ct0> [auth_token] — variadic, gives us an array
-          let csrfToken: string | undefined;
-          let cookieHeader: string | undefined;
-          if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
-            csrfToken = String(options.cookies[0]);
-            const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
-            const parts = [`ct0=${csrfToken}`];
-            if (authToken) parts.push(`auth_token=${authToken}`);
-            cookieHeader = parts.join('; ');
-          }
+          const { csrfToken, cookieHeader } = resolveCookieOverrides(options);
 
           // Load saved cursor for --continue mode
           let resumeCursor: string | undefined;
@@ -571,7 +690,7 @@ export function buildCli() {
           // stale limit is fine.
           const continueWithoutCursor = Boolean(options.continue) && !resumeCursor;
 
-          const result = await runWithSpinner(spinner, () => syncBookmarksGraphQL({
+          const result = await runWithSpinner(spinner, () => deps.syncBookmarksGraphQL({
             incremental: !Boolean(options.rebuild) && !Boolean(options.continue),
             resumeCursor,
             stalePageLimit: continueWithoutCursor ? Infinity : undefined,
@@ -609,6 +728,26 @@ export function buildCli() {
           }
         }
 
+        if (options.folders) {
+          if (!requireIndex()) return;
+          const folderResult = await deps.syncBookmarkFolders(withFolderSyncProgress(
+            buildFolderSyncOptions({
+              browser: options.browser,
+              cookies: options.cookies,
+              chromeUserDataDir: options.chromeUserDataDir,
+              chromeProfileDirectory: options.chromeProfileDirectory,
+              firefoxProfileDir: options.firefoxProfileDir,
+            }, {
+              maxActions: 500,
+              maxMinutes: 15,
+              allowUntilDone: false,
+            }),
+            true,
+          ));
+          process.stderr.write('\n');
+          console.log(`\n${formatBookmarkFolderSyncResult(folderResult)}\n`);
+        }
+
         if (firstRun) {
           console.log(`\n  Next steps:`);
           console.log(`        ft classify              Classify by category and domain (LLM)`);
@@ -644,6 +783,31 @@ export function buildCli() {
         process.exitCode = 1;
       }
     });
+
+  // ── folders sync ───────────────────────────────────────────────────────
+
+  const foldersCommand = program.command('folders').description('Advanced bookmark folder commands');
+
+  addBrowserSessionFlags(addAdvancedFolderSyncFlags(
+    foldersCommand
+      .command('sync')
+      .description('Resume or preview bookmark-folder organization'),
+    { allowUntilDone: true },
+  )).action(safe(async (options, command) => {
+    if (!requireIndex()) return;
+    const folderResult = await deps.syncBookmarkFolders(withFolderSyncProgress(
+      buildFolderSyncOptions(options, {
+        maxActions: options.untilDone ? Number.POSITIVE_INFINITY : 500,
+        maxMinutes: options.untilDone ? 240 : 15,
+        allowUntilDone: true,
+        maxActionsProvided: command.getOptionValueSource('maxActions') !== 'default',
+        maxMinutesProvided: command.getOptionValueSource('maxMinutes') !== 'default',
+      }),
+      !options.dryRun,
+    ));
+    if (!options.dryRun) process.stderr.write('\n');
+    console.log(formatBookmarkFolderSyncResult(folderResult));
+  }));
 
   // ── search ──────────────────────────────────────────────────────────────
 

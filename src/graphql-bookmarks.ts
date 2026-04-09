@@ -1,15 +1,8 @@
 import { ensureDir, readJsonLines, writeJsonLines, readJson, writeJson, pathExists } from './fs.js';
 import { ensureDataDir, twitterBookmarksCachePath, twitterBookmarksMetaPath, twitterBackfillStatePath } from './paths.js';
-import { loadChromeSessionConfig } from './config.js';
-import { extractChromeXCookies } from './chrome-cookies.js';
-import { extractFirefoxXCookies } from './firefox-cookies.js';
 import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText } from './bookmarks-db.js';
-
-const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
-
-const X_PUBLIC_BEARER =
-  'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
+import { createXSessionContext, DEFAULT_X_USER_AGENT, type XSessionContext } from './x-session.js';
 
 const BOOKMARKS_QUERY_ID = 'Z9GWmP0kP2dajyckAaDUBw';
 const BOOKMARKS_OPERATION = 'Bookmarks';
@@ -186,18 +179,6 @@ function buildUrl(cursor?: string, count = 20): string {
     features: JSON.stringify(GRAPHQL_FEATURES),
   });
   return `https://x.com/i/api/graphql/${BOOKMARKS_QUERY_ID}/${BOOKMARKS_OPERATION}?${params}`;
-}
-
-function buildHeaders(csrfToken: string, cookieHeader?: string): Record<string, string> {
-  return {
-    authorization: `Bearer ${X_PUBLIC_BEARER}`,
-    'x-csrf-token': csrfToken,
-    'x-twitter-auth-type': 'OAuth2Session',
-    'x-twitter-active-user': 'yes',
-    'content-type': 'application/json',
-    'user-agent': CHROME_UA,
-    cookie: cookieHeader ?? `ct0=${csrfToken}`,
-  };
 }
 
 interface PageResult {
@@ -382,11 +363,24 @@ export function parseBookmarksResponse(json: any, now?: string): PageResult {
   return { records, nextCursor };
 }
 
-async function fetchPageWithRetry(csrfToken: string, cursor?: string, cookieHeader?: string, pageSize?: number): Promise<PageResult> {
+async function fetchPageWithRetry(
+  session: XSessionContext,
+  cursor?: string,
+  pageSize?: number,
+): Promise<PageResult> {
   let lastError: Error | undefined;
 
   for (let attempt = 0; attempt < 4; attempt++) {
-    const response = await fetch(buildUrl(cursor, pageSize), { headers: buildHeaders(csrfToken, cookieHeader) });
+    const effectiveUrl = buildUrl(cursor, pageSize);
+    const url = effectiveUrl;
+    const path = new URL(url).pathname;
+    const headers = { ...session.headers };
+    try {
+      headers['x-client-transaction-id'] = await session.transactionIdGenerator.generate('GET', path);
+    } catch {
+      // Best effort: bookmark sync already works in some environments without this header.
+    }
+    const response = await fetch(effectiveUrl, { headers });
 
     if (response.status === 429) {
       const waitSec = Math.min(15 * Math.pow(2, attempt), 120);
@@ -494,27 +488,14 @@ export async function syncBookmarksGraphQL(
   const checkpointEvery = options.checkpointEvery ?? 25;
   const pageSize = Math.max(1, Math.min(options.pageSize ?? 20, 100));
 
-  let csrfToken: string;
-  let cookieHeader: string | undefined;
-
-  if (options.csrfToken) {
-    csrfToken = options.csrfToken;
-    cookieHeader = options.cookieHeader;
-  } else {
-    const config = loadChromeSessionConfig({ browserId: options.browser });
-
-    if (config.browser.cookieBackend === 'firefox') {
-      const cookies = extractFirefoxXCookies(options.firefoxProfileDir);
-      csrfToken = cookies.csrfToken;
-      cookieHeader = cookies.cookieHeader;
-    } else {
-      const chromeDir = options.chromeUserDataDir ?? config.chromeUserDataDir;
-      const chromeProfile = options.chromeProfileDirectory ?? config.chromeProfileDirectory;
-      const cookies = extractChromeXCookies(chromeDir, chromeProfile, config.browser);
-      csrfToken = cookies.csrfToken;
-      cookieHeader = cookies.cookieHeader;
-    }
-  }
+  const session = createXSessionContext({
+    browser: options.browser,
+    csrfToken: options.csrfToken,
+    cookieHeader: options.cookieHeader,
+    chromeUserDataDir: options.chromeUserDataDir,
+    chromeProfileDirectory: options.chromeProfileDirectory,
+    firefoxProfileDir: options.firefoxProfileDir,
+  });
 
   ensureDataDir();
   const cachePath = twitterBookmarksCachePath();
@@ -547,7 +528,7 @@ export async function syncBookmarksGraphQL(
       break;
     }
 
-    const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader, pageSize);
+    const result = await fetchPageWithRetry(session, cursor, pageSize);
     page += 1;
 
     if (result.records.length === 0 && !result.nextCursor) {
@@ -636,7 +617,7 @@ export async function syncBookmarksGraphQL(
         break;
       }
 
-      const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader, pageSize);
+      const result = await fetchPageWithRetry(session, cursor, pageSize);
       page += 1;
 
       if (result.records.length === 0 && !result.nextCursor) {
@@ -735,7 +716,7 @@ async function fetchTweetViaSyndication(tweetId: string): Promise<SyndicationRes
   for (let attempt = 0; attempt < 4; attempt++) {
     const response = await fetch(`${SYNDICATION_URL}?id=${tweetId}&token=x`, {
       headers: {
-        'user-agent': CHROME_UA,
+        'user-agent': DEFAULT_X_USER_AGENT,
       },
     });
 

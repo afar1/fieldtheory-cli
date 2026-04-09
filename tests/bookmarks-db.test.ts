@@ -3,7 +3,14 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById } from '../src/bookmarks-db.js';
+import {
+  buildIndex,
+  searchBookmarks,
+  getStats,
+  formatSearchResults,
+  getBookmarkById,
+  openBookmarksIndexDb,
+} from '../src/bookmarks-db.js';
 import { openDb, saveDb } from '../src/db.js';
 import { twitterBookmarksIndexPath } from '../src/paths.js';
 
@@ -47,7 +54,7 @@ test('buildIndex refreshes existing rows without dropping classifications', asyn
         `UPDATE bookmarks
          SET categories = ?, primary_category = ?, domains = ?, primary_domain = ?, github_urls = ?
          WHERE id = ?`,
-        ['ai,ml', 'research', 'example.com', 'example.com', '["https://github.com/openai/test"]', '1']
+        ['ai,ml', 'research', 'example.com', 'example.com', '["https://github.com/openai/test"]', '1'],
       );
       saveDb(db, dbPath);
     } finally {
@@ -61,7 +68,7 @@ test('buildIndex refreshes existing rows without dropping classifications', asyn
             text: 'Machine learning note updated',
             bookmarkedAt: '2026-04-02T00:00:00Z',
           }
-        : fixture
+        : fixture,
     );
     const jsonl = updatedFixtures.map((r) => JSON.stringify(r)).join('\n') + '\n';
     await writeFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), jsonl);
@@ -79,6 +86,66 @@ test('buildIndex refreshes existing rows without dropping classifications', asyn
     assert.deepEqual(bookmark.domains, ['example.com']);
     assert.equal(bookmark.primaryDomain, 'example.com');
     assert.deepEqual(bookmark.githubUrls, ['https://github.com/openai/test']);
+  });
+});
+
+test('openBookmarksIndexDb upgrades schema version 4 databases with folder sync tables', async () => {
+  await withIsolatedDataDir(async () => {
+    const dbPath = twitterBookmarksIndexPath();
+    const db = await openDb(dbPath);
+    try {
+      db.run(`CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)`);
+      db.run(`INSERT INTO meta VALUES ('schema_version', '4')`);
+      db.run(`CREATE TABLE bookmarks (
+        id TEXT PRIMARY KEY,
+        tweet_id TEXT NOT NULL,
+        url TEXT NOT NULL,
+        text TEXT NOT NULL,
+        author_handle TEXT,
+        author_name TEXT,
+        author_profile_image_url TEXT,
+        posted_at TEXT,
+        bookmarked_at TEXT,
+        synced_at TEXT NOT NULL,
+        conversation_id TEXT,
+        in_reply_to_status_id TEXT,
+        quoted_status_id TEXT,
+        language TEXT,
+        like_count INTEGER,
+        repost_count INTEGER,
+        reply_count INTEGER,
+        quote_count INTEGER,
+        bookmark_count INTEGER,
+        view_count INTEGER,
+        media_count INTEGER DEFAULT 0,
+        link_count INTEGER DEFAULT 0,
+        links_json TEXT,
+        tags_json TEXT,
+        ingested_via TEXT,
+        categories TEXT,
+        primary_category TEXT,
+        github_urls TEXT,
+        domains TEXT,
+        primary_domain TEXT,
+        quoted_tweet_json TEXT
+      )`);
+      saveDb(db, dbPath);
+    } finally {
+      db.close();
+    }
+
+    const migrated = await openBookmarksIndexDb();
+    try {
+      const tables = migrated.exec(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name IN ('x_bookmark_folders', 'x_bookmark_folder_sync') ORDER BY name`,
+      );
+      assert.deepEqual(tables[0].values.map((row) => row[0]), ['x_bookmark_folder_sync', 'x_bookmark_folders']);
+
+      const version = migrated.exec(`SELECT value FROM meta WHERE key = 'schema_version'`);
+      assert.equal(version[0].values[0][0], '5');
+    } finally {
+      migrated.close();
+    }
   });
 });
 
