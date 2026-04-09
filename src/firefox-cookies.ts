@@ -1,19 +1,35 @@
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, unlinkSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir, homedir, platform } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
+import type { SqlJsStatic } from 'sql.js';
 import type { ChromeCookieResult } from './chrome-cookies.js';
+import { getBrowser, browserUserDataDir } from './browsers.js';
+
+const require = createRequire(import.meta.url);
+
+// ── sql.js lazy init (shared pattern with src/db.ts) ─────────────────────────
+
+let sqlPromise: Promise<SqlJsStatic> | undefined;
+
+function getSql(): Promise<SqlJsStatic> {
+  if (!sqlPromise) {
+    const initSqlJs = require('sql.js-fts5') as (opts: any) => Promise<SqlJsStatic>;
+    const wasmPath = require.resolve('sql.js-fts5/dist/sql-wasm.wasm');
+    const wasmBinary = readFileSync(wasmPath);
+    sqlPromise = initSqlJs({ wasmBinary });
+  }
+  return sqlPromise!;
+}
 
 // ── Profile detection ────────────────────────────────────────────────────────
 
 function firefoxBaseDir(): string {
-  const os = platform();
-  const home = homedir();
-  if (os === 'darwin') return join(home, 'Library', 'Application Support', 'Firefox');
-  if (os === 'linux') return join(home, '.mozilla', 'firefox');
+  const dir = browserUserDataDir(getBrowser('firefox'));
+  if (dir) return dir;
   throw new Error(
-    `Firefox cookie extraction is currently supported on macOS and Linux only (detected: ${os}).\n` +
+    `Firefox cookie extraction is not supported on this platform (detected: ${platform()}).\n` +
     'Pass cookies manually:  ft sync --cookies <ct0> <auth_token>'
   );
 }
@@ -71,11 +87,19 @@ export function detectFirefoxProfileDir(): string {
 
 // ── Cookie query ─────────────────────────────────────────────────────────────
 
-function queryFirefoxCookies(
+/**
+ * Read ct0/auth_token from a Firefox cookies.sqlite using the bundled sql.js
+ * WebAssembly build. No external `sqlite3` binary is required, which matters
+ * on Windows where sqlite3 isn't in PATH by default.
+ *
+ * Firefox may hold a WAL lock on the live DB, so we always copy the file
+ * (plus any -wal and -shm siblings) to a tmpdir before opening it.
+ */
+async function queryFirefoxCookies(
   dbPath: string,
   host: string,
   names: string[],
-): { name: string; value: string }[] {
+): Promise<{ name: string; value: string }[]> {
   if (!existsSync(dbPath)) {
     throw new Error(
       `Firefox cookies.sqlite not found at: ${dbPath}\n` +
@@ -83,63 +107,61 @@ function queryFirefoxCookies(
     );
   }
 
-  // Build parameterized-safe SQL. host and names are hardcoded by callers,
-  // but we escape anyway to prevent injection if the API is ever widened.
-  const safeHost = host.replace(/'/g, "''");
-  const nameList = names.map(n => `'${n.replace(/'/g, "''")}'`).join(',');
-  const sql = `SELECT name, value FROM moz_cookies WHERE host LIKE '%${safeHost}' AND name IN (${nameList});`;
+  const tmpDb = join(tmpdir(), `ft-ff-cookies-${randomUUID()}.db`);
+  const walPath = dbPath + '-wal';
+  const shmPath = dbPath + '-shm';
 
-  const tryQuery = (path: string): string =>
-    execFileSync('sqlite3', ['-json', path, sql], {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 10000,
-    }).trim();
-
-  let output: string;
   try {
-    output = tryQuery(dbPath);
-  } catch {
-    // Firefox may hold a WAL lock — copy the DB and query the copy
-    const tmpDb = join(tmpdir(), `ft-ff-cookies-${randomUUID()}.db`);
-    try {
-      copyFileSync(dbPath, tmpDb);
-      const walPath = dbPath + '-wal';
-      const shmPath = dbPath + '-shm';
-      if (existsSync(walPath)) copyFileSync(walPath, tmpDb + '-wal');
-      if (existsSync(shmPath)) copyFileSync(shmPath, tmpDb + '-shm');
-      output = tryQuery(tmpDb);
-    } catch (e2: any) {
-      throw new Error(
-        `Could not read Firefox cookies database.\n` +
-        `Path: ${dbPath}\n` +
-        `Error: ${e2.message}\n` +
-        'If Firefox is open, try closing it and retrying.'
-      );
-    } finally {
-      try { unlinkSync(tmpDb); } catch {}
-      try { unlinkSync(tmpDb + '-wal'); } catch {}
-      try { unlinkSync(tmpDb + '-shm'); } catch {}
-    }
+    copyFileSync(dbPath, tmpDb);
+    if (existsSync(walPath)) copyFileSync(walPath, tmpDb + '-wal');
+    if (existsSync(shmPath)) copyFileSync(shmPath, tmpDb + '-shm');
+  } catch (e: any) {
+    throw new Error(
+      `Could not read Firefox cookies database.\n` +
+      `Path: ${dbPath}\n` +
+      `Error: ${e.message}\n` +
+      'If Firefox is open, try closing it and retrying.'
+    );
   }
 
-  if (!output || output === '[]') return [];
   try {
-    return JSON.parse(output);
-  } catch {
-    return [];
+    const SQL = await getSql();
+    const bytes = readFileSync(tmpDb);
+    const db = new SQL.Database(bytes);
+    try {
+      // Parameterized query — no string interpolation of host/names into SQL.
+      const placeholders = names.map(() => '?').join(',');
+      const stmt = db.prepare(
+        `SELECT name, value FROM moz_cookies ` +
+        `WHERE host LIKE ? AND name IN (${placeholders})`
+      );
+      stmt.bind([`%${host}`, ...names]);
+      const rows: { name: string; value: string }[] = [];
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as { name: string; value: string };
+        rows.push({ name: row.name, value: row.value });
+      }
+      stmt.free();
+      return rows;
+    } finally {
+      db.close();
+    }
+  } finally {
+    try { unlinkSync(tmpDb); } catch {}
+    try { unlinkSync(tmpDb + '-wal'); } catch {}
+    try { unlinkSync(tmpDb + '-shm'); } catch {}
   }
 }
 
 // ── Main export ──────────────────────────────────────────────────────────────
 
-export function extractFirefoxXCookies(profileDir?: string): ChromeCookieResult {
+export async function extractFirefoxXCookies(profileDir?: string): Promise<ChromeCookieResult> {
   const dir = profileDir ?? detectFirefoxProfileDir();
   const dbPath = join(dir, 'cookies.sqlite');
 
-  let cookies = queryFirefoxCookies(dbPath, '.x.com', ['ct0', 'auth_token']);
+  let cookies = await queryFirefoxCookies(dbPath, '.x.com', ['ct0', 'auth_token']);
   if (cookies.length === 0) {
-    cookies = queryFirefoxCookies(dbPath, '.twitter.com', ['ct0', 'auth_token']);
+    cookies = await queryFirefoxCookies(dbPath, '.twitter.com', ['ct0', 'auth_token']);
   }
 
   const cookieMap = new Map(cookies.map(c => [c.name, c.value]));

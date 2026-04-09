@@ -239,7 +239,7 @@ export function showWelcome(): void {
     1. Open your browser and log into x.com
     2. Run: ft sync
 
-  Works with Chrome, Brave, Chromium, and Firefox on macOS/Linux.
+  Works with Chrome, Brave, Chromium, and Firefox on macOS, Linux, and Windows.
   Data will be stored at: ${dataDir()}
 `);
 }
@@ -299,7 +299,6 @@ function showSyncWelcome(): void {
   Browser ids: ${browsers}
   Use --browser <name> to choose.
   Default auto-detect prefers installed Chrome-family browsers.
-  Firefox cookie extraction currently works on macOS and Linux.
 `);
 }
 
