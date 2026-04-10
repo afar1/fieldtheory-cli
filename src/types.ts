@@ -5,12 +5,14 @@ export interface BookmarkMediaVariant {
 }
 
 export interface BookmarkMediaObject {
+  url?: string;
   mediaUrl?: string;
   previewUrl?: string;
   type?: string;
   extAltText?: string;
   width?: number;
   height?: number;
+  videoVariants?: BookmarkMediaVariant[];
   variants?: BookmarkMediaVariant[];
 }
 
