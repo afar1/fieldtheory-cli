@@ -299,7 +299,7 @@ function showSyncWelcome(): void {
   Browser ids: ${browsers}
   Use --browser <name> to choose.
   Default auto-detect prefers installed Chrome-family browsers.
-  Firefox cookie extraction currently works on macOS and Linux.
+  Firefox on Windows requires Node.js 22.5+ or sqlite3 on PATH.
 `);
 }
 

@@ -1,19 +1,74 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, unlinkSync, copyFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { tmpdir, homedir, platform } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, copyFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import { tmpdir, platform } from 'node:os';
+import { createRequire } from 'node:module';
 import type { ChromeCookieResult } from './chrome-cookies.js';
+import { getBrowser, browserUserDataDir } from './browsers.js';
+
+const require = createRequire(import.meta.url);
+
+interface SqliteRow {
+  [key: string]: unknown;
+}
+
+interface NodeSqliteModule {
+  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => {
+    prepare(sql: string): { all(...params: unknown[]): SqliteRow[] };
+    close(): void;
+  };
+}
+
+let nodeSqliteModule: NodeSqliteModule | null | undefined;
+let sqlite3BinaryAvailable: boolean | undefined;
+
+const FIREFOX_WINDOWS_BACKEND_REQUIREMENT =
+  'Firefox on Windows requires Node.js 22.5+ or sqlite3 on PATH.';
+
+function hasSqlite3Binary(): boolean {
+  if (sqlite3BinaryAvailable !== undefined) return sqlite3BinaryAvailable;
+  try {
+    execFileSync('sqlite3', ['-version'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 5000,
+    });
+    sqlite3BinaryAvailable = true;
+  } catch {
+    sqlite3BinaryAvailable = false;
+  }
+  return sqlite3BinaryAvailable;
+}
+
+export function ensureFirefoxCookieBackendAvailable(
+  os: string = platform(),
+  hasNodeSqlite?: boolean,
+  hasSqlite3?: boolean,
+): void {
+  if (os !== 'win32') return;
+
+  const nodeSqliteAvailable = hasNodeSqlite ?? loadNodeSqlite() !== null;
+  if (nodeSqliteAvailable) return;
+
+  const sqlite3Available = hasSqlite3 ?? hasSqlite3Binary();
+  if (sqlite3Available) return;
+
+  throw new Error(
+    `${FIREFOX_WINDOWS_BACKEND_REQUIREMENT}\n` +
+    'Fix:\n' +
+    '  1. Upgrade to Node.js 22.5+ (recommended), or\n' +
+    '  2. Install sqlite3 and make sure it is on PATH, or\n' +
+    '  3. Pass cookies manually:  ft sync --cookies <ct0> <auth_token>'
+  );
+}
 
 // ── Profile detection ────────────────────────────────────────────────────────
 
 function firefoxBaseDir(): string {
-  const os = platform();
-  const home = homedir();
-  if (os === 'darwin') return join(home, 'Library', 'Application Support', 'Firefox');
-  if (os === 'linux') return join(home, '.mozilla', 'firefox');
+  const dir = browserUserDataDir(getBrowser('firefox'));
+  if (dir) return dir;
   throw new Error(
-    `Firefox cookie extraction is currently supported on macOS and Linux only (detected: ${os}).\n` +
+    `Firefox cookie extraction is not supported on this platform (detected: ${platform()}).\n` +
     'Pass cookies manually:  ft sync --cookies <ct0> <auth_token>'
   );
 }
@@ -71,6 +126,58 @@ export function detectFirefoxProfileDir(): string {
 
 // ── Cookie query ─────────────────────────────────────────────────────────────
 
+function loadNodeSqlite(): NodeSqliteModule | null {
+  if (nodeSqliteModule !== undefined) return nodeSqliteModule;
+  try {
+    nodeSqliteModule = require('node:sqlite') as NodeSqliteModule;
+  } catch {
+    nodeSqliteModule = null;
+  }
+  return nodeSqliteModule;
+}
+
+function createFirefoxSnapshot(dbPath: string): { snapshotPath: string; cleanup: () => void } {
+  const snapshotDir = mkdtempSync(join(tmpdir(), 'ft-ff-cookies-'));
+  const snapshotPath = join(snapshotDir, basename(dbPath));
+  try {
+    copyFileSync(dbPath, snapshotPath);
+    const walPath = dbPath + '-wal';
+    const shmPath = dbPath + '-shm';
+    if (existsSync(walPath)) copyFileSync(walPath, snapshotPath + '-wal');
+    if (existsSync(shmPath)) copyFileSync(shmPath, snapshotPath + '-shm');
+    return {
+      snapshotPath,
+      cleanup: () => rmSync(snapshotDir, { recursive: true, force: true }),
+    };
+  } catch (e) {
+    rmSync(snapshotDir, { recursive: true, force: true });
+    throw e;
+  }
+}
+
+function queryWithNodeSqlite(
+  snapshotPath: string,
+  host: string,
+  names: string[],
+): { name: string; value: string }[] | null {
+  const sqlite = loadNodeSqlite();
+  if (!sqlite) return null;
+
+  const db = new sqlite.DatabaseSync(snapshotPath, { readOnly: true });
+  try {
+    const placeholders = names.map(() => '?').join(', ');
+    const stmt = db.prepare(
+      `SELECT name, value FROM moz_cookies WHERE host LIKE ? AND name IN (${placeholders});`
+    );
+    return stmt.all(`%${host}`, ...names).map((row) => ({
+      name: String(row.name ?? ''),
+      value: String(row.value ?? ''),
+    }));
+  } finally {
+    db.close();
+  }
+}
+
 function queryFirefoxCookies(
   dbPath: string,
   host: string,
@@ -83,51 +190,51 @@ function queryFirefoxCookies(
     );
   }
 
-  // Build parameterized-safe SQL. host and names are hardcoded by callers,
-  // but we escape anyway to prevent injection if the API is ever widened.
   const safeHost = host.replace(/'/g, "''");
   const nameList = names.map(n => `'${n.replace(/'/g, "''")}'`).join(',');
   const sql = `SELECT name, value FROM moz_cookies WHERE host LIKE '%${safeHost}' AND name IN (${nameList});`;
-
-  const tryQuery = (path: string): string =>
+  const tryQueryWithBinary = (path: string): string =>
     execFileSync('sqlite3', ['-json', path, sql], {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 10000,
     }).trim();
 
-  let output: string;
-  try {
-    output = tryQuery(dbPath);
-  } catch {
-    // Firefox may hold a WAL lock — copy the DB and query the copy
-    const tmpDb = join(tmpdir(), `ft-ff-cookies-${randomUUID()}.db`);
-    try {
-      copyFileSync(dbPath, tmpDb);
-      const walPath = dbPath + '-wal';
-      const shmPath = dbPath + '-shm';
-      if (existsSync(walPath)) copyFileSync(walPath, tmpDb + '-wal');
-      if (existsSync(shmPath)) copyFileSync(shmPath, tmpDb + '-shm');
-      output = tryQuery(tmpDb);
-    } catch (e2: any) {
-      throw new Error(
-        `Could not read Firefox cookies database.\n` +
-        `Path: ${dbPath}\n` +
-        `Error: ${e2.message}\n` +
-        'If Firefox is open, try closing it and retrying.'
-      );
-    } finally {
-      try { unlinkSync(tmpDb); } catch {}
-      try { unlinkSync(tmpDb + '-wal'); } catch {}
-      try { unlinkSync(tmpDb + '-shm'); } catch {}
-    }
-  }
+  const buildReadError = (error: unknown): Error => {
+    const message = error instanceof Error ? error.message : String(error);
+    const needsNativeSqliteHint =
+      platform() === 'win32' &&
+      !loadNodeSqlite() &&
+      /sqlite3|ENOENT/i.test(message);
+    return new Error(
+      `Could not read Firefox cookies database.\n` +
+      `Path: ${dbPath}\n` +
+      `Error: ${message}\n` +
+      (needsNativeSqliteHint
+        ? 'Fix: Use Node.js 22.5+ on Windows, or install sqlite3 on PATH.\n'
+        : '') +
+      'If Firefox is open, try closing it and retrying.'
+    );
+  };
 
-  if (!output || output === '[]') return [];
   try {
-    return JSON.parse(output);
-  } catch {
-    return [];
+    const { snapshotPath, cleanup } = createFirefoxSnapshot(dbPath);
+    try {
+      const nativeRows = queryWithNodeSqlite(snapshotPath, host, names);
+      if (nativeRows) return nativeRows;
+
+      const output = tryQueryWithBinary(snapshotPath);
+      if (!output || output === '[]') return [];
+      try {
+        return JSON.parse(output);
+      } catch {
+        return [];
+      }
+    } finally {
+      cleanup();
+    }
+  } catch (error) {
+    throw buildReadError(error);
   }
 }
 
@@ -136,6 +243,7 @@ function queryFirefoxCookies(
 export function extractFirefoxXCookies(profileDir?: string): ChromeCookieResult {
   const dir = profileDir ?? detectFirefoxProfileDir();
   const dbPath = join(dir, 'cookies.sqlite');
+  ensureFirefoxCookieBackendAvailable();
 
   let cookies = queryFirefoxCookies(dbPath, '.x.com', ['ct0', 'auth_token']);
   if (cookies.length === 0) {
