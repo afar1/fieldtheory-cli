@@ -10,6 +10,7 @@ import { openDb, saveDb } from './db.js';
 import { twitterBookmarksIndexPath } from './paths.js';
 import type { ResolvedEngine } from './engine.js';
 import { invokeEngine } from './engine.js';
+import { C, RESET } from './bookmarks-viz.js';
 
 const BATCH_SIZE = 50;
 
@@ -110,9 +111,9 @@ export interface LlmClassifyResult {
 }
 
 export async function classifyWithLlm(
-  options: { engine: ResolvedEngine; onBatch?: (done: number, total: number) => void },
+  options: { engine: ResolvedEngine; onBatch?: (done: number, total: number) => void; failFast?: boolean },
 ): Promise<LlmClassifyResult> {
-  const { engine } = options;
+  const { engine, failFast = false } = options;
 
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
@@ -170,7 +171,13 @@ export async function classifyWithLlm(
         saveDb(db, dbPath);
       } catch (err) {
         failed += batch.length;
-        process.stderr.write(`  Batch ${batchCount} failed: ${(err as Error).message}\n`);
+        const errMsg = (err as Error).message;
+        const firstLine = errMsg.split('\n')[0];
+        console.error(`\n${C.gold}  Error: ${firstLine}${RESET}`);
+        if (failFast) {
+          console.error(`${C.gold}  fail-fast enabled — stopping classification${RESET}`);
+          break;
+        }
       }
     }
 
@@ -223,9 +230,9 @@ ${items}`;
 }
 
 export async function classifyDomainsWithLlm(
-  options: { engine: ResolvedEngine; all?: boolean; onBatch?: (done: number, total: number) => void },
+  options: { engine: ResolvedEngine; all?: boolean; onBatch?: (done: number, total: number) => void; failFast?: boolean },
 ): Promise<LlmClassifyResult> {
-  const { engine } = options;
+  const { engine, failFast = false } = options;
 
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
@@ -285,7 +292,13 @@ export async function classifyDomainsWithLlm(
         saveDb(db, dbPath);
       } catch (err) {
         failed += batch.length;
-        process.stderr.write(`  Batch ${batchCount} failed: ${(err as Error).message}\n`);
+        const errMsg = (err as Error).message;
+        const firstLine = errMsg.split('\n')[0];
+        console.error(`\n${C.gold}  Error: ${firstLine}${RESET}`);
+        if (failFast) {
+          console.error(`${C.gold}  fail-fast enabled — stopping classification${RESET}`);
+          break;
+        }
       }
     }
 

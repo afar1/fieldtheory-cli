@@ -4,6 +4,18 @@ Sync and store locally all of your X/Twitter bookmarks. Search, classify, and ma
 
 Free and open source. Designed for Mac.
 
+## Running locally
+
+**Important:** If you have this installed globally (`npm install -g fieldtheory`), make sure to run the local version for development:
+
+```bash
+pnpm start <command>
+# or
+npm run start -- <command>
+```
+
+The global `ft` command may be a different version than the local codebase.
+
 ## Install
 
 ```bash
@@ -31,66 +43,174 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 
 ## Commands
 
-### Sync
+### sync
+Download and sync bookmarks from X into your local database.
 
-| Command | Description |
-|---------|-------------|
-| `ft sync` | Download and sync bookmarks (no API required) |
-| `ft sync --full` | Full history crawl (not just incremental) |
-| `ft sync --gaps` | Backfill missing quoted tweets and expand truncated articles |
-| `ft sync --classify` | Sync then classify new bookmarks with LLM |
-| `ft sync --api` | Sync via OAuth API (cross-platform) |
-| `ft auth` | Set up OAuth for API-based sync (optional) |
+| Flag | Description |
+|------|-------------|
+| (default) | Incremental sync from your last bookmark |
+| `--rebuild` | Full re-crawl of all bookmarks |
+| `--gaps` | Backfill missing data (quoted tweets, truncated articles) |
+| `--classify` | Classify new bookmarks with LLM after syncing |
+| `--api` | Use OAuth v2 API instead of Chrome session |
+| `--yes` | Skip confirmation prompts |
+| `--max-pages <n>` | Max pages to fetch (default: 500) |
+| `--target-adds <n>` | Stop after N new bookmarks |
+| `--delay-ms <n>` | Delay between requests in ms (default: 600) |
+| `--max-minutes <n>` | Max runtime in minutes (default: 30) |
+| `--browser <name>` | Browser to read session from (chrome, chromium, brave, firefox) |
+| `--cookies <values...>` | Pass ct0 and auth_token directly (skips browser extraction) |
+| `--chrome-user-data-dir <path>` | Chrome-family user-data directory |
+| `--chrome-profile-directory <name>` | Chrome-family profile name |
+| `--firefox-profile-dir <path>` | Firefox profile directory |
 
-### Search and browse
+### search
+Full-text search across bookmarks with BM25 ranking.
 
-| Command | Description |
-|---------|-------------|
-| `ft search <query>` | Full-text search with BM25 ranking |
-| `ft list` | Filter by author, date, category, domain |
-| `ft show <id>` | Show one bookmark in detail |
-| `ft sample <category>` | Random sample from a category |
-| `ft stats` | Top authors, languages, date range |
-| `ft viz` | Terminal dashboard with sparklines, categories, and domains |
-| `ft categories` | Show category distribution |
-| `ft domains` | Subject domain distribution |
+| Flag | Description |
+|------|-------------|
+| `<query>` | Search query (supports FTS5 syntax: AND, OR, NOT, "exact phrase") |
+| `--author <handle>` | Filter by author handle |
+| `--after <date>` | Bookmarks posted after this date (YYYY-MM-DD) |
+| `--before <date>` | Bookmarks posted before this date (YYYY-MM-DD) |
+| `--limit <n>` | Max results (default: 20) |
 
-### Classification
+### list
+List bookmarks with filters.
 
-| Command | Description |
-|---------|-------------|
-| `ft classify` | Classify by category and domain using LLM |
-| `ft classify --regex` | Classify by category using simple regex |
-| `ft classify-domains` | Classify by subject domain only (LLM) |
-| `ft model` | View or change the default LLM engine |
+| Flag | Description |
+|------|-------------|
+| `--query <query>` | Text query (FTS5 syntax) |
+| `--author <handle>` | Filter by author handle |
+| `--after <date>` | Posted after (YYYY-MM-DD) |
+| `--before <date>` | Posted before (YYYY-MM-DD) |
+| `--category <cat>` | Filter by category |
+| `--domain <dom>` | Filter by domain |
+| `--limit <n>` | Max results (default: 30) |
+| `--offset <n>` | Offset into results (default: 0) |
+| `--json` | JSON output |
 
-### Knowledge base
+### show
+Show one bookmark in detail.
 
-| Command | Description |
-|---------|-------------|
-| `ft md` | Export bookmarks as individual markdown files |
-| `ft wiki` | Compile a Karpathy-style interlinked knowledge base |
-| `ft ask <question>` | Ask questions against the knowledge base |
-| `ft ask <question> --save` | Ask and save the answer as a concept page |
-| `ft lint` | Health-check the wiki for broken links and missing pages |
-| `ft lint --fix` | Auto-fix fixable wiki issues |
+| Flag | Description |
+|------|-------------|
+| `<id>` | Bookmark ID |
+| `--json` | JSON output |
 
-### Agent integration
+### sample
+Random sample from a category or domain.
 
-| Command | Description |
-|---------|-------------|
-| `ft skill install` | Install `/fieldtheory` skill for Claude Code and Codex |
-| `ft skill show` | Print skill content to stdout |
-| `ft skill uninstall` | Remove installed skill files |
+| Flag | Description |
+|------|-------------|
+| `<category>` | Category or domain to sample from |
+| `--limit <n>` | Max results (default: 10) |
 
-### Utilities
+### classify
+Classify bookmarks by category and domain using LLM.
 
-| Command | Description |
-|---------|-------------|
-| `ft index` | Rebuild search index from JSONL cache (preserves classifications) |
-| `ft fetch-media` | Download media assets (static images only) |
-| `ft status` | Show sync status and data location |
-| `ft path` | Print data directory path |
+| Flag | Description |
+|------|-------------|
+| (default) | Classify categories and domains with LLM |
+| `--regex` | Use simple regex classification instead of LLM |
+| `--fail-fast` | Stop immediately on first classification failure |
+
+### classify-domains
+Classify bookmarks by subject domain only (LLM).
+
+| Flag | Description |
+|------|-------------|
+| (default) | Classify only missing domains |
+| `--all` | Re-classify all bookmarks, not just missing |
+| `--fail-fast` | Stop immediately on first classification failure |
+
+### md
+Export bookmarks as individual markdown files.
+
+| Flag | Description |
+|------|-------------|
+| `--force` | Re-export all bookmarks (overwrite existing files) |
+| `--format <type>` | Filename format: `rev-iso` (default, e.g. 2024-01-15-id.md) or `legacy` (e.g. id-tweettext.md) |
+
+### wiki
+Compile a Karpathy-style interlinked knowledge base.
+
+| Flag | Description |
+|------|-------------|
+| (default) | Incremental: only pages whose source bookmark count changed |
+| `--full` | Recompile all pages (ignore incremental cache) |
+
+### ask
+Ask questions against the knowledge base.
+
+| Flag | Description |
+|------|-------------|
+| `<question>` | Question to ask |
+| `--save` | Save the answer as a concept page |
+| `--json` | Output JSON instead of text |
+
+### lint
+Health-check the wiki for broken links and missing pages.
+
+| Flag | Description |
+|------|-------------|
+| (default) | Check and report issues |
+| `--fix` | Auto-fix fixable issues with targeted recompile |
+| `--json` | Output JSON instead of text |
+
+### index
+Rebuild search index from JSONL cache.
+
+| Flag | Description |
+|------|-------------|
+| (default) | Preserve existing classifications |
+| `--force` | Drop and rebuild from scratch (loses classifications) |
+
+### fetch-media
+Download media assets (static images only).
+
+| Flag | Description |
+|------|-------------|
+| `--limit <n>` | Max bookmarks to process (default: 100) |
+| `--max-bytes <n>` | Per-asset byte limit (default: 50MB) |
+
+### model
+View or change the default LLM engine.
+
+| Flag | Description |
+|------|-------------|
+| (default) | Show current model and available options |
+| `<engine>` | Set engine to `claude` or `codex` |
+
+### auth
+Set up OAuth for API-based sync (optional).
+
+### status
+Show sync status and data location.
+
+### path
+Print data directory path.
+
+### categories
+Show category distribution.
+
+### domains
+Show subject domain distribution.
+
+### stats
+Top authors, languages, date range.
+
+### viz
+Terminal dashboard with sparklines, categories, and domains.
+
+### skill install
+Install `/fieldtheory` skill for Claude Code and Codex.
+
+### skill show
+Print skill content to stdout.
+
+### skill uninstall
+Remove installed skill files.
 
 ## Agent integration
 

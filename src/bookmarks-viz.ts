@@ -4,15 +4,17 @@ import { twitterBookmarksIndexPath } from './paths.js';
 
 // ── ANSI helpers ─────────────────────────────────────────────────────────────
 
-const ESC = '\x1b[';
-const RESET = `${ESC}0m`;
+export const ESC = '\x1b[';
+/** Regex that matches a single ANSI escape sequence (CSI … m). */
+const ANSI_RE = /\x1b\[[^m]*m/g;
+export const RESET = `${ESC}0m`;
 const BOLD = `${ESC}1m`;
 const DIM = `${ESC}2m`;
 
 const rgb = (r: number, g: number, b: number) => `${ESC}38;2;${r};${g};${b}m`;
 
 // Palette — muted, tasteful
-const C = {
+export const C = {
   title:   rgb(199, 146, 234),  // soft lavender
   accent:  rgb(130, 170, 255),  // periwinkle
   warm:    rgb(255, 180, 120),  // peach
@@ -94,7 +96,7 @@ function boxBottom(width: number): string {
   return C.dim + '╰' + '─'.repeat(width - 2) + '╯' + RESET;
 }
 function boxRow(content: string, width: number): string {
-  const stripped = content.replace(/\x1b\[[^m]*m/g, '');
+  const stripped = content.replace(ANSI_RE, '');
   const pad = Math.max(0, width - 4 - stripped.length);
   return C.dim + '│ ' + RESET + content + ' '.repeat(pad) + C.dim + ' │' + RESET;
 }

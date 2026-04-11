@@ -2,6 +2,18 @@
 
 This is the Field Theory CLI — a standalone tool for syncing and querying X/Twitter bookmarks locally.
 
+## Running locally
+
+**Important:** If you have this installed globally (`npm install -g fieldtheory`), make sure to run the local version for development:
+
+```bash
+pnpm start <command>
+# or
+npm run start -- <command>
+```
+
+The global `ft` command may be a different version than the local codebase.
+
 ## Commands
 
 ```bash
