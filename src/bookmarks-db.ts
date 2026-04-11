@@ -1,5 +1,6 @@
 import type { Database } from 'sql.js';
 import { openDb, saveDb } from './db.js';
+import { parseTimestampMs, toIsoDate } from './date-utils.js';
 import { readJsonLines } from './fs.js';
 import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js';
 import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
@@ -80,6 +81,31 @@ function parseCsv(value: unknown): string[] {
     .split(',')
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function chronologicalDateRange(values: unknown[]): { earliest: string | null; latest: string | null } {
+  let earliestMs = Number.POSITIVE_INFINITY;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  let earliest: string | null = null;
+  let latest: string | null = null;
+
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const ms = parseTimestampMs(value);
+    if (ms == null) continue;
+    const isoDate = toIsoDate(value);
+    if (!isoDate) continue;
+    if (ms < earliestMs) {
+      earliestMs = ms;
+      earliest = isoDate;
+    }
+    if (ms > latestMs) {
+      latestMs = ms;
+      latest = isoDate;
+    }
+  }
+
+  return { earliest, latest };
 }
 
 function mapTimelineRow(row: unknown[]): BookmarkTimelineItem {
@@ -636,7 +662,10 @@ export async function getStats(): Promise<{
   try {
     const total = db.exec('SELECT COUNT(*) FROM bookmarks')[0]?.values[0]?.[0] as number;
     const authors = db.exec('SELECT COUNT(DISTINCT author_handle) FROM bookmarks')[0]?.values[0]?.[0] as number;
-    const range = db.exec('SELECT MIN(posted_at), MAX(posted_at) FROM bookmarks WHERE posted_at IS NOT NULL')[0]?.values[0];
+    const postedAtRows = db.exec('SELECT posted_at FROM bookmarks WHERE posted_at IS NOT NULL');
+    const range = chronologicalDateRange(
+      (postedAtRows[0]?.values ?? []).map((row) => row[0])
+    );
 
     const topAuthorsRows = db.exec(
       `SELECT author_handle, COUNT(*) as c FROM bookmarks
@@ -661,7 +690,7 @@ export async function getStats(): Promise<{
     return {
       totalBookmarks: total,
       uniqueAuthors: authors,
-      dateRange: { earliest: (range?.[0] as string) ?? null, latest: (range?.[1] as string) ?? null },
+      dateRange: range,
       topAuthors,
       languageBreakdown,
     };

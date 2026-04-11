@@ -13,9 +13,9 @@ const FIXTURES = [
   { id: '3', tweetId: '3', url: 'https://x.com/alice/status/3', text: 'Deep learning models need massive compute', authorHandle: 'alice', authorName: 'Alice Smith', syncedAt: '2026-03-01T00:00:00Z', postedAt: '2026-03-01T12:00:00Z', language: 'en', engagement: { likeCount: 200, repostCount: 30 }, mediaObjects: [{ type: 'photo', url: 'https://img.com/1.jpg' }], links: [], tags: [], ingestedVia: 'graphql' },
 ];
 
-async function withIsolatedDataDir(fn: () => Promise<void>): Promise<void> {
+async function withIsolatedDataDir(fn: () => Promise<void>, fixtures: any[] = FIXTURES): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), 'ft-test-'));
-  const jsonl = FIXTURES.map((r) => JSON.stringify(r)).join('\n') + '\n';
+  const jsonl = fixtures.map((r) => JSON.stringify(r)).join('\n') + '\n';
   await writeFile(path.join(dir, 'bookmarks.jsonl'), jsonl);
 
   const saved = process.env.FT_DATA_DIR;
@@ -128,6 +128,46 @@ test('getStats returns correct aggregate data', async () => {
     assert.equal(stats.languageBreakdown[0].language, 'en');
     assert.equal(stats.languageBreakdown[0].count, 3);
   });
+});
+
+test('getStats returns chronological date range for legacy Twitter timestamps', async () => {
+  const fixtures = [
+    {
+      id: 'old',
+      tweetId: '10',
+      url: 'https://x.com/old/status/10',
+      text: 'Old tweet',
+      authorHandle: 'old',
+      authorName: 'Old',
+      syncedAt: '2026-04-01T00:00:00Z',
+      postedAt: 'Fri Apr 03 12:00:00 +0000 2020',
+      mediaObjects: [],
+      links: [],
+      tags: [],
+      ingestedVia: 'graphql',
+    },
+    {
+      id: 'new',
+      tweetId: '20',
+      url: 'https://x.com/new/status/20',
+      text: 'New tweet',
+      authorHandle: 'new',
+      authorName: 'New',
+      syncedAt: '2026-04-01T00:00:00Z',
+      postedAt: 'Wed Apr 08 06:30:15 +0000 2026',
+      mediaObjects: [],
+      links: [],
+      tags: [],
+      ingestedVia: 'graphql',
+    },
+  ];
+
+  await withIsolatedDataDir(async () => {
+    await buildIndex({ force: true });
+    const stats = await getStats();
+    assert.equal(stats.dateRange.earliest, '2020-04-03');
+    assert.equal(stats.dateRange.latest, '2026-04-08');
+  }, fixtures);
 });
 
 test('formatSearchResults: formats results with author, date, text, url', () => {

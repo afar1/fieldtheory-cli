@@ -298,12 +298,8 @@ test('convertTweetToRecord: handles missing quoted tweet gracefully', () => {
   assert.equal(result.quotedTweet, undefined);
 });
 
-test('parseBookmarksResponse: extracts bookmarkedAt from sortIndex', () => {
+test('parseBookmarksResponse: preserves sortIndex for bookmark ordering without fabricating bookmarkedAt', () => {
   const tr = makeTweetResult();
-  // Snowflake for a known date: encode March 11 2026 00:00:00 UTC (after tweet created_at of March 10 12:00)
-  // Twitter epoch: 1288834974657, target ms: 1773273600000
-  // offset = 1773273600000 - 1288834974657 = 484438625343
-  // snowflake = offset << 22 = 2031520476165046272
   const resp = {
     data: {
       bookmark_timeline_v2: {
@@ -324,11 +320,8 @@ test('parseBookmarksResponse: extracts bookmarkedAt from sortIndex', () => {
   };
   const { records } = parseBookmarksResponse(resp, NOW);
   assert.equal(records.length, 1);
-  assert.ok(records[0].bookmarkedAt);
-  // Should decode to March 11 2026
-  const parsed = new Date(records[0].bookmarkedAt!);
-  assert.ok(parsed.getFullYear() === 2026);
-  assert.ok(parsed.getMonth() === 2); // March = month 2
+  assert.equal(records[0].sortIndex, '2031520476165046272');
+  assert.equal(records[0].bookmarkedAt, null);
 });
 
 test('parseBookmarksResponse: handles missing sortIndex gracefully', () => {
@@ -339,7 +332,7 @@ test('parseBookmarksResponse: handles missing sortIndex gracefully', () => {
   assert.equal(records[0].bookmarkedAt, null); // no sortIndex = stays null
 });
 
-test('parseBookmarksResponse: clears sortIndex timestamps earlier than tweet creation', () => {
+test('parseBookmarksResponse: keeps sortIndex opaque even when it decodes to an impossible date', () => {
   const tr = makeTweetResult({
     legacy: {
       created_at: 'Fri Apr 03 12:00:00 +0000 2026',
@@ -368,6 +361,7 @@ test('parseBookmarksResponse: clears sortIndex timestamps earlier than tweet cre
   const { records } = parseBookmarksResponse(resp, NOW);
   assert.equal(records.length, 1);
   assert.equal(records[0].bookmarkedAt, null);
+  assert.equal(records[0].sortIndex, '1861891119789912064');
 });
 
 test('parseBookmarksResponse: parses entries and cursor', () => {
@@ -542,6 +536,7 @@ test('sanitizeBookmarkedAt: clears timestamps too far after syncedAt', () => {
 
 test('sanitizeBookmarkedAt: preserves valid timestamp within range', () => {
   const record = sanitizeBookmarkedAt(makeRecord({
+    ingestedVia: 'api',
     postedAt: 'Tue Mar 10 12:00:00 +0000 2026',
     syncedAt: '2026-03-28T00:00:00.000Z',
     bookmarkedAt: '2026-03-15T00:00:00.000Z',
@@ -556,6 +551,17 @@ test('sanitizeBookmarkedAt: returns record unchanged when bookmarkedAt is null',
 
   assert.equal(result.bookmarkedAt, null);
   assert.strictEqual(result, input); // same reference — no unnecessary copy
+});
+
+test('sanitizeBookmarkedAt: clears GraphQL bookmark dates even when they look plausible', () => {
+  const result = sanitizeBookmarkedAt(makeRecord({
+    ingestedVia: 'graphql',
+    postedAt: '2026-03-10T12:00:00.000Z',
+    syncedAt: '2026-03-28T00:00:00.000Z',
+    bookmarkedAt: '2026-03-15T00:00:00.000Z',
+  }));
+
+  assert.equal(result.bookmarkedAt, null);
 });
 
 test('formatSyncResult: formats all fields', () => {

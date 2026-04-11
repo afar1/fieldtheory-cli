@@ -1,4 +1,5 @@
 import { openDb } from './db.js';
+import { parseTimestampMs, toIsoDate, toIsoMonth, toMonthDayLabel, toUtcHour, toWeekdayShort, toYearLabel } from './date-utils.js';
 import { twitterBookmarksIndexPath } from './paths.js';
 
 // ── ANSI helpers ─────────────────────────────────────────────────────────────
@@ -142,66 +143,156 @@ interface VizData {
   domains: { name: string; count: number }[];
 }
 
+interface TimelineAggregateRow {
+  authorHandle?: string;
+  postedAt?: string | null;
+  syncedAt?: string | null;
+}
+
+function sortCountEntries<T extends string | number>(entries: Iterable<[T, number]>): Array<{ key: T; count: number }> {
+  return [...entries]
+    .sort((a, b) => a[0] === b[0] ? b[1] - a[1] : a[0] < b[0] ? -1 : 1)
+    .map(([key, count]) => ({ key, count }));
+}
+
+function aggregateTimelineData(rows: TimelineAggregateRow[]): {
+  dateRange: { earliest: string; latest: string };
+  monthlyActivity: { month: string; count: number }[];
+  dayOfWeekActivity: { day: string; count: number }[];
+  hourActivity: { hour: number; count: number }[];
+  recentAuthors: { handle: string; count: number }[];
+  risingVoices: { handle: string; count: number }[];
+} {
+  const monthCounts = new Map<string, number>();
+  const dayCounts = new Map<string, number>();
+  const hourCounts = new Map<number, number>();
+  const authorPostedMonths = new Map<string, Set<string>>();
+  const authorPostedCounts = new Map<string, number>();
+  const recentSessionCounts = new Map<string, number>();
+
+  let earliestMs = Number.POSITIVE_INFINITY;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  let earliest = '?';
+  let latest = '?';
+  let latestPostedMonth: string | null = null;
+  let latestSyncMs = Number.NEGATIVE_INFINITY;
+  let latestSyncAt: string | null = null;
+
+  for (const row of rows) {
+    const postedAt = row.postedAt ?? null;
+    const syncedAt = row.syncedAt ?? null;
+    const handle = row.authorHandle ?? undefined;
+
+    const postedMs = parseTimestampMs(postedAt);
+    if (postedMs != null) {
+      const isoDate = toIsoDate(postedAt);
+      const isoMonth = toIsoMonth(postedAt);
+      const weekday = toWeekdayShort(postedAt);
+      const hour = toUtcHour(postedAt);
+
+      if (isoDate) {
+        if (postedMs < earliestMs) {
+          earliestMs = postedMs;
+          earliest = isoDate;
+        }
+        if (postedMs > latestMs) {
+          latestMs = postedMs;
+          latest = isoDate;
+        }
+      }
+
+      if (isoMonth) {
+        monthCounts.set(isoMonth, (monthCounts.get(isoMonth) ?? 0) + 1);
+        if (latestPostedMonth == null || isoMonth > latestPostedMonth) {
+          latestPostedMonth = isoMonth;
+        }
+        if (handle) {
+          authorPostedCounts.set(handle, (authorPostedCounts.get(handle) ?? 0) + 1);
+          const months = authorPostedMonths.get(handle) ?? new Set<string>();
+          months.add(isoMonth);
+          authorPostedMonths.set(handle, months);
+        }
+      }
+
+      if (weekday) dayCounts.set(weekday, (dayCounts.get(weekday) ?? 0) + 1);
+      if (hour != null) hourCounts.set(hour, (hourCounts.get(hour) ?? 0) + 1);
+    }
+
+    const syncedMs = parseTimestampMs(syncedAt);
+    if (syncedMs != null && syncedMs >= latestSyncMs) {
+      if (syncedMs > latestSyncMs) recentSessionCounts.clear();
+      latestSyncMs = syncedMs;
+      latestSyncAt = syncedAt;
+      if (handle) recentSessionCounts.set(handle, (recentSessionCounts.get(handle) ?? 0) + 1);
+    }
+  }
+
+  const monthNameMap: Record<string, string> = {
+    '01': 'Jan', '02': 'Feb', '03': 'Mar', '04': 'Apr', '05': 'May', '06': 'Jun',
+    '07': 'Jul', '08': 'Aug', '09': 'Sep', '10': 'Oct', '11': 'Nov', '12': 'Dec',
+  };
+
+  const monthlyActivity = sortCountEntries(monthCounts.entries()).map(({ key, count }) => {
+    const [year, monthNum] = String(key).split('-');
+    return { month: `${monthNameMap[monthNum] ?? monthNum} ${year}`, count };
+  });
+
+  const dayOfWeekActivity = sortCountEntries(dayCounts.entries()).map(({ key, count }) => ({
+    day: String(key),
+    count,
+  }));
+
+  const hourActivity = sortCountEntries(hourCounts.entries()).map(({ key, count }) => ({
+    hour: Number(key),
+    count,
+  }));
+
+  const recentAuthors = [...recentSessionCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 10)
+    .map(([handle, count]) => ({ handle, count }));
+
+  const risingVoices = latestPostedMonth == null
+    ? []
+    : [...authorPostedCounts.entries()]
+        .filter(([handle, count]) => count >= 3 && authorPostedMonths.get(handle)?.size === 1 && authorPostedMonths.get(handle)?.has(latestPostedMonth))
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, 8)
+        .map(([handle, count]) => ({ handle, count }));
+
+  return {
+    dateRange: { earliest, latest },
+    monthlyActivity,
+    dayOfWeekActivity,
+    hourActivity,
+    recentAuthors: latestSyncAt ? recentAuthors : [],
+    risingVoices,
+  };
+}
+
 async function queryVizData(): Promise<VizData> {
   const db = await openDb(twitterBookmarksIndexPath());
 
   try {
     const total = db.exec('SELECT COUNT(*) FROM bookmarks')[0]?.values[0]?.[0] as number;
     const authors = db.exec('SELECT COUNT(DISTINCT author_handle) FROM bookmarks')[0]?.values[0]?.[0] as number;
-    const range = db.exec('SELECT MIN(posted_at), MAX(posted_at) FROM bookmarks WHERE posted_at IS NOT NULL')[0]?.values[0];
+    const timelineRows = db.exec(
+      `SELECT author_handle, posted_at, synced_at
+       FROM bookmarks
+       WHERE posted_at IS NOT NULL OR synced_at IS NOT NULL OR author_handle IS NOT NULL`
+    );
+    const timelineData = aggregateTimelineData(
+      (timelineRows[0]?.values ?? []).map((row) => ({
+        authorHandle: (row[0] as string) ?? undefined,
+        postedAt: (row[1] as string) ?? null,
+        syncedAt: (row[2] as string) ?? null,
+      }))
+    );
 
     const topAuthorsRows = db.exec(
       `SELECT author_handle, COUNT(*) as c FROM bookmarks
        WHERE author_handle IS NOT NULL
        GROUP BY author_handle ORDER BY c DESC LIMIT 20`
-    );
-
-    // Twitter legacy format: "Sat Mar 28 18:55:23 +0000 2026"
-    // Normalize both legacy and ISO timestamps into the same YYYY-MM bucket.
-    const legacyMonthNumberExpr = `CASE substr(bookmarked_at, 5, 3)
-      WHEN 'Jan' THEN '01' WHEN 'Feb' THEN '02' WHEN 'Mar' THEN '03'
-      WHEN 'Apr' THEN '04' WHEN 'May' THEN '05' WHEN 'Jun' THEN '06'
-      WHEN 'Jul' THEN '07' WHEN 'Aug' THEN '08' WHEN 'Sep' THEN '09'
-      WHEN 'Oct' THEN '10' WHEN 'Nov' THEN '11' WHEN 'Dec' THEN '12'
-      ELSE '00'
-    END`;
-    const monthBucketExpr = `CASE
-      WHEN bookmarked_at GLOB '____-__-__*' THEN substr(bookmarked_at, 1, 7)
-      ELSE substr(bookmarked_at, -4) || '-' || ${legacyMonthNumberExpr}
-    END`;
-
-    const monthlyRows = db.exec(
-      `SELECT
-         ${monthBucketExpr} as ym,
-         COUNT(*) as c
-       FROM bookmarks WHERE bookmarked_at IS NOT NULL
-       GROUP BY ym ORDER BY ym`
-    );
-
-    // Day of week — first 3 chars for legacy, strftime('%w') for ISO
-    // SQLite %w: 0=Sunday, 1=Monday... We can map them if we want, but the chart just uses 'dow' as a string key
-    const dowRows = db.exec(
-      `SELECT 
-         CASE
-           WHEN bookmarked_at GLOB '____-__-__*' THEN 
-             CASE strftime('%w', bookmarked_at)
-               WHEN '0' THEN 'Sun' WHEN '1' THEN 'Mon' WHEN '2' THEN 'Tue'
-               WHEN '3' THEN 'Wed' WHEN '4' THEN 'Thu' WHEN '5' THEN 'Fri' WHEN '6' THEN 'Sat' END
-           ELSE substr(bookmarked_at, 1, 3)
-         END as dow, COUNT(*) as c
-       FROM bookmarks WHERE bookmarked_at IS NOT NULL
-       GROUP BY dow ORDER BY c DESC`
-    );
-
-    // Hour of day — chars 12-13 for legacy, strftime('%H') for ISO
-    const hourRows = db.exec(
-      `SELECT 
-         CASE
-           WHEN bookmarked_at GLOB '____-__-__*' THEN CAST(strftime('%H', bookmarked_at) AS INTEGER)
-           ELSE CAST(substr(bookmarked_at, 12, 2) AS INTEGER)
-         END as h, COUNT(*) as c
-       FROM bookmarks WHERE bookmarked_at IS NOT NULL
-       GROUP BY h ORDER BY h`
     );
 
     // Domains from links_json
@@ -241,14 +332,6 @@ async function queryVizData(): Promise<VizData> {
 
     const avgLen = db.exec('SELECT AVG(length(text)) FROM bookmarks')[0]?.values[0]?.[0] as number;
 
-    // Recent 30 days top authors
-    const recentAuthorsRows = db.exec(
-      `SELECT author_handle, COUNT(*) as c FROM bookmarks
-       WHERE author_handle IS NOT NULL
-       AND bookmarked_at >= (SELECT MAX(bookmarked_at) FROM bookmarks)
-       GROUP BY author_handle ORDER BY c DESC LIMIT 10`
-    );
-
     // Time capsules: oldest posts, one per year to spread the range
     const capsuleRows = db.exec(
       `SELECT author_handle, text, tweet_id, posted_at, substr(posted_at, -4) as yr
@@ -286,41 +369,6 @@ async function queryVizData(): Promise<VizData> {
       postedAt: r[3] as string,
     }));
 
-    // Rising voices: authors with 3+ bookmarks, all from the most recent month
-    const latestMonth = db.exec(
-      `SELECT ${monthBucketExpr}
-       FROM bookmarks WHERE bookmarked_at IS NOT NULL
-       ORDER BY bookmarked_at DESC LIMIT 1`
-    )[0]?.values[0]?.[0] as string | undefined;
-
-    let risingVoices: { handle: string; count: number }[] = [];
-    if (latestMonth) {
-      const risingRows = db.exec(
-        `SELECT author_handle, COUNT(*) as c FROM bookmarks
-         WHERE author_handle IS NOT NULL
-         GROUP BY author_handle
-         HAVING c >= 3
-         AND MIN(${monthBucketExpr}) = ?
-         ORDER BY c DESC LIMIT 8`,
-        [latestMonth]
-      );
-      risingVoices = (risingRows[0]?.values ?? []).map((r) => ({
-        handle: r[0] as string,
-        count: r[1] as number,
-      }));
-    }
-
-    const monthNameMap: Record<string, string> = {
-      '01': 'Jan', '02': 'Feb', '03': 'Mar', '04': 'Apr', '05': 'May', '06': 'Jun',
-      '07': 'Jul', '08': 'Aug', '09': 'Sep', '10': 'Oct', '11': 'Nov', '12': 'Dec',
-    };
-    const rawMonthly = (monthlyRows[0]?.values ?? []).map((r) => {
-      const month = r[0] as string; // "2026-03"
-      const [year, monthNum] = month.split('-');
-      const label = `${monthNameMap[monthNum] ?? monthNum} ${year}`;
-      return { month, label, count: r[1] as number };
-    });
-
     // Categories
     let categories: { name: string; count: number }[] = [];
     try {
@@ -352,32 +400,17 @@ async function queryVizData(): Promise<VizData> {
     return {
       total,
       uniqueAuthors: authors,
-      dateRange: {
-        earliest: (range?.[0] as string) ?? '?',
-        latest: (range?.[1] as string) ?? '?',
-      },
+      dateRange: timelineData.dateRange,
       topAuthors: (topAuthorsRows[0]?.values ?? []).map((r) => ({
         handle: r[0] as string,
         count: r[1] as number,
       })),
-      monthlyActivity: rawMonthly.map((r) => ({
-        month: r.label,
-        count: r.count,
-      })),
-      dayOfWeekActivity: (dowRows[0]?.values ?? []).map((r) => ({
-        day: r[0] as string,
-        count: r[1] as number,
-      })),
-      hourActivity: (hourRows[0]?.values ?? []).map((r) => ({
-        hour: r[0] as number,
-        count: r[1] as number,
-      })),
+      monthlyActivity: timelineData.monthlyActivity,
+      dayOfWeekActivity: timelineData.dayOfWeekActivity,
+      hourActivity: timelineData.hourActivity,
       topDomains,
       mediaStats,
-      recentAuthors: (recentAuthorsRows[0]?.values ?? []).map((r) => ({
-        handle: r[0] as string,
-        count: r[1] as number,
-      })),
+      recentAuthors: timelineData.recentAuthors,
       languages: (langRows[0]?.values ?? []).map((r) => ({
         lang: r[0] as string,
         count: r[1] as number,
@@ -385,7 +418,7 @@ async function queryVizData(): Promise<VizData> {
       avgTextLength: avgLen,
       timeCapsules,
       hiddenGems,
-      risingVoices,
+      risingVoices: timelineData.risingVoices,
       categories,
       domains,
     };
@@ -410,7 +443,7 @@ function renderHeader(data: VizData): string[] {
     `${C.text}${data.total.toLocaleString()} bookmarks${C.dim}  ·  ${C.text}${data.uniqueAuthors.toLocaleString()} voices${C.dim}  ·  ${C.text}${data.languages.length} languages`, W
   ));
   lines.push(boxRow(
-    `${C.dim}${data.dateRange.earliest.slice(0, 16)} → ${data.dateRange.latest.slice(0, 16)}`, W
+    `${C.dim}${data.dateRange.earliest} → ${data.dateRange.latest}`, W
   ));
   lines.push(boxBottom(W));
   return lines;
@@ -440,12 +473,13 @@ function renderTopAuthors(data: VizData): string[] {
 
 function renderActivity(data: VizData): string[] {
   const lines: string[] = [];
+  if (data.monthlyActivity.length === 0) return [];
   const counts = data.monthlyActivity.map((m) => m.count);
   const maxCount = Math.max(...counts, 1);
 
   lines.push('');
-  lines.push(`  ${C.warm}${BOLD}RHYTHM${RESET}`);
-  lines.push(`  ${C.dim}monthly bookmarking cadence${RESET}`);
+  lines.push(`  ${C.warm}${BOLD}PUBLICATION RHYTHM${RESET}`);
+  lines.push(`  ${C.dim}monthly cadence of posts in your library${RESET}`);
   lines.push('');
 
   // Sparkline overview
@@ -478,8 +512,8 @@ function renderDayOfWeek(data: VizData): string[] {
   const counts = ordered.map((d) => d.count);
 
   lines.push('');
-  lines.push(`  ${C.green}${BOLD}WEEKLY PULSE${RESET}`);
-  lines.push(`  ${C.dim}which days you bookmark${RESET}`);
+  lines.push(`  ${C.green}${BOLD}POST WEEKDAYS${RESET}`);
+  lines.push(`  ${C.dim}which weekdays your saved posts were published${RESET}`);
   lines.push('');
   lines.push(`  ${brailleChart(counts, 14, C.green)}`);
   lines.push('');
@@ -507,8 +541,8 @@ function renderHourOfDay(data: VizData): string[] {
   const maxCount = Math.max(...allHours, 1);
 
   lines.push('');
-  lines.push(`  ${C.cyan}${BOLD}DAILY ARC${RESET}`);
-  lines.push(`  ${C.dim}when you reach for the bookmark button${RESET}`);
+  lines.push(`  ${C.cyan}${BOLD}POSTING HOURS${RESET}`);
+  lines.push(`  ${C.dim}UTC posting hours for the tweets you saved${RESET}`);
   lines.push('');
 
   // Vertical bar chart using blocks
@@ -691,10 +725,6 @@ function truncateText(text: string, max: number): string {
   return clean.slice(0, max - 1) + '…';
 }
 
-function twitterDateYear(date: string): string {
-  return date.slice(-4);
-}
-
 function renderTimeCapsules(data: VizData): string[] {
   const lines: string[] = [];
   if (data.timeCapsules.length === 0) return [];
@@ -705,8 +735,8 @@ function renderTimeCapsules(data: VizData): string[] {
   lines.push('');
 
   for (const b of data.timeCapsules) {
-    const year = twitterDateYear(b.postedAt);
-    const monthDay = b.postedAt.slice(4, 10); // " Mar 28"
+    const year = toYearLabel(b.postedAt);
+    const monthDay = toMonthDayLabel(b.postedAt).padStart(6, ' ');
     const color = lerpColor([240, 200, 100], [200, 160, 80], 0.5);
     const url = `x.com/${b.author}/status/${b.tweetId}`;
     lines.push(`  ${color}${year}${RESET}${C.dim}${monthDay}${RESET}  ${C.text}@${b.author}${RESET}`);
@@ -744,7 +774,7 @@ function renderRisingVoices(data: VizData): string[] {
 
   lines.push('');
   lines.push(`  ${C.green}${BOLD}RISING${RESET}`);
-  lines.push(`  ${C.dim}new voices — all bookmarks from your most recent month${RESET}`);
+  lines.push(`  ${C.dim}voices concentrated in the latest publication month in your library${RESET}`);
   lines.push('');
 
   for (const v of data.risingVoices) {

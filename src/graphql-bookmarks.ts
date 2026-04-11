@@ -3,6 +3,7 @@ import { ensureDataDir, twitterBookmarksCachePath, twitterBookmarksMetaPath, twi
 import { loadChromeSessionConfig } from './config.js';
 import { extractChromeXCookies } from './chrome-cookies.js';
 import { extractFirefoxXCookies } from './firefox-cookies.js';
+import { parseTimestampMs } from './date-utils.js';
 import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText } from './bookmarks-db.js';
 
@@ -102,26 +103,24 @@ function parseSnowflake(value?: string | null): bigint | null {
   }
 }
 
-function parseDateMs(value?: string | null): number | null {
-  if (!value) return null;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 const MAX_FUTURE_BOOKMARK_SKEW_MS = 5 * 60_000;
 
 export function sanitizeBookmarkedAt(record: BookmarkRecord): BookmarkRecord {
-  const bookmarkedAtMs = parseDateMs(record.bookmarkedAt);
+  if (record.ingestedVia === 'graphql') {
+    return record.bookmarkedAt == null ? record : { ...record, bookmarkedAt: null };
+  }
+
+  const bookmarkedAtMs = parseTimestampMs(record.bookmarkedAt);
   if (bookmarkedAtMs == null) {
     return record.bookmarkedAt == null ? record : { ...record, bookmarkedAt: null };
   }
 
-  const postedAtMs = parseDateMs(record.postedAt);
+  const postedAtMs = parseTimestampMs(record.postedAt);
   if (postedAtMs != null && bookmarkedAtMs < postedAtMs) {
     return { ...record, bookmarkedAt: null };
   }
 
-  const syncedAtMs = parseDateMs(record.syncedAt);
+  const syncedAtMs = parseTimestampMs(record.syncedAt);
   if (syncedAtMs != null && bookmarkedAtMs > syncedAtMs + MAX_FUTURE_BOOKMARK_SKEW_MS) {
     return { ...record, bookmarkedAt: null };
   }
@@ -142,13 +141,19 @@ function sanitizeRecords(records: BookmarkRecord[]): { records: BookmarkRecord[]
 function parseBookmarkTimestamp(record: BookmarkRecord): number | null {
   const candidates = [record.bookmarkedAt, record.postedAt, record.syncedAt];
   for (const candidate of candidates) {
-    const parsed = parseDateMs(candidate);
+    const parsed = parseTimestampMs(candidate);
     if (parsed != null) return parsed;
   }
   return null;
 }
 
 function compareBookmarkChronology(a: BookmarkRecord, b: BookmarkRecord): number {
+  const aSortIndex = parseSnowflake(a.sortIndex);
+  const bSortIndex = parseSnowflake(b.sortIndex);
+  if (aSortIndex != null && bSortIndex != null && aSortIndex !== bSortIndex) {
+    return aSortIndex > bSortIndex ? 1 : -1;
+  }
+
   const aTimestamp = parseBookmarkTimestamp(a);
   const bTimestamp = parseBookmarkTimestamp(b);
   if (aTimestamp != null && bTimestamp != null && aTimestamp !== bTimestamp) {
@@ -334,19 +339,6 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
   };
 }
 
-const TWITTER_SNOWFLAKE_EPOCH = 1288834974657n;
-
-function snowflakeToIso(snowflake: string): string | null {
-  try {
-    const id = BigInt(snowflake);
-    const ms = Number(id >> 22n) + Number(TWITTER_SNOWFLAKE_EPOCH);
-    const date = new Date(ms);
-    return Number.isFinite(date.getTime()) ? date.toISOString() : null;
-  } catch {
-    return null;
-  }
-}
-
 export function parseBookmarksResponse(json: any, now?: string): PageResult {
   const ts = now ?? new Date().toISOString();
   const instructions = json?.data?.bookmark_timeline_v2?.timeline?.instructions ?? [];
@@ -371,10 +363,7 @@ export function parseBookmarksResponse(json: any, now?: string): PageResult {
 
     const record = convertTweetToRecord(tweetResult, ts);
     if (record) {
-      // Extract bookmarkedAt from the entry's sortIndex (snowflake timestamp)
-      if (entry.sortIndex) {
-        record.bookmarkedAt = snowflakeToIso(entry.sortIndex) ?? record.bookmarkedAt;
-      }
+      record.sortIndex = typeof entry.sortIndex === 'string' ? entry.sortIndex : null;
       records.push(sanitizeBookmarkedAt(record));
     }
   }
@@ -523,9 +512,7 @@ export async function syncBookmarksGraphQL(
   const loaded = await loadExistingBookmarks();
   let existing = loaded.records;
   const bookmarkedAtRepaired = loaded.repaired;
-  const newestKnownId = incremental
-    ? existing.slice().sort((a, b) => compareBookmarkChronology(b, a))[0]?.id
-    : undefined;
+  const newestKnownId = incremental ? existing[0]?.id : undefined;
   const previousMeta = (await pathExists(metaPath))
     ? await readJson<BookmarkCacheMeta>(metaPath)
     : undefined;
