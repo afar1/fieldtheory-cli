@@ -55,3 +55,41 @@ export function preferencesPath(): string {
 export function isFirstRun(): boolean {
   return !fs.existsSync(twitterBookmarksCachePath());
 }
+
+// ── Markdown wiki paths ──────────────────────────────────────────────────
+
+export function mdDir(): string {
+  return path.join(dataDir(), 'md');
+}
+
+export function mdIndexPath(): string {
+  return path.join(mdDir(), 'index.md');
+}
+
+export function mdLogPath(): string {
+  return path.join(mdDir(), 'log.md');
+}
+
+export function mdStatePath(): string {
+  return path.join(mdDir(), 'md-state.json');
+}
+
+export function mdSchemaPath(): string {
+  return path.join(dataDir(), 'schema.md');
+}
+
+export function mdCategoriesDir(): string {
+  return path.join(mdDir(), 'categories');
+}
+
+export function mdDomainsDir(): string {
+  return path.join(mdDir(), 'domains');
+}
+
+export function mdEntitiesDir(): string {
+  return path.join(mdDir(), 'entities');
+}
+
+export function mdConceptsDir(): string {
+  return path.join(mdDir(), 'concepts');
+}

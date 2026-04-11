@@ -29,6 +29,40 @@ test('preferences: round-trip save and load', async () => {
   }
 });
 
+test('preferences: savePreferences creates missing data dir', async () => {
+  const tmpDir = path.join(os.tmpdir(), `ft-engine-missing-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const origEnv = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = tmpDir;
+
+  try {
+    const { loadPreferences, savePreferences } = await import('../src/preferences.js');
+    savePreferences({ defaultEngine: 'claude' });
+    assert.equal(loadPreferences().defaultEngine, 'claude');
+    assert.ok(fs.existsSync(path.join(tmpDir, '.preferences')));
+  } finally {
+    process.env.FT_DATA_DIR = origEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('preferences: savePreferences writes private file on posix', async () => {
+  if (process.platform === 'win32') return;
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-private-'));
+  const origEnv = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = tmpDir;
+
+  try {
+    const { savePreferences } = await import('../src/preferences.js');
+    savePreferences({ defaultEngine: 'claude' });
+    const mode = fs.statSync(path.join(tmpDir, '.preferences')).mode & 0o777;
+    assert.equal(mode, 0o600);
+  } finally {
+    process.env.FT_DATA_DIR = origEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 // ── Engine detection ───────────────────────────────────────────────────
 
 test('detectAvailableEngines: returns array of available engines', async () => {
@@ -41,6 +75,39 @@ test('detectAvailableEngines: returns array of available engines', async () => {
   // Each entry should be a known engine name
   for (const name of available) {
     assert.ok(['claude', 'codex'].includes(name), `unexpected engine: ${name}`);
+  }
+});
+
+test('hasCommandOnPath: finds executable in PATH', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-path-'));
+  const fakeBin = path.join(tmpDir, 'claude');
+
+  try {
+    fs.writeFileSync(fakeBin, '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(fakeBin, 0o755);
+
+    const { hasCommandOnPath } = await import('../src/engine.js');
+    assert.equal(hasCommandOnPath('claude', { PATH: tmpDir }, 'linux'), true);
+    assert.equal(hasCommandOnPath('codex', { PATH: tmpDir }, 'linux'), false);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('hasCommandOnPath: honors PATHEXT on win32', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-path-win-'));
+  const fakeBin = path.join(tmpDir, 'codex.CMD');
+
+  try {
+    fs.writeFileSync(fakeBin, '@echo off\r\n');
+
+    const { hasCommandOnPath } = await import('../src/engine.js');
+    assert.equal(
+      hasCommandOnPath('codex', { PATH: tmpDir, PATHEXT: '.EXE;.CMD' }, 'win32'),
+      true,
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 

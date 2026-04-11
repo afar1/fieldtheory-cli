@@ -100,6 +100,7 @@ const BROWSERS: BrowserDef[] = [
     keychainEntries: [],
     macPath: 'Library/Application Support/Firefox',
     linuxPath: '.mozilla/firefox',
+    winPath: 'AppData/Roaming/Mozilla/Firefox',
   },
 ];
 

@@ -100,7 +100,7 @@ async function fetchCurrentUserId(accessToken: string): Promise<{ ok: boolean; i
   };
 }
 
-function normalizeBookmarkPage(page: BookmarkApiResponse, syncedAt: string): BookmarkRecord[] {
+export function normalizeBookmarkPage(page: BookmarkApiResponse, syncedAt: string): BookmarkRecord[] {
   const userMap = new Map<string, { username?: string; name?: string }>();
   for (const user of page.includes?.users ?? []) {
     userMap.set(String(user.id), { username: user.username, name: user.name });
@@ -116,7 +116,8 @@ function normalizeBookmarkPage(page: BookmarkApiResponse, syncedAt: string): Boo
       text: tweet.text ?? '',
       authorHandle: user?.username,
       authorName: user?.name,
-      bookmarkedAt: tweet.created_at,
+      // The v2 bookmarks endpoint exposes tweet creation, not bookmark creation.
+      bookmarkedAt: null,
       syncedAt,
       links: (tweet.entities?.urls ?? []).map((u) => u.expanded_url ?? u.url ?? '').filter(Boolean),
     });
@@ -131,21 +132,37 @@ async function fetchBookmarksPage(accessToken: string, userId: string, nextToken
   url.searchParams.set('user.fields', 'username,name');
   if (nextToken) url.searchParams.set('pagination_token', nextToken);
 
-  const result = await fetchJsonWithUserToken(url.toString(), accessToken);
-  if (!result.ok) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const result = await fetchJsonWithUserToken(url.toString(), accessToken);
+
+    if (result.status === 429) {
+      const waitSec = Math.min(15 * Math.pow(2, attempt), 120);
+      await new Promise((r) => setTimeout(r, waitSec * 1000));
+      continue;
+    }
+
+    if (!result.ok) {
+      return {
+        ok: false,
+        status: result.status,
+        detail: result.parsed ? JSON.stringify(result.parsed) : result.text,
+        requestUrl: url.toString(),
+      };
+    }
+
     return {
-      ok: false,
+      ok: true,
       status: result.status,
-      detail: result.parsed ? JSON.stringify(result.parsed) : result.text,
+      detail: 'ok',
+      page: result.parsed as BookmarkApiResponse,
       requestUrl: url.toString(),
     };
   }
 
   return {
-    ok: true,
-    status: result.status,
-    detail: 'ok',
-    page: result.parsed as BookmarkApiResponse,
+    ok: false,
+    status: 429,
+    detail: 'Rate limited after 4 retries. Try again later.',
     requestUrl: url.toString(),
   };
 }
@@ -174,7 +191,7 @@ export async function syncTwitterBookmarks(
   const allFetched: BookmarkRecord[] = [];
   let nextToken: string | undefined;
   let pages = 0;
-  const maxPages = mode === 'full' ? 20 : 2;
+  const maxPages = mode === 'full' ? 200 : 2;
 
   while (pages < maxPages) {
     const pageResult = await fetchBookmarksPage(token.access_token, me.id, nextToken);

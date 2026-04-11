@@ -39,6 +39,14 @@ test('getBrowser: firefox has firefox cookieBackend', () => {
   assert.equal(browser.keychainEntries.length, 0);
 });
 
+test('getBrowser: firefox has user-data paths for every supported OS', () => {
+  const browser = getBrowser('firefox');
+  assert.ok(browser.macPath, 'Firefox macPath must be set');
+  assert.ok(browser.linuxPath, 'Firefox linuxPath must be set');
+  assert.ok(browser.winPath, 'Firefox winPath must be set');
+  assert.match(browser.winPath!, /AppData[\\/]Roaming[\\/]Mozilla[\\/]Firefox/);
+});
+
 test('getBrowser: brave has correct keychain entries', () => {
   const browser = getBrowser('brave');
   const services = browser.keychainEntries.map(e => e.service);

@@ -5,8 +5,11 @@
  * Remembers the user's choice in ~/.ft-bookmarks/.preferences.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execFile } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { loadPreferences, savePreferences } from './preferences.js';
+import { PromptCancelledError, promptText } from './prompt.js';
 
 // ── Engine registry ────────────────────────────────────────────────────
 
@@ -25,30 +28,55 @@ const PREFERENCE_ORDER = ['claude', 'codex'];
 
 // ── Detection ──────────────────────────────────────────────────────────
 
-function isOnPath(bin: string): boolean {
-  try {
-    execFileSync('which', [bin], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
+export function hasCommandOnPath(
+  bin: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platform = process.platform,
+): boolean {
+  const searchPath = env.PATH ?? '';
+  const pathDirs = searchPath.split(path.delimiter).filter(Boolean);
+  const pathext = (env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM')
+    .split(';')
+    .map((ext) => ext.trim())
+    .filter(Boolean);
+
+  const hasPathSeparator = /[\\/]/.test(bin);
+  const baseCandidates = hasPathSeparator
+    ? [bin]
+    : pathDirs.map((dir) => path.join(dir, bin));
+  const candidates = platform === 'win32'
+    ? baseCandidates.flatMap((candidate) => {
+        if (path.extname(candidate)) return [candidate];
+        return pathext.map((ext) => `${candidate}${ext}`);
+      })
+    : baseCandidates;
+
+  return candidates.some((candidate) => {
+    try {
+      if (platform === 'win32') return fs.statSync(candidate).isFile();
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 export function detectAvailableEngines(): string[] {
-  return PREFERENCE_ORDER.filter((name) => isOnPath(KNOWN_ENGINES[name].bin));
+  return PREFERENCE_ORDER.filter((name) => hasCommandOnPath(KNOWN_ENGINES[name].bin));
 }
 
 // ── Interactive prompt ─────────────────────────────────────────────────
 
 async function askYesNo(question: string): Promise<boolean> {
-  const { createInterface } = await import('node:readline');
-  return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: process.stderr });
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer.trim().toLowerCase().startsWith('y'));
-    });
-  });
+  const result = await promptText(question);
+  if (result.kind === 'interrupt') {
+    throw new PromptCancelledError('Cancelled before selecting a model.', 130);
+  }
+  if (result.kind === 'close') {
+    throw new PromptCancelledError('No model selected.', 0);
+  }
+  return result.value.toLowerCase().startsWith('y');
 }
 
 // ── Resolution ─────────────────────────────────────────────────────────
@@ -117,12 +145,35 @@ export async function resolveEngine(): Promise<ResolvedEngine> {
 
 // ── Invocation ─────────────────────────────────────────────────────────
 
-export function invokeEngine(engine: ResolvedEngine, prompt: string): string {
+export interface InvokeOptions {
+  timeout?: number;
+  maxBuffer?: number;
+}
+
+export function invokeEngine(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): string {
   const { bin, args } = engine.config;
   return execFileSync(bin, args(prompt), {
     encoding: 'utf-8',
-    timeout: 120_000,
-    maxBuffer: 1024 * 1024,
+    timeout: opts.timeout ?? 120_000,
+    maxBuffer: opts.maxBuffer ?? 1024 * 1024,
     stdio: ['pipe', 'pipe', 'ignore'],
   }).trim();
+}
+
+/**
+ * Async variant — does not block the event loop, so spinners and
+ * setInterval callbacks continue to fire while the LLM runs.
+ */
+export function invokeEngineAsync(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): Promise<string> {
+  const { bin, args } = engine.config;
+  return new Promise((resolve, reject) => {
+    execFile(bin, args(prompt), {
+      encoding: 'utf-8',
+      timeout: opts.timeout ?? 120_000,
+      maxBuffer: opts.maxBuffer ?? 1024 * 1024,
+    }, (err, stdout) => {
+      if (err) return reject(err);
+      resolve(stdout.trim());
+    });
+  });
 }
