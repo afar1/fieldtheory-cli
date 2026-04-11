@@ -5,7 +5,7 @@
  * Remembers the user's choice in ~/.ft-bookmarks/.preferences.
  */
 
-import { execFileSync, execFile } from 'node:child_process';
+import { execFileSync, execFile, execSync, type ExecSyncOptions } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadPreferences, savePreferences } from './preferences.js';
@@ -150,14 +150,34 @@ export interface InvokeOptions {
   maxBuffer?: number;
 }
 
+export interface InvokeError extends Error {
+  stderr: string;
+  stdout: string;
+}
+
 export function invokeEngine(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): string {
   const { bin, args } = engine.config;
-  return execFileSync(bin, args(prompt), {
+  const fullArgs = args(prompt);
+
+  const result = execSync(`${bin} ${fullArgs.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ')}`, {
     encoding: 'utf-8',
     timeout: opts.timeout ?? 120_000,
     maxBuffer: opts.maxBuffer ?? 1024 * 1024,
-    stdio: ['pipe', 'pipe', 'ignore'],
-  }).trim();
+  } as ExecSyncOptions) as unknown as { stdout: string; stderr: string };
+
+  const stdout = result.stdout.trim();
+  const stderr = result.stderr ?? '';
+
+  const fullOutput = stdout + '\n' + stderr;
+  if (fullOutput.includes('ERROR:') || fullOutput.includes('error:')) {
+    const errorMsg = stderr.includes('ERROR:') || stderr.includes('error:') ? stderr.trim() : stdout.trim();
+    const error = new Error(errorMsg) as InvokeError;
+    error.stderr = stderr;
+    error.stdout = stdout;
+    throw error;
+  }
+
+  return stdout;
 }
 
 /**
@@ -171,8 +191,13 @@ export function invokeEngineAsync(engine: ResolvedEngine, prompt: string, opts: 
       encoding: 'utf-8',
       timeout: opts.timeout ?? 120_000,
       maxBuffer: opts.maxBuffer ?? 1024 * 1024,
-    }, (err, stdout) => {
-      if (err) return reject(err);
+    }, (err, stdout, stderr) => {
+      if (err) {
+        const fullErr = new Error(stderr?.trim() || err.message) as InvokeError;
+        fullErr.stderr = stderr ?? '';
+        fullErr.stdout = stdout?.trim() ?? '';
+        return reject(fullErr);
+      }
       resolve(stdout.trim());
     });
   });

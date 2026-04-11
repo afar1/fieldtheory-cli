@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
 import { runTwitterOAuthFlow } from './xauth.js';
@@ -25,7 +25,7 @@ import { loadPreferences, savePreferences } from './preferences.js';
 import { compileMd } from './md.js';
 import { askMd } from './md-ask.js';
 import { lintMd, fixLintIssues } from './md-lint.js';
-import { exportBookmarks } from './md-export.js';
+import { exportBookmarks, detectFormatMigration, type FilenameFormat } from './md-export.js';
 import { renderViz } from './bookmarks-viz.js';
 import { listBrowserIds } from './browsers.js';
 import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir } from './paths.js';
@@ -767,12 +767,13 @@ export function buildCli() {
     .command('classify')
     .description('Classify bookmarks by category and domain using LLM (requires claude or codex CLI)')
     .option('--regex', 'Use simple regex classification instead of LLM')
+    .option('--fail-fast', 'Stop immediately on first classification failure')
     .action(safe(async (options) => {
       if (!requireData()) return;
       if (options.regex) {
         process.stderr.write('Classifying bookmarks (regex)...\n');
         const result = await classifyAndRebuild();
-        console.log(`Indexed ${result.recordCount} bookmarks \u2192 ${result.dbPath}`);
+        console.log(`Indexed ${result.recordCount} bookmarks → ${result.dbPath}`);
         console.log(formatClassificationSummary(result.summary));
       } else {
         const engine = await resolveEngine();
@@ -781,10 +782,11 @@ export function buildCli() {
         process.stderr.write('Classifying categories with LLM (batches of 50, ~2 min per batch)...\n');
         const catResult = await classifyWithLlm({
           engine,
+          failFast: options.failFast ?? false,
           onBatch: (done: number, total: number) => {
             const pct = total > 0 ? Math.round((done / total) * 100) : 0;
             const elapsed = Math.round((Date.now() - catStart) / 1000);
-            process.stderr.write(`  Categories: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
+            process.stderr.write(`  Categories: ${done}/${total} (${pct}%) │ ${elapsed}s elapsed\n`);
           },
         });
         console.log(`\nEngine: ${catResult.engine}`);
@@ -795,10 +797,11 @@ export function buildCli() {
         const domResult = await classifyDomainsWithLlm({
           engine,
           all: false,
+          failFast: options.failFast ?? false,
           onBatch: (done: number, total: number) => {
             const pct = total > 0 ? Math.round((done / total) * 100) : 0;
             const elapsed = Math.round((Date.now() - domStart) / 1000);
-            process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
+            process.stderr.write(`  Domains: ${done}/${total} (${pct}%) │ ${elapsed}s elapsed\n`);
           },
         });
         console.log(`\nDomains: ${domResult.classified}/${domResult.totalUnclassified} classified`);
@@ -811,6 +814,7 @@ export function buildCli() {
     .command('classify-domains')
     .description('Classify bookmarks by subject domain using LLM (ai, finance, etc.)')
     .option('--all', 'Re-classify all bookmarks, not just missing')
+    .option('--fail-fast', 'Stop immediately on first classification failure')
     .action(safe(async (options) => {
       if (!requireData()) return;
       const engine = await resolveEngine();
@@ -819,10 +823,11 @@ export function buildCli() {
       const result = await classifyDomainsWithLlm({
         engine,
         all: options.all ?? false,
+        failFast: options.failFast ?? false,
         onBatch: (done: number, total: number) => {
           const pct = total > 0 ? Math.round((done / total) * 100) : 0;
           const elapsed = Math.round((Date.now() - start) / 1000);
-          process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
+          process.stderr.write(`  Domains: ${done}/${total} (${pct}%) │ ${elapsed}s elapsed\n`);
         },
       });
       console.log(`\nDomains: ${result.classified}/${result.totalUnclassified} classified`);
@@ -1015,12 +1020,64 @@ export function buildCli() {
     .command('md')
     .description('Export bookmarks as individual markdown files')
     .option('--force', 'Re-export all bookmarks (overwrite existing files)')
+    .addOption(new Option('--format <type>', 'Filename format').choices(['rev-iso', 'legacy']).default('rev-iso'))
     .action(safe(async (options) => {
       if (!requireIndex()) return;
+
+      // ── Format migration guard ──────────────────────────────────────
+      const format = options.format as FilenameFormat;
+      const needsMigration = await detectFormatMigration(format);
+
+      if (needsMigration === 'mismatch') {
+        console.log(
+          '\n  ⚠  Existing markdown files use the legacy filename format,\n' +
+          '     but you requested the new rev-iso format.\n' +
+          '     Without action, every bookmark will be re-exported as duplicates.\n',
+        );
+        console.log('  Options:');
+        console.log('    [b] Back up old folder + force regenerate (recommended)');
+        console.log('    [f] Force regenerate in-place (overwrite existing)');
+        console.log('    [c] Continue as-is (will create duplicates)');
+        console.log('    [x] Cancel\n');
+
+        const answer = await promptText('  Choice [b/f/c/x]: ', { output: process.stdout });
+        if (answer.kind !== 'answer' || answer.value === 'x') {
+          console.log('  Cancelled.');
+          return;
+        }
+
+        const choice = answer.value.trim().toLowerCase();
+
+        if (choice === 'b' || choice === 'f') {
+          if (choice === 'b') {
+            const src = path.join(mdDir(), 'bookmarks');
+            const dst = path.join(mdDir(), `bookmarks-backup-${Date.now()}`);
+            fs.renameSync(src, dst);
+            console.log(`  Backed up to: ${dst}`);
+          }
+          // Force regen — pass force: true to overwrite / start fresh
+          let lastLine = '';
+          const spinner = createSpinner(() => lastLine);
+          const result = await exportBookmarks({
+            force: true,
+            filenameFormat: format,
+            onProgress: (s) => { lastLine = s; spinner.update(); },
+          });
+          spinner.stop();
+          console.log(`Exported ${result.exported}/${result.total} bookmarks`);
+          console.log(`  ${result.elapsed}s elapsed`);
+          console.log(`\n  Open in your markdown viewer:\n  ${mdDir()}`);
+          return;
+        }
+
+        // choice === 'c' — fall through to normal export
+      }
+
       let lastLine = '';
       const spinner = createSpinner(() => lastLine);
       const result = await exportBookmarks({
         force: options.force,
+        filenameFormat: format,
         onProgress: (s) => {
           lastLine = s;
           spinner.update();
