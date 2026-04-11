@@ -2,7 +2,7 @@
 
 Sync and store locally all of your X/Twitter bookmarks. Search, classify, and make them available to Claude Code, Codex, or any agent with shell access.
 
-Free and open source. Designed for Mac.
+Free and open source.
 
 ## Install
 
@@ -10,12 +10,15 @@ Free and open source. Designed for Mac.
 npm install -g fieldtheory
 ```
 
-Requires Node.js 20+. Chrome recommended for session sync; OAuth available for all platforms.
+Requires Node.js 20+ and a supported browser.
+
+PowerShell note: `ft` conflicts with PowerShell's built-in `Format-Table` alias.
+On Windows PowerShell, use `fieldtheory` instead.
 
 ## Quick start
 
 ```bash
-# 1. Sync your bookmarks (needs Chrome logged into X)
+# 1. Sync your bookmarks (needs a supported browser logged into X)
 ft sync
 
 # 2. Search them
@@ -27,7 +30,7 @@ ft categories
 ft stats
 ```
 
-On first run, `ft sync` extracts your X session from Chrome and downloads your bookmarks into `~/.ft-bookmarks/`.
+On first run, `ft sync` extracts your X session from a supported browser and downloads your bookmarks into `~/.ft-bookmarks/`.
 
 ## Commands
 
@@ -155,15 +158,47 @@ To remove all data: `rm -rf ~/.ft-bookmarks`
 
 Use `ft classify` for LLM-powered classification that catches what regex misses.
 
+## Windows Notes
+
+On Windows PowerShell, prefer:
+
+```powershell
+fieldtheory sync
+fieldtheory search "ai"
+```
+
+On Windows PowerShell, use `fieldtheory` instead of `ft`.
+If you are syncing from Edge, close Edge completely first.
+
+If auto-detection still fails, manual cookie sync works:
+
+```powershell
+fieldtheory sync --cookies "<ct0>" "<auth_token>"
+```
+
+To use Microsoft Edge explicitly:
+
+```powershell
+fieldtheory sync --browser edge
+fieldtheory sync --browser edge --chrome-profile-directory "Default"
+fieldtheory sync --browser edge --chrome-profile-directory "Profile 1"
+```
+
+You can also point the CLI at a Chromium-family browser data directory directly:
+
+```powershell
+fieldtheory sync --chrome-user-data-dir "$env:LOCALAPPDATA\Microsoft\Edge\User Data" --chrome-profile-directory "Profile 1"
+```
+
 ## Platform support
 
 | Feature | macOS | Linux | Windows |
 |---------|-------|-------|---------|
-| Session sync (`ft sync`) | Chrome, Brave, Arc, Firefox | Firefox | Firefox |
+| Browser-session sync (`ft sync`) | Yes | Yes* | Yes* |
 | OAuth API sync (`ft sync --api`) | Yes | Yes | Yes |
 | Search, list, classify, viz, wiki | Yes | Yes | Yes |
 
-Session sync extracts cookies from your browser's local database. Use `ft sync --browser <name>` to pick a browser. On platforms where session sync isn't available, use `ft auth` + `ft sync --api`.
+\*Browser-session sync support varies by browser/profile setup. If session extraction fails, use `ft sync --cookies <ct0> <auth_token>` or `ft auth` + `ft sync --api`.
 
 ## Security
 

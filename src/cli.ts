@@ -627,12 +627,16 @@ export function buildCli() {
           console.log(`
   Couldn't connect to your browser session.
 
+  Detected issue:
+    ${msg.split('\n')[0]}
+
   To sync your bookmarks:
 
     1. Open your browser and log into x.com
     2. Run: ft sync
 
   Options:
+    fieldtheory sync --browser edge      Use Microsoft Edge in PowerShell
     ft sync --browser brave           Use a specific browser
     ft sync --browser firefox          Use Firefox
     ft sync --cookies <ct0> <auth>     Pass cookies directly
