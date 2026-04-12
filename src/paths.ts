@@ -128,3 +128,19 @@ export function mdEntitiesDir(): string {
 export function mdConceptsDir(): string {
   return path.join(mdDir(), 'concepts');
 }
+
+// ── Ideas markdown artifact paths ───────────────────────────────────────
+
+export function ideasMdDir(): string {
+  return path.join(dataDir(), 'automation', 'ideas');
+}
+
+export function ideasSeedsDir(date?: string): string {
+  const base = path.join(ideasMdDir(), 'seeds');
+  return date ? path.join(base, date) : base;
+}
+
+export function ideasRunsDir(date?: string): string {
+  const base = path.join(ideasMdDir(), 'runs');
+  return date ? path.join(base, date) : base;
+}

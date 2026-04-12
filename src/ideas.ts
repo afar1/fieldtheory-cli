@@ -5,6 +5,7 @@ import {
   readArtifact,
 } from './adjacent/librarian.js';
 import { readIdeasSeed, touchIdeasSeed } from './ideas-seeds.js';
+import { writeIdeasRunMd } from './ideas-files.js';
 import { DEFAULT_FRAMES, getFrame } from './adjacent/frames.js';
 import { runPipeline, renderTwoByTwo, renderDotList } from './adjacent/pipeline.js';
 import type { Consideration, Dot, Artifact } from './adjacent/types.js';
@@ -176,6 +177,8 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
   const topDots = [...result.dots]
     .sort((a, b) => (b.axisAScore + b.axisBScore) - (a.axisAScore + a.axisBScore))
     .slice(0, 3);
+
+  await writeIdeasRunMd(result.consideration);
 
   return {
     runId: result.consideration.id,

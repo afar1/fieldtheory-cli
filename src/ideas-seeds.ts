@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { dataDir } from './paths.js';
 import { readArtifact, writeArtifact } from './adjacent/librarian.js';
 import type { Artifact } from './adjacent/types.js';
+import { writeIdeasSeedMd } from './ideas-files.js';
 
 export type IdeasSeedSourceType = 'artifact' | 'text';
 
@@ -95,6 +96,7 @@ export function createIdeasSeedFromArtifacts(input: {
   const store = loadStore();
   store.seeds.unshift(seed);
   saveStore(store);
+  void writeIdeasSeedMd(seed);
   return seed;
 }
 
