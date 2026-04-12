@@ -28,7 +28,7 @@ export async function listFiles(dirPath: string): Promise<string[]> {
 
 export async function writeJson(filePath: string, value: unknown, options: WriteOptions = {}): Promise<void> {
   const tmp = filePath + '.tmp';
-  await writeFile(tmp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: options.mode });
+  await writeFile(tmp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: options.mode ?? 0o600 });
   await rename(tmp, filePath);
 }
 
@@ -40,7 +40,7 @@ export async function readJson<T>(filePath: string): Promise<T> {
 export async function writeJsonLines(filePath: string, rows: unknown[], options: WriteOptions = {}): Promise<void> {
   const tmp = filePath + '.tmp';
   const content = rows.map((row) => JSON.stringify(row)).join('\n') + (rows.length ? '\n' : '');
-  await writeFile(tmp, content, { encoding: 'utf8', mode: options.mode });
+  await writeFile(tmp, content, { encoding: 'utf8', mode: options.mode ?? 0o600 });
   await rename(tmp, filePath);
 }
 

@@ -5,7 +5,9 @@ import { extractChromeXCookies } from './chrome-cookies.js';
 import { extractFirefoxXCookies } from './firefox-cookies.js';
 import { parseTimestampMs } from './date-utils.js';
 import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkRecord, QuotedTweetSnapshot } from './types.js';
-import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText } from './bookmarks-db.js';
+import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText, updateArticleContent } from './bookmarks-db.js';
+import type { ArticleUpdate } from './bookmarks-db.js';
+import { fetchArticle, resolveTcoLink } from './bookmark-enrich.js';
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
 
@@ -775,6 +777,7 @@ export interface GapFillProgress {
   total: number;
   quotedFetched: number;
   textExpanded: number;
+  articlesEnriched: number;
   failed: number;
 }
 
@@ -787,6 +790,7 @@ export interface GapFillFailure {
 export interface GapFillResult {
   quotedTweetsFilled: number;
   textExpanded: number;
+  articlesEnriched: number;
   bookmarkedAtRepaired: number;
   bookmarkedAtMissing: number;
   failed: number;
@@ -892,6 +896,7 @@ export async function syncGaps(options?: {
       total,
       quotedFetched,
       textExpanded,
+      articlesEnriched: 0,
       failed,
     });
 
@@ -908,18 +913,88 @@ export async function syncGaps(options?: {
   // Find bookmarks missing bookmarkedAt (filled on next sync, not via syndication)
   const bookmarkedAtMissing = records.filter((r) => !r.bookmarkedAt).length;
 
-  // Final persist
+  // Final persist (gaps 1+2)
   await writeJsonLines(cachePath, records);
   if (dbQuotedUpdates.length > 0) await updateQuotedTweets(dbQuotedUpdates);
   if (dbTextUpdates.length > 0) await updateBookmarkText(dbTextUpdates);
 
+  // ── Gap 3: Article enrichment for link-only bookmarks ───────────────────
+  // Bookmarks with < 80 chars of text after stripping URLs are "link-only"
+  // and invisible to search. Fetch the linked article to make them searchable.
+  // Article content goes directly to SQLite (not JSONL) to avoid memory bloat.
+
+  const LINK_ONLY_THRESHOLD = 80;
+  const articleDbUpdates: ArticleUpdate[] = [];
+  let articlesEnriched = 0;
+
+  // Read enriched_at from DB to skip already-enriched bookmarks
+  const enrichedIds = new Set<string>();
+  try {
+    const { openDb } = await import('./db.js');
+    const { twitterBookmarksIndexPath } = await import('./paths.js');
+    const db = await openDb(twitterBookmarksIndexPath());
+    try {
+      const rows = db.exec('SELECT id FROM bookmarks WHERE enriched_at IS NOT NULL');
+      for (const row of rows[0]?.values ?? []) enrichedIds.add(row[0] as string);
+    } finally { db.close(); }
+  } catch { /* DB may not exist yet */ }
+
+  // Filter to link-only bookmarks not yet enriched
+  const textWithoutUrls = (text: string) => text.replace(/https?:\/\/\S+/g, '').trim();
+  const needsEnrichment = records.filter((r) => {
+    if (enrichedIds.has(r.id)) return false;
+    if (!r.links?.length) return false;
+    return textWithoutUrls(r.text ?? '').length < LINK_ONLY_THRESHOLD;
+  });
+
+  const articleTotal = Math.min(needsEnrichment.length, 50); // cap per run
+  for (let i = 0; i < articleTotal; i++) {
+    const record = needsEnrichment[i];
+    // Find the first non-twitter link
+    let targetUrl: string | null = null;
+    for (const link of record.links ?? []) {
+      const resolved = link.includes('t.co/') ? await resolveTcoLink(link) : link;
+      if (resolved) { targetUrl = resolved; break; }
+    }
+
+    if (targetUrl) {
+      const article = await fetchArticle(targetUrl);
+      if (article && article.text.length >= 50) {
+        articleDbUpdates.push({
+          id: record.id,
+          articleTitle: article.title,
+          articleText: article.text,
+          articleSite: article.siteName,
+        });
+        articlesEnriched++;
+      }
+    }
+
+    options?.onProgress?.({
+      done: allFetchIds.length + i + 1,
+      total: allFetchIds.length + articleTotal,
+      quotedFetched,
+      textExpanded,
+      articlesEnriched,
+      failed,
+    });
+
+    // Rate limit: 500ms between fetches
+    if (i < articleTotal - 1) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+
+  if (articleDbUpdates.length > 0) await updateArticleContent(articleDbUpdates);
+
   return {
     quotedTweetsFilled: quotedFetched,
     textExpanded,
+    articlesEnriched,
     bookmarkedAtRepaired: loaded.repaired,
     bookmarkedAtMissing,
     failed,
     failures,
-    total,
+    total: allFetchIds.length + articleTotal,
   };
 }

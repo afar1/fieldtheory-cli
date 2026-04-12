@@ -7,7 +7,7 @@ import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 export interface SearchResult {
   id: string;
@@ -221,7 +221,11 @@ function initSchema(db: Database): void {
     github_urls TEXT,
     domains TEXT,
     primary_domain TEXT,
-    quoted_tweet_json TEXT
+    quoted_tweet_json TEXT,
+    article_title TEXT,
+    article_text TEXT,
+    article_site TEXT,
+    enriched_at TEXT
   )`);
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_author ON bookmarks(author_handle)`);
@@ -234,12 +238,13 @@ function initSchema(db: Database): void {
     text,
     author_handle,
     author_name,
+    article_text,
     content=bookmarks,
     content_rowid=rowid,
     tokenize='porter unicode61'
   )`);
 
-  db.run(`REPLACE INTO meta VALUES ('schema_version', '${SCHEMA_VERSION}')`);
+  db.run("REPLACE INTO meta VALUES ('schema_version', ?)", [String(SCHEMA_VERSION)]);
 }
 
 function ensureMigrations(db: Database): void {
@@ -262,8 +267,25 @@ function ensureMigrations(db: Database): void {
       try { db.run('ALTER TABLE bookmarks ADD COLUMN quoted_tweet_json TEXT'); } catch { /* already exists */ }
     }
   }
+  if (version < 5) {
+    const tableExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'");
+    if (tableExists.length && tableExists[0].values.length > 0) {
+      try { db.run('ALTER TABLE bookmarks ADD COLUMN article_title TEXT'); } catch { /* already exists */ }
+      try { db.run('ALTER TABLE bookmarks ADD COLUMN article_text TEXT'); } catch { /* already exists */ }
+      try { db.run('ALTER TABLE bookmarks ADD COLUMN article_site TEXT'); } catch { /* already exists */ }
+      try { db.run('ALTER TABLE bookmarks ADD COLUMN enriched_at TEXT'); } catch { /* already exists */ }
+      // Rebuild FTS to include article_text column
+      db.run('DROP TABLE IF EXISTS bookmarks_fts');
+      db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
+        text, author_handle, author_name, article_text,
+        content=bookmarks, content_rowid=rowid,
+        tokenize='porter unicode61'
+      )`);
+      db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
+    }
+  }
   if (version < SCHEMA_VERSION) {
-    db.run(`REPLACE INTO meta VALUES ('schema_version', '${SCHEMA_VERSION}')`);
+    db.run("REPLACE INTO meta VALUES ('schema_version', ?)", [String(SCHEMA_VERSION)]);
   }
 }
 
@@ -274,6 +296,10 @@ interface PreservedBookmarkFields {
   domains: string | null;
   primaryDomain: string | null;
   quotedTweetJson: string | null;
+  articleTitle: string | null;
+  articleText: string | null;
+  articleSite: string | null;
+  enrichedAt: string | null;
 }
 
 function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBookmarkFields): void {
@@ -284,7 +310,7 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
   const githubUrls = [...new Set([...githubMatches.map((m) => `https://${m}`), ...githubFromLinks])];
 
   db.run(
-    `INSERT OR REPLACE INTO bookmarks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT OR REPLACE INTO bookmarks VALUES (${Array(35).fill('?').join(',')})`,
     [
       r.id,
       r.tweetId,
@@ -317,6 +343,10 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
       preserved?.domains ?? null,
       preserved?.primaryDomain ?? null,
       r.quotedTweet ? JSON.stringify(r.quotedTweet) : (preserved?.quotedTweetJson ?? null),
+      preserved?.articleTitle ?? null,
+      preserved?.articleText ?? null,
+      preserved?.articleSite ?? null,
+      preserved?.enrichedAt ?? null,
     ]
   );
 }
@@ -341,7 +371,8 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
     const existingRows = new Map<string, PreservedBookmarkFields>();
     try {
       const rows = db.exec(
-        `SELECT id, categories, primary_category, github_urls, domains, primary_domain, quoted_tweet_json
+        `SELECT id, categories, primary_category, github_urls, domains, primary_domain,
+                quoted_tweet_json, article_title, article_text, article_site, enriched_at
          FROM bookmarks`
       );
       for (const r of (rows[0]?.values ?? [])) {
@@ -352,6 +383,10 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
           domains: (r[4] as string) ?? null,
           primaryDomain: (r[5] as string) ?? null,
           quotedTweetJson: (r[6] as string) ?? null,
+          articleTitle: (r[7] as string) ?? null,
+          articleText: (r[8] as string) ?? null,
+          articleSite: (r[9] as string) ?? null,
+          enrichedAt: (r[10] as string) ?? null,
         });
       }
     } catch { /* table may be empty */ }
@@ -382,6 +417,19 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
   }
 }
 
+/** Escape FTS5 special syntax so user queries are treated as literal terms. */
+function sanitizeFtsQuery(query: string): string {
+  // If the query contains FTS5 operators, wrap each word in double quotes for literal matching
+  if (/[*{}:^"]|^(AND|OR|NOT|NEAR)\b/i.test(query)) {
+    return query
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((term) => `"${term.replace(/"/g, '')}"`)
+      .join(' ');
+  }
+  return query;
+}
+
 export async function searchBookmarks(options: SearchOptions): Promise<SearchResult[]> {
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
@@ -394,7 +442,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
 
     if (options.query) {
       conditions.push(`b.rowid IN (SELECT rowid FROM bookmarks_fts WHERE bookmarks_fts MATCH ?)`);
-      params.push(options.query);
+      params.push(sanitizeFtsQuery(options.query));
     }
     if (options.author) {
       conditions.push(`b.author_handle = ? COLLATE NOCASE`);
@@ -413,7 +461,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
 
     // If we have an FTS query, use bm25 for ranking; otherwise sort by posted_at
     const orderBy = options.query
-      ? `ORDER BY bm25(bookmarks_fts, 5.0, 1.0, 1.0) ASC`
+      ? `ORDER BY bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0) ASC`
       : `ORDER BY b.posted_at DESC`;
 
     // For FTS ranking we need to join with the FTS table for bm25
@@ -421,7 +469,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
     if (options.query) {
       sql = `
         SELECT b.id, b.url, b.text, b.author_handle, b.author_name, b.posted_at,
-               bm25(bookmarks_fts, 5.0, 1.0, 1.0) as score
+               bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0) as score
         FROM bookmarks b
         JOIN bookmarks_fts ON bookmarks_fts.rowid = b.rowid
         ${where}
@@ -942,6 +990,37 @@ export async function updateBookmarkText(
     }
     stmt.free();
     // Rebuild FTS to reflect updated text
+    db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
+    saveDb(db, dbPath);
+  } finally {
+    db.close();
+  }
+}
+
+export interface ArticleUpdate {
+  id: string;
+  articleTitle: string;
+  articleText: string;
+  articleSite?: string;
+}
+
+export async function updateArticleContent(
+  records: ArticleUpdate[],
+): Promise<void> {
+  if (!records.length) return;
+  const dbPath = twitterBookmarksIndexPath();
+  const db = await openDb(dbPath);
+  ensureMigrations(db);
+
+  try {
+    const stmt = db.prepare(
+      'UPDATE bookmarks SET article_title = ?, article_text = ?, article_site = ?, enriched_at = ? WHERE id = ?'
+    );
+    const now = new Date().toISOString();
+    for (const record of records) {
+      stmt.run([record.articleTitle, record.articleText, record.articleSite ?? null, now, record.id]);
+    }
+    stmt.free();
     db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
     saveDb(db, dbPath);
   } finally {

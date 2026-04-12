@@ -416,7 +416,7 @@ export function buildCli() {
     .option('--api', 'Use OAuth v2 API instead of Chrome session', false)
     .option('--rebuild', 'Full re-crawl of all bookmarks', false)
     .option('--continue', 'Resume a previous sync that was interrupted or hit the page limit', false)
-    .option('--gaps', 'Backfill missing data (quoted tweets, truncated articles)', false)
+    .option('--gaps', 'Backfill missing data (quoted tweets, truncated articles, linked article content)', false)
     .option('--yes', 'Skip confirmation prompts', false)
     .option('--classify', 'Classify new bookmarks with LLM after syncing', false)
     .option('--max-pages <n>', 'Max pages to fetch (default: unlimited)', (v: string) => Number(v))
@@ -444,13 +444,19 @@ export function buildCli() {
         // ── gaps mode: backfill missing data for existing bookmarks ──
         if (options.gaps) {
           const startTime = Date.now();
-          process.stderr.write('  Filling gaps (quoted tweets, truncated text)...\n');
-          let lastProgress: GapFillProgress = { done: 0, total: 0, quotedFetched: 0, textExpanded: 0, failed: 0 };
+          process.stderr.write('  Filling gaps (quoted tweets, truncated text, articles)...\n');
+          let lastProgress: GapFillProgress = { done: 0, total: 0, quotedFetched: 0, textExpanded: 0, articlesEnriched: 0, failed: 0 };
           const spinner = createSpinner(() => {
             const p = lastProgress;
             const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : 0;
             const elapsed = Math.round((Date.now() - startTime) / 1000);
-            return `${p.done}/${p.total} (${pct}%) \u2502 ${p.quotedFetched} quoted \u2502 ${p.textExpanded} expanded \u2502 ${p.failed} failed \u2502 ${elapsed}s`;
+            const parts = [`${p.done}/${p.total} (${pct}%)`];
+            if (p.quotedFetched) parts.push(`${p.quotedFetched} quoted`);
+            if (p.textExpanded) parts.push(`${p.textExpanded} expanded`);
+            if (p.articlesEnriched) parts.push(`${p.articlesEnriched} articles`);
+            if (p.failed) parts.push(`${p.failed} failed`);
+            parts.push(`${elapsed}s`);
+            return parts.join(' \u2502 ');
           });
           const result = await runWithSpinner(spinner, () => syncGaps({
             delayMs: Number(options.delayMs) || 300,
@@ -464,6 +470,7 @@ export function buildCli() {
           } else {
             if (result.quotedTweetsFilled > 0) console.log(`  \u2713 ${result.quotedTweetsFilled} quoted tweets filled`);
             if (result.textExpanded > 0) console.log(`  \u2713 ${result.textExpanded} truncated texts expanded`);
+            if (result.articlesEnriched > 0) console.log(`  \u2713 ${result.articlesEnriched} linked articles enriched`);
             if (result.bookmarkedAtRepaired > 0) {
               console.log(`  \u2713 ${result.bookmarkedAtRepaired} invalid bookmark dates cleared`);
               await rebuildIndex();
