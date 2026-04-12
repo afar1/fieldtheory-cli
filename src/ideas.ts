@@ -4,7 +4,7 @@ import {
   readConsideration,
   readArtifact,
 } from './adjacent/librarian.js';
-import { readIdeasSeed, touchIdeasSeed } from './ideas-seeds.js';
+import { linkIdeasSeedToRun, readIdeasSeed, touchIdeasSeed } from './ideas-seeds.js';
 import { writeIdeasRunMd } from './ideas-files.js';
 import { DEFAULT_FRAMES, getFrame } from './adjacent/frames.js';
 import { runPipeline, renderTwoByTwo, renderDotList } from './adjacent/pipeline.js';
@@ -179,6 +179,20 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
     .slice(0, 3);
 
   await writeIdeasRunMd(result.consideration);
+
+  if (options.seedId) {
+    linkIdeasSeedToRun({
+      seedId: options.seedId,
+      runId: result.consideration.id,
+      nodeIds: result.dotArtifacts.map((artifact) => artifact.id),
+    });
+    const refreshedSeed = readIdeasSeed(options.seedId);
+    if (refreshedSeed) {
+      // Keep the markdown seed file in sync with the graph links.
+      const { writeIdeasSeedMd } = await import('./ideas-files.js');
+      await writeIdeasSeedMd(refreshedSeed);
+    }
+  }
 
   return {
     runId: result.consideration.id,

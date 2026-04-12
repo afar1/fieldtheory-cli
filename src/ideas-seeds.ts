@@ -17,6 +17,9 @@ export interface IdeasSeed {
   createdBy: 'user' | 'model' | 'system';
   notes?: string;
   lastUsedAt?: string;
+  relatedRunIds?: string[];
+  relatedNodeIds?: string[];
+  relatedSeedIds?: string[];
 }
 
 interface SeedStore {
@@ -114,7 +117,7 @@ export function createIdeasSeedFromText(input: {
     source: 'field_theory',
     provenance: {
       createdAt: new Date().toISOString(),
-      producer: input.createdBy ?? 'user',
+      producer: (input.createdBy === 'model' ? 'llm' : (input.createdBy ?? 'user')),
       inputIds: [],
       promptVersion: 'ideas-seed-from-text-v1',
     },
@@ -141,6 +144,19 @@ export function touchIdeasSeed(id: string): void {
   saveStore(store);
 }
 
+export function linkIdeasSeedToRun(input: { seedId: string; runId: string; nodeIds?: string[] }): void {
+  const store = loadStore();
+  const seed = store.seeds.find((item) => item.id === input.seedId);
+  if (!seed) return;
+
+  seed.lastUsedAt = new Date().toISOString();
+  seed.relatedRunIds = [...new Set([...(seed.relatedRunIds ?? []), input.runId])];
+  if (input.nodeIds && input.nodeIds.length > 0) {
+    seed.relatedNodeIds = [...new Set([...(seed.relatedNodeIds ?? []), ...input.nodeIds])];
+  }
+  saveStore(store);
+}
+
 export function getSeedArtifacts(seed: IdeasSeed): Artifact[] {
   return seed.artifactIds
     .map((id) => readArtifact(id))
@@ -158,6 +174,9 @@ export function formatIdeasSeed(seed: IdeasSeed): string {
   ];
   if (seed.lastUsedAt) lines.push(`  last used: ${seed.lastUsedAt}`);
   if (seed.notes) lines.push(`  notes: ${seed.notes}`);
+  if (seed.relatedRunIds && seed.relatedRunIds.length > 0) lines.push(`  related runs: ${seed.relatedRunIds.join(', ')}`);
+  if (seed.relatedNodeIds && seed.relatedNodeIds.length > 0) lines.push(`  related nodes: ${seed.relatedNodeIds.join(', ')}`);
+  if (seed.relatedSeedIds && seed.relatedSeedIds.length > 0) lines.push(`  related seeds: ${seed.relatedSeedIds.join(', ')}`);
   return lines.join('\n');
 }
 
