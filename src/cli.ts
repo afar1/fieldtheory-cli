@@ -33,6 +33,17 @@ import { listBrowserIds } from './browsers.js';
 import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir } from './paths.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
+import {
+  formatIdeasIntro,
+  formatRunList,
+  formatRunSummary,
+  getIdeaPrompt,
+  listIdeaRuns,
+  renderRunDots,
+  renderRunGrid,
+  runIdeas,
+  resolveIdeaRun,
+} from './ideas.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -1308,6 +1319,104 @@ export function buildCli() {
           console.log(`  [${issue.type}]${page}: ${issue.detail}${fix}`);
         }
       }
+    }));
+
+  // ── ideas ──────────────────────────────────────────────────────────────
+
+  const ideas = program
+    .command('ideas')
+    .description('Turn seeds into structured repo-aware idea explorations');
+
+  ideas
+    .action(() => {
+      console.log(formatIdeasIntro());
+    });
+
+  ideas
+    .command('explain')
+    .description('Explain what Ideas does and what to expect during a run')
+    .action(() => {
+      console.log(formatIdeasIntro());
+    });
+
+  ideas
+    .command('run')
+    .description('Run an ideas exploration from an existing seed artifact')
+    .requiredOption('--seed-artifact <id>', 'Seed artifact id to start from')
+    .requiredOption('--repo <path>', 'Repo path to explore against')
+    .option('--frame <id>', 'Frame id', 'leverage-specificity')
+    .option('--depth <depth>', 'Depth: quick | standard | deep', 'standard')
+    .option('--steering <text>', 'Optional steering nudge')
+    .action(safe(async (options) => {
+      console.log('  Ideas runs on your local machine. Keep your laptop awake for longer debates.');
+      const summary = await runIdeas({
+        seedArtifactId: String(options.seedArtifact),
+        repo: String(options.repo),
+        frameId: String(options.frame),
+        depth: options.depth,
+        steering: options.steering ? String(options.steering) : undefined,
+        onProgress: (message) => {
+          process.stderr.write(`  ${message}\n`);
+        },
+      });
+
+      console.log(`\n  ✓ Ideas run complete: ${summary.runId}`);
+      console.log(`  Frame: ${summary.frameName}`);
+      console.log(`  Ideas generated: ${summary.dotCount}`);
+      if (summary.topDots.length > 0) {
+        console.log('\n  Top ideas:');
+        for (const dot of summary.topDots) {
+          console.log(`    - ${dot.title}  [A:${dot.axisAScore} B:${dot.axisBScore}]`);
+        }
+      }
+      console.log(`\n  Next:`);
+      console.log(`    ft ideas grid ${summary.runId}`);
+      console.log(`    ft ideas dots ${summary.runId}`);
+    }));
+
+  ideas
+    .command('list')
+    .description('List recent ideas runs')
+    .action(safe(async () => {
+      console.log(formatRunList(listIdeaRuns()));
+    }));
+
+  ideas
+    .command('show')
+    .description('Show one ideas run in detail')
+    .argument('[runId]', 'Run id, or omit for latest', 'latest')
+    .action(safe(async (runId?: string) => {
+      const run = resolveIdeaRun(runId);
+      if (!run) {
+        console.log('  No ideas run found.');
+        process.exitCode = 1;
+        return;
+      }
+      console.log(formatRunSummary(run));
+    }));
+
+  ideas
+    .command('grid')
+    .description('Render the 2x2 grid for an ideas run')
+    .argument('[runId]', 'Run id, or omit for latest', 'latest')
+    .action(safe(async (runId?: string) => {
+      console.log(renderRunGrid(runId));
+    }));
+
+  ideas
+    .command('dots')
+    .description('Render all scored ideas for a run')
+    .argument('[runId]', 'Run id, or omit for latest', 'latest')
+    .action(safe(async (runId?: string) => {
+      console.log(renderRunDots(runId));
+    }));
+
+  ideas
+    .command('prompt')
+    .description('Print the exportable prompt for a scored idea')
+    .argument('<dotId>', 'Dot artifact id')
+    .action(safe(async (dotId: string) => {
+      console.log(getIdeaPrompt(String(dotId)));
     }));
 
   // ── skill ──────────────────────────────────────────────────────────────
