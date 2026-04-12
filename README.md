@@ -7,7 +7,14 @@ Free and open source. Designed for Mac.
 ## Install
 
 ```bash
-npm install -g fieldtheory
+# Install this fork directly from GitHub
+npm install -g github:Decolo/fieldtheory-cli
+```
+
+If you later publish this fork to npm, use:
+
+```bash
+npm install -g fieldtheory-cli
 ```
 
 Requires Node.js 20+. Chrome recommended for session sync; OAuth available for bookmark sync on all platforms.

@@ -142,6 +142,16 @@ function getLocalVersion(): string {
   }
 }
 
+function getPackageName(): string {
+  try {
+    const require = createRequire(import.meta.url);
+    const pkg = require('../package.json');
+    return String(pkg.name ?? 'fieldtheory-cli');
+  } catch {
+    return 'fieldtheory-cli';
+  }
+}
+
 export function compareVersions(a: string, b: string): number {
   const pa = a.split('.').map(Number);
   const pb = b.split('.').map(Number);
@@ -153,6 +163,7 @@ export function compareVersions(a: string, b: string): number {
 
 async function checkForUpdate(): Promise<void> {
   try {
+    const packageName = getPackageName();
     const cacheFile = path.join(dataDir(), '.update-check');
     // Re-fetch from npm if cache is stale (>24hr)
     let needsFetch = true;
@@ -164,7 +175,7 @@ async function checkForUpdate(): Promise<void> {
     if (needsFetch) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch('https://registry.npmjs.org/fieldtheory/latest', {
+      const res = await fetch(`https://registry.npmjs.org/${packageName}/latest`, {
         signal: controller.signal,
         headers: { accept: 'application/json' },
       });
@@ -187,8 +198,9 @@ function showCachedUpdateNotice(): void {
     const cacheFile = path.join(dataDir(), '.update-check');
     const latest = fs.readFileSync(cacheFile, 'utf-8').trim();
     const local = getLocalVersion();
+    const packageName = getPackageName();
     if (latest && compareVersions(latest, local) > 0) {
-      console.log(`\n  \u2728 Update available: ${local} \u2192 ${latest}  \u2014  npm update -g fieldtheory`);
+      console.log(`\n  \u2728 Update available: ${local} \u2192 ${latest}  \u2014  npm update -g ${packageName}`);
     }
   } catch { /* no cache yet, skip */ }
 }
