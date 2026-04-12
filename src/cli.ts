@@ -53,6 +53,14 @@ import {
   listIdeasSeeds,
   readIdeasSeed,
 } from './ideas-seeds.js';
+import {
+  SEED_STRATEGIES,
+  buildSeedStrategySpec,
+  generateRandomSeedPrompts,
+  getSeedStrategy,
+  summarizeSeedIntent,
+} from './seeds-strategies.js';
+import { formatSeedCandidates, queryRandomSeedCandidates, querySeedCandidates } from './seeds-query.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -1520,6 +1528,188 @@ export function buildCli() {
         return;
       }
       console.log(`  Deleted seed: ${String(seedId)}`);
+    }));
+
+  seeds
+    .command('strategies')
+    .description('List available seed strategies')
+    .action(() => {
+      for (const strategy of SEED_STRATEGIES) {
+        const flair = strategy.playful ? ' playful' : ' standard';
+        console.log(`${strategy.id.padEnd(14)} ${flair}  ${strategy.summary}`);
+      }
+    });
+
+  seeds
+    .command('strategy')
+    .description('Inspect one seed strategy')
+    .argument('<name>', 'Strategy id')
+    .action((name: string) => {
+      const strategy = getSeedStrategy(String(name));
+      if (!strategy) {
+        console.log(`  Unknown strategy: ${String(name)}`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`${strategy.label} (${strategy.id})`);
+      console.log(`${strategy.summary}`);
+      console.log(`Playful: ${strategy.playful ? 'yes' : 'no'}`);
+      console.log('');
+      console.log(`Example title:`);
+      console.log(`  ${strategy.buildTitle({ category: 'tool', days: 30 })}`);
+    });
+
+  seeds
+    .command('search')
+    .description('Preview or save a search-shaped seed from bookmarks')
+    .argument('<query>', 'Search query')
+    .option('--category <name>', 'Filter by category')
+    .option('--domain <name>', 'Filter by domain')
+    .option('--folder <name>', 'Filter by folder')
+    .option('--author <handle>', 'Filter by author handle')
+    .option('--days <n>', 'Limit to the last N days', (v: string) => Number(v))
+    .option('--limit <n>', 'Max bookmarks to use', (v: string) => Number(v), 8)
+    .option('--create', 'Save the result as a seed', false)
+    .option('--title <text>', 'Seed title override')
+    .action(safe(async (query: string, options) => {
+      const spec = buildSeedStrategySpec({
+        strategy: 'search',
+        filters: {
+          query: String(query),
+          category: options.category ? String(options.category) : undefined,
+          domain: options.domain ? String(options.domain) : undefined,
+          folder: options.folder ? String(options.folder) : undefined,
+          author: options.author ? String(options.author) : undefined,
+          days: typeof options.days === 'number' ? options.days : undefined,
+          limit: Number(options.limit) || 8,
+        },
+      });
+      const candidates = await querySeedCandidates(spec.filters);
+      console.log(formatSeedCandidates(candidates));
+      if (options.create && candidates.length > 0) {
+        const seed = createIdeasSeedFromArtifacts({
+          artifactIds: candidates.map((item) => item.id),
+          title: options.title ? String(options.title) : summarizeSeedIntent('Search seed', spec.filters),
+          notes: `strategy=${spec.strategy}`,
+        });
+        console.log(`\n  ✓ Created seed: ${seed.id}`);
+      }
+    }));
+
+  seeds
+    .command('recent')
+    .description('Preview or save a recent seed from bookmarks')
+    .option('--category <name>', 'Filter by category')
+    .option('--domain <name>', 'Filter by domain')
+    .option('--folder <name>', 'Filter by folder')
+    .option('--author <handle>', 'Filter by author handle')
+    .option('--days <n>', 'Limit to the last N days', (v: string) => Number(v), 30)
+    .option('--limit <n>', 'Max bookmarks to use', (v: string) => Number(v), 8)
+    .option('--create', 'Save the result as a seed', false)
+    .option('--title <text>', 'Seed title override')
+    .action(safe(async (options) => {
+      const spec = buildSeedStrategySpec({
+        strategy: 'recent',
+        filters: {
+          category: options.category ? String(options.category) : undefined,
+          domain: options.domain ? String(options.domain) : undefined,
+          folder: options.folder ? String(options.folder) : undefined,
+          author: options.author ? String(options.author) : undefined,
+          days: typeof options.days === 'number' ? options.days : 30,
+          limit: Number(options.limit) || 8,
+        },
+      });
+      const candidates = await querySeedCandidates(spec.filters);
+      console.log(formatSeedCandidates(candidates));
+      if (options.create && candidates.length > 0) {
+        const seed = createIdeasSeedFromArtifacts({
+          artifactIds: candidates.map((item) => item.id),
+          title: options.title ? String(options.title) : summarizeSeedIntent('Recent seed', spec.filters),
+          notes: `strategy=${spec.strategy}`,
+        });
+        console.log(`\n  ✓ Created seed: ${seed.id}`);
+      }
+    }));
+
+  seeds
+    .command('random')
+    .description('Generate random prompts or preview a random seed candidate set')
+    .option('--category <name>', 'Filter by category')
+    .option('--domain <name>', 'Filter by domain')
+    .option('--folder <name>', 'Filter by folder')
+    .option('--author <handle>', 'Filter by author handle')
+    .option('--days <n>', 'Limit to the last N days', (v: string) => Number(v))
+    .option('--limit <n>', 'Max bookmarks to use', (v: string) => Number(v), 5)
+    .option('--prompts <n>', 'Show N random word-pair prompts', (v: string) => Number(v), 6)
+    .option('--pick <text>', 'Chosen random prompt phrase')
+    .option('--create', 'Save the result as a seed', false)
+    .option('--title <text>', 'Seed title override')
+    .action(safe(async (options) => {
+      const prompts = generateRandomSeedPrompts(Number(options.prompts) || 6);
+      console.log('Random prompts:');
+      for (const prompt of prompts) console.log(`  - ${prompt}`);
+      console.log('');
+
+      const spec = buildSeedStrategySpec({
+        strategy: 'random',
+        filters: {
+          category: options.category ? String(options.category) : undefined,
+          domain: options.domain ? String(options.domain) : undefined,
+          folder: options.folder ? String(options.folder) : undefined,
+          author: options.author ? String(options.author) : undefined,
+          days: typeof options.days === 'number' ? options.days : undefined,
+          limit: Number(options.limit) || 5,
+        },
+        strategyParams: options.pick ? { pick: String(options.pick) } : undefined,
+      });
+      const candidates = await queryRandomSeedCandidates(spec.filters);
+      console.log(formatSeedCandidates(candidates));
+      if (options.create && candidates.length > 0) {
+        const seed = createIdeasSeedFromArtifacts({
+          artifactIds: candidates.map((item) => item.id),
+          title: options.title ? String(options.title) : (options.pick ? `Random seed — ${String(options.pick)}` : summarizeSeedIntent('Random seed', spec.filters)),
+          notes: `strategy=${spec.strategy}${options.pick ? ` pick=${String(options.pick)}` : ''}`,
+        });
+        console.log(`\n  ✓ Created seed: ${seed.id}`);
+      }
+    }));
+
+  seeds
+    .command('lucky')
+    .description('Preview or save a likely-interesting seed from a filtered pool')
+    .option('--query <text>', 'Optional query filter')
+    .option('--category <name>', 'Filter by category')
+    .option('--domain <name>', 'Filter by domain')
+    .option('--folder <name>', 'Filter by folder')
+    .option('--author <handle>', 'Filter by author handle')
+    .option('--days <n>', 'Limit to the last N days', (v: string) => Number(v), 30)
+    .option('--limit <n>', 'Max bookmarks to use', (v: string) => Number(v), 5)
+    .option('--create', 'Save the result as a seed', false)
+    .option('--title <text>', 'Seed title override')
+    .action(safe(async (options) => {
+      const spec = buildSeedStrategySpec({
+        strategy: 'lucky',
+        filters: {
+          query: options.query ? String(options.query) : undefined,
+          category: options.category ? String(options.category) : undefined,
+          domain: options.domain ? String(options.domain) : undefined,
+          folder: options.folder ? String(options.folder) : undefined,
+          author: options.author ? String(options.author) : undefined,
+          days: typeof options.days === 'number' ? options.days : 30,
+          limit: Number(options.limit) || 5,
+        },
+      });
+      const candidates = await querySeedCandidates({ ...spec.filters, limit: Math.max((spec.filters.limit ?? 5) * 2, 8) });
+      const picked = candidates.slice(0, spec.filters.limit ?? 5);
+      console.log(formatSeedCandidates(picked));
+      if (options.create && picked.length > 0) {
+        const seed = createIdeasSeedFromArtifacts({
+          artifactIds: picked.map((item) => item.id),
+          title: options.title ? String(options.title) : summarizeSeedIntent('Lucky seed', spec.filters),
+          notes: `strategy=${spec.strategy}`,
+        });
+        console.log(`\n  ✓ Created seed: ${seed.id}`);
+      }
     }));
 
   const ideasSeed = ideas
