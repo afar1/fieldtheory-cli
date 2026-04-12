@@ -5,12 +5,16 @@ export interface BookmarkMediaVariant {
 }
 
 export interface BookmarkMediaObject {
+  url?: string;
   mediaUrl?: string;
+  expandedUrl?: string;
   previewUrl?: string;
   type?: string;
+  altText?: string;
   extAltText?: string;
   width?: number;
   height?: number;
+  videoVariants?: BookmarkMediaVariant[];
   variants?: BookmarkMediaVariant[];
 }
 
@@ -59,6 +63,8 @@ export interface BookmarkRecord {
   text: string;
   postedAt?: string | null;
   bookmarkedAt?: string | null;
+  /** X's opaque bookmark ordering key. Useful for chronology, not timestamps. */
+  sortIndex?: string | null;
   syncedAt: string;
   conversationId?: string;
   inReplyToStatusId?: string;
@@ -137,6 +143,8 @@ export interface BookmarkBackfillState {
   lastAdded: number;
   lastSeenIds: string[];
   stopReason?: string;
+  /** Saved pagination cursor for resuming an interrupted sync. */
+  lastCursor?: string;
 }
 
 export interface LikesBackfillState {

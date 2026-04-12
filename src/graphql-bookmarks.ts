@@ -3,6 +3,7 @@ import { ensureDataDir, twitterBookmarksCachePath, twitterBookmarksMetaPath, twi
 import { loadChromeSessionConfig } from './config.js';
 import { extractChromeXCookies } from './chrome-cookies.js';
 import { extractFirefoxXCookies } from './firefox-cookies.js';
+import { parseTimestampMs } from './date-utils.js';
 import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText } from './bookmarks-db.js';
 
@@ -41,7 +42,7 @@ const GRAPHQL_FEATURES = {
 export interface SyncOptions {
   /** Default true. Stop once we reach the newest already-stored bookmark. */
   incremental?: boolean;
-  /** Max pages to fetch (20 bookmarks per page). Default: 500 */
+  /** Max pages to fetch (20 bookmarks per page). Default: unlimited */
   maxPages?: number;
   /** Stop once this many *new* bookmarks have been added. Default: unlimited */
   targetAdds?: number;
@@ -51,6 +52,8 @@ export interface SyncOptions {
   maxMinutes?: number;
   /** Consecutive pages with 0 new bookmarks before stopping. Default: 3 */
   stalePageLimit?: number;
+  /** Bookmarks per page (1–100). Default: 20 */
+  pageSize?: number;
   /** Browser id (e.g. 'chrome', 'firefox', 'brave'). */
   browser?: string;
   /** Chrome-family user-data-dir override. */
@@ -65,6 +68,8 @@ export interface SyncOptions {
   cookieHeader?: string;
   /** Progress callback. */
   onProgress?: (status: SyncProgress) => void;
+  /** Resume from a saved cursor instead of starting from the newest bookmark. */
+  resumeCursor?: string;
   /** Flush to disk every N pages. Default: 25 */
   checkpointEvery?: number;
 }
@@ -80,7 +85,9 @@ export interface SyncProgress {
 
 export interface SyncResult {
   added: number;
+  bookmarkedAtRepaired: number;
   totalBookmarks: number;
+  bookmarkedAtMissing: number;
   pages: number;
   stopReason: string;
   cachePath: string;
@@ -96,17 +103,57 @@ function parseSnowflake(value?: string | null): bigint | null {
   }
 }
 
+const MAX_FUTURE_BOOKMARK_SKEW_MS = 5 * 60_000;
+
+export function sanitizeBookmarkedAt(record: BookmarkRecord): BookmarkRecord {
+  if (record.ingestedVia === 'graphql') {
+    return record.bookmarkedAt == null ? record : { ...record, bookmarkedAt: null };
+  }
+
+  const bookmarkedAtMs = parseTimestampMs(record.bookmarkedAt);
+  if (bookmarkedAtMs == null) {
+    return record.bookmarkedAt == null ? record : { ...record, bookmarkedAt: null };
+  }
+
+  const postedAtMs = parseTimestampMs(record.postedAt);
+  if (postedAtMs != null && bookmarkedAtMs < postedAtMs) {
+    return { ...record, bookmarkedAt: null };
+  }
+
+  const syncedAtMs = parseTimestampMs(record.syncedAt);
+  if (syncedAtMs != null && bookmarkedAtMs > syncedAtMs + MAX_FUTURE_BOOKMARK_SKEW_MS) {
+    return { ...record, bookmarkedAt: null };
+  }
+
+  return record;
+}
+
+function sanitizeRecords(records: BookmarkRecord[]): { records: BookmarkRecord[]; repaired: number } {
+  let repaired = 0;
+  const sanitized = records.map((record) => {
+    const next = sanitizeBookmarkedAt(record);
+    if (next.bookmarkedAt !== record.bookmarkedAt) repaired += 1;
+    return next;
+  });
+  return { records: sanitized, repaired };
+}
+
 function parseBookmarkTimestamp(record: BookmarkRecord): number | null {
   const candidates = [record.bookmarkedAt, record.postedAt, record.syncedAt];
   for (const candidate of candidates) {
-    if (!candidate) continue;
-    const parsed = Date.parse(candidate);
-    if (Number.isFinite(parsed)) return parsed;
+    const parsed = parseTimestampMs(candidate);
+    if (parsed != null) return parsed;
   }
   return null;
 }
 
 function compareBookmarkChronology(a: BookmarkRecord, b: BookmarkRecord): number {
+  const aSortIndex = parseSnowflake(a.sortIndex);
+  const bSortIndex = parseSnowflake(b.sortIndex);
+  if (aSortIndex != null && bSortIndex != null && aSortIndex !== bSortIndex) {
+    return aSortIndex > bSortIndex ? 1 : -1;
+  }
+
   const aTimestamp = parseBookmarkTimestamp(a);
   const bTimestamp = parseBookmarkTimestamp(b);
   if (aTimestamp != null && bTimestamp != null && aTimestamp !== bTimestamp) {
@@ -124,20 +171,20 @@ function compareBookmarkChronology(a: BookmarkRecord, b: BookmarkRecord): number
   return aStamp.localeCompare(bStamp);
 }
 
-async function loadExistingBookmarks(): Promise<BookmarkRecord[]> {
+async function loadExistingBookmarks(): Promise<{ records: BookmarkRecord[]; repaired: number }> {
   const cachePath = twitterBookmarksCachePath();
-  const existing = await readJsonLines<BookmarkRecord>(cachePath);
-  if (existing.length > 0) return existing;
+  const existing = sanitizeRecords(await readJsonLines<BookmarkRecord>(cachePath));
+  if (existing.records.length > 0) return existing;
   // On first run, no JSONL and no DB — return empty
   try {
-    return await exportBookmarksForSyncSeed();
+    return sanitizeRecords(await exportBookmarksForSyncSeed());
   } catch {
-    return [];
+    return { records: [], repaired: 0 };
   }
 }
 
-function buildUrl(cursor?: string): string {
-  const variables: Record<string, unknown> = { count: 20 };
+function buildUrl(cursor?: string, count = 20): string {
+  const variables: Record<string, unknown> = { count };
   if (cursor) variables.cursor = cursor;
   const params = new URLSearchParams({
     variables: JSON.stringify(variables),
@@ -292,19 +339,6 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
   };
 }
 
-const TWITTER_SNOWFLAKE_EPOCH = 1288834974657n;
-
-function snowflakeToIso(snowflake: string): string | null {
-  try {
-    const id = BigInt(snowflake);
-    const ms = Number(id >> 22n) + Number(TWITTER_SNOWFLAKE_EPOCH);
-    const date = new Date(ms);
-    return Number.isFinite(date.getTime()) ? date.toISOString() : null;
-  } catch {
-    return null;
-  }
-}
-
 export function parseBookmarksResponse(json: any, now?: string): PageResult {
   const ts = now ?? new Date().toISOString();
   const instructions = json?.data?.bookmark_timeline_v2?.timeline?.instructions ?? [];
@@ -329,22 +363,19 @@ export function parseBookmarksResponse(json: any, now?: string): PageResult {
 
     const record = convertTweetToRecord(tweetResult, ts);
     if (record) {
-      // Extract bookmarkedAt from the entry's sortIndex (snowflake timestamp)
-      if (entry.sortIndex) {
-        record.bookmarkedAt = snowflakeToIso(entry.sortIndex) ?? record.bookmarkedAt;
-      }
-      records.push(record);
+      record.sortIndex = typeof entry.sortIndex === 'string' ? entry.sortIndex : null;
+      records.push(sanitizeBookmarkedAt(record));
     }
   }
 
   return { records, nextCursor };
 }
 
-async function fetchPageWithRetry(csrfToken: string, cursor?: string, cookieHeader?: string): Promise<PageResult> {
+async function fetchPageWithRetry(csrfToken: string, cursor?: string, cookieHeader?: string, pageSize?: number): Promise<PageResult> {
   let lastError: Error | undefined;
 
   for (let attempt = 0; attempt < 4; attempt++) {
-    const response = await fetch(buildUrl(cursor), { headers: buildHeaders(csrfToken, cookieHeader) });
+    const response = await fetch(buildUrl(cursor, pageSize), { headers: buildHeaders(csrfToken, cookieHeader) });
 
     if (response.status === 429) {
       const waitSec = Math.min(15 * Math.pow(2, attempt), 120);
@@ -413,7 +444,7 @@ export function mergeRecords(
 
 function updateState(
   prev: BookmarkBackfillState,
-  input: { added: number; seenIds: string[]; stopReason: string; lastRunAt?: string }
+  input: { added: number; seenIds: string[]; stopReason: string; lastRunAt?: string; lastCursor?: string }
 ): BookmarkBackfillState {
   return {
     provider: 'twitter',
@@ -423,6 +454,7 @@ function updateState(
     lastAdded: input.added,
     lastSeenIds: input.seenIds.slice(-20),
     stopReason: input.stopReason,
+    lastCursor: input.lastCursor,
   };
 }
 
@@ -430,7 +462,9 @@ export function formatSyncResult(result: SyncResult): string {
   return [
     'Sync complete.',
     `- bookmarks added: ${result.added}`,
+    `- bookmark dates repaired: ${result.bookmarkedAtRepaired}`,
     `- total bookmarks: ${result.totalBookmarks}`,
+    `- missing reliable bookmark dates: ${result.bookmarkedAtMissing}`,
     `- pages fetched: ${result.pages}`,
     `- stop reason: ${result.stopReason}`,
     `- cache: ${result.cachePath}`,
@@ -442,11 +476,12 @@ export async function syncBookmarksGraphQL(
   options: SyncOptions = {}
 ): Promise<SyncResult> {
   const incremental = options.incremental ?? true;
-  const maxPages = options.maxPages ?? 500;
+  const maxPages = options.maxPages ?? Infinity;
   const delayMs = options.delayMs ?? 600;
   const maxMinutes = options.maxMinutes ?? 30;
   const stalePageLimit = options.stalePageLimit ?? 3;
   const checkpointEvery = options.checkpointEvery ?? 25;
+  const pageSize = Math.max(1, Math.min(options.pageSize ?? 20, 100));
 
   let csrfToken: string;
   let cookieHeader: string | undefined;
@@ -474,10 +509,10 @@ export async function syncBookmarksGraphQL(
   const cachePath = twitterBookmarksCachePath();
   const metaPath = twitterBookmarksMetaPath();
   const statePath = twitterBackfillStatePath();
-  let existing = await loadExistingBookmarks();
-  const newestKnownId = incremental
-    ? existing.slice().sort((a, b) => compareBookmarkChronology(b, a))[0]?.id
-    : undefined;
+  const loaded = await loadExistingBookmarks();
+  let existing = loaded.records;
+  const bookmarkedAtRepaired = loaded.repaired;
+  const newestKnownId = incremental ? existing[0]?.id : undefined;
   const previousMeta = (await pathExists(metaPath))
     ? await readJson<BookmarkCacheMeta>(metaPath)
     : undefined;
@@ -489,7 +524,7 @@ export async function syncBookmarksGraphQL(
   let page = 0;
   let totalAdded = 0;
   let stalePages = 0;
-  let cursor: string | undefined;
+  let cursor: string | undefined = options.resumeCursor;
   const allSeenIds: string[] = [];
   let stopReason = 'unknown';
 
@@ -499,7 +534,7 @@ export async function syncBookmarksGraphQL(
       break;
     }
 
-    const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader);
+    const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader, pageSize);
     page += 1;
 
     if (result.records.length === 0 && !result.nextCursor) {
@@ -523,6 +558,9 @@ export async function syncBookmarksGraphQL(
       done: false,
     });
 
+    // Update cursor before stop checks so auto-continue has the right position
+    cursor = result.nextCursor;
+
     if (options.targetAdds && totalAdded >= options.targetAdds) {
       stopReason = 'target additions reached';
       break;
@@ -535,20 +573,100 @@ export async function syncBookmarksGraphQL(
       stopReason = 'no new bookmarks (stale)';
       break;
     }
-    if (!result.nextCursor) {
+    if (!cursor) {
       stopReason = 'end of bookmarks';
       break;
     }
 
     if (page % checkpointEvery === 0) await writeJsonLines(cachePath, existing);
 
-    cursor = result.nextCursor;
     if (page < maxPages) await new Promise((r) => setTimeout(r, delayMs));
   }
 
   if (stopReason === 'unknown') stopReason = page >= maxPages ? 'max pages reached' : 'unknown';
 
+  // ── Auto-continue: detect users stuck at the old 10k cap ──────────
+  // If we finished an incremental sync, the user has ≥9,500 bookmarks,
+  // and there's a cursor to keep going, automatically page through to
+  // find bookmarks the old 20-per-page × 500-page cap missed.
+  const OLD_CAP_THRESHOLD = 9_500;
+  const terminalStops = new Set(['end of bookmarks']);
+  const shouldAutoContinue =
+    incremental &&
+    !options.resumeCursor &&
+    existing.length >= OLD_CAP_THRESHOLD &&
+    !terminalStops.has(stopReason) &&
+    cursor != null;
+
+  if (shouldAutoContinue) {
+    // Use the first page's actual item count to estimate how many pages
+    // we need to scan through before reaching bookmarks beyond the old cap.
+    const firstPageSize = allSeenIds.length > 0 ? Math.min(allSeenIds.length, pageSize) : pageSize;
+    const estimatedScanPages = Math.ceil(existing.length / firstPageSize);
+    const scanStartPage = page;
+
+    let continueAdded = 0;
+
+    options.onProgress?.({
+      page,
+      totalFetched: allSeenIds.length,
+      newAdded: totalAdded,
+      running: true,
+      done: false,
+      stopReason: `scanning past ${existing.length.toLocaleString()} existing bookmarks (~${estimatedScanPages} pages)...`,
+    });
+
+    // Continue paginating with no stale-page or caught-up limits
+    while (page < maxPages) {
+      if (Date.now() - started > maxMinutes * 60_000) {
+        stopReason = 'max runtime reached';
+        break;
+      }
+
+      const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader, pageSize);
+      page += 1;
+
+      if (result.records.length === 0 && !result.nextCursor) {
+        stopReason = 'end of bookmarks';
+        break;
+      }
+
+      const { merged, added } = mergeRecords(existing, result.records);
+      existing = merged;
+      totalAdded += added;
+      continueAdded += added;
+      result.records.forEach((r) => allSeenIds.push(r.id));
+      cursor = result.nextCursor;
+
+      const scanProgress = page - scanStartPage;
+      options.onProgress?.({
+        page,
+        totalFetched: allSeenIds.length,
+        newAdded: totalAdded,
+        running: true,
+        done: false,
+        stopReason: continueAdded > 0
+          ? undefined // found new bookmarks — normal progress display
+          : `scanning past existing bookmarks (${scanProgress}/~${estimatedScanPages})...`,
+      });
+
+      if (!cursor) {
+        stopReason = 'end of bookmarks';
+        break;
+      }
+
+      if (page % checkpointEvery === 0) await writeJsonLines(cachePath, existing);
+
+      if (page < maxPages) await new Promise((r) => setTimeout(r, delayMs));
+    }
+
+    if (stopReason !== 'end of bookmarks' && page >= maxPages) {
+      stopReason = 'max pages reached';
+    }
+  }
+
   const syncedAt = new Date().toISOString();
+  const bookmarkedAtMissing = existing.filter((record) => !record.bookmarkedAt).length;
   await writeJsonLines(cachePath, existing);
   await writeJson(metaPath, {
     provider: 'twitter',
@@ -557,11 +675,16 @@ export async function syncBookmarksGraphQL(
     lastIncrementalSyncAt: incremental ? syncedAt : previousMeta?.lastIncrementalSyncAt,
     totalBookmarks: existing.length,
   } satisfies BookmarkCacheMeta);
+  // Save cursor for resumption if sync stopped before reaching the end
+  const terminalReasons = new Set(['end of bookmarks', 'caught up to newest stored bookmark']);
+  const savedCursor = terminalReasons.has(stopReason) ? undefined : cursor;
+
   await writeJson(statePath, updateState(prevState, {
     added: totalAdded,
     seenIds: allSeenIds.slice(-20),
     stopReason,
     lastRunAt: syncedAt,
+    lastCursor: savedCursor,
   }));
 
   options.onProgress?.({
@@ -573,7 +696,16 @@ export async function syncBookmarksGraphQL(
     stopReason,
   });
 
-  return { added: totalAdded, totalBookmarks: existing.length, pages: page, stopReason, cachePath, statePath };
+  return {
+    added: totalAdded,
+    bookmarkedAtRepaired,
+    totalBookmarks: existing.length,
+    bookmarkedAtMissing,
+    pages: page,
+    stopReason,
+    cachePath,
+    statePath,
+  };
 }
 
 // ── Gap-fill: backfill missing data for existing bookmarks ────────────
@@ -655,6 +787,7 @@ export interface GapFillFailure {
 export interface GapFillResult {
   quotedTweetsFilled: number;
   textExpanded: number;
+  bookmarkedAtRepaired: number;
   bookmarkedAtMissing: number;
   failed: number;
   failures: GapFillFailure[];
@@ -667,7 +800,8 @@ export async function syncGaps(options?: {
 }): Promise<GapFillResult> {
   const delayMs = options?.delayMs ?? 300;
   const cachePath = twitterBookmarksCachePath();
-  const records = await readJsonLines<BookmarkRecord>(cachePath);
+  const loaded = sanitizeRecords(await readJsonLines<BookmarkRecord>(cachePath));
+  const records = loaded.records;
 
   // Gap 1: missing quoted tweets
   const needsQuotedTweet = records.filter((r) => r.quotedStatusId && !r.quotedTweet);
@@ -779,5 +913,13 @@ export async function syncGaps(options?: {
   if (dbQuotedUpdates.length > 0) await updateQuotedTweets(dbQuotedUpdates);
   if (dbTextUpdates.length > 0) await updateBookmarkText(dbTextUpdates);
 
-  return { quotedTweetsFilled: quotedFetched, textExpanded, bookmarkedAtMissing, failed, failures, total };
+  return {
+    quotedTweetsFilled: quotedFetched,
+    textExpanded,
+    bookmarkedAtRepaired: loaded.repaired,
+    bookmarkedAtMissing,
+    failed,
+    failures,
+    total,
+  };
 }

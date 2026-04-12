@@ -45,6 +45,7 @@ import {
   isFirstRun,
   isLikesFirstRun,
   twitterBookmarksIndexPath,
+  twitterBackfillStatePath,
   twitterLikesIndexPath,
   mdDir,
 } from './paths.js';
@@ -321,7 +322,7 @@ function showSyncWelcome(): void {
   Browser ids: ${browsers}
   Use --browser <name> to choose.
   Default auto-detect prefers installed Chrome-family browsers.
-  Firefox cookie extraction currently works on macOS and Linux.
+  Firefox on Windows requires Node.js 22.5+ or sqlite3 on PATH.
 `);
 }
 
@@ -407,8 +408,7 @@ function safe(fn: (...args: any[]) => Promise<void>): (...args: any[]) => Promis
 export function buildCli() {
   const program = new Command();
 
-  async function rebuildIndex(added: number): Promise<number> {
-    if (added <= 0) return 0;
+  async function rebuildIndex(): Promise<number> {
     process.stderr.write('  Building search index...\n');
     const idx = await buildIndex();
     process.stderr.write(`  \u2713 ${idx.recordCount} bookmarks indexed (${idx.newRecords} new)\n`);
@@ -465,10 +465,11 @@ export function buildCli() {
     .description('Sync bookmarks from X into your local database')
     .option('--api', 'Use OAuth v2 API instead of Chrome session', false)
     .option('--rebuild', 'Full re-crawl of all bookmarks', false)
+    .option('--continue', 'Resume a previous sync that was interrupted or hit the page limit', false)
     .option('--gaps', 'Backfill missing data (quoted tweets, truncated articles)', false)
     .option('--yes', 'Skip confirmation prompts', false)
     .option('--classify', 'Classify new bookmarks with LLM after syncing', false)
-    .option('--max-pages <n>', 'Max pages to fetch', (v: string) => Number(v), 500)
+    .option('--max-pages <n>', 'Max pages to fetch (default: unlimited)', (v: string) => Number(v))
     .option('--target-adds <n>', 'Stop after N new bookmarks', (v: string) => Number(v))
     .option('--delay-ms <n>', 'Delay between requests in ms', (v: string) => Number(v), 600)
     .option('--max-minutes <n>', 'Max runtime in minutes', (v: string) => Number(v), 30)
@@ -483,8 +484,9 @@ export function buildCli() {
       ensureDataDir();
 
       try {
-        if (options.rebuild && options.gaps) {
-          console.error('  Error: --rebuild and --gaps cannot be used together.');
+        const mutuallyExclusive = [options.rebuild, options.continue, options.gaps].filter(Boolean).length;
+        if (mutuallyExclusive > 1) {
+          console.error('  Error: --rebuild, --continue, and --gaps cannot be used together.');
           process.exitCode = 1;
           return;
         }
@@ -507,11 +509,15 @@ export function buildCli() {
               spinner.update();
             },
           }));
-          if (result.total === 0) {
+          if (result.total === 0 && result.bookmarkedAtRepaired === 0) {
             console.log('  No gaps found \u2014 all bookmarks are fully enriched.');
           } else {
             if (result.quotedTweetsFilled > 0) console.log(`  \u2713 ${result.quotedTweetsFilled} quoted tweets filled`);
             if (result.textExpanded > 0) console.log(`  \u2713 ${result.textExpanded} truncated texts expanded`);
+            if (result.bookmarkedAtRepaired > 0) {
+              console.log(`  \u2713 ${result.bookmarkedAtRepaired} invalid bookmark dates cleared`);
+              await rebuildIndex();
+            }
             if (result.failed > 0) {
               // Write failure log
               const logPath = path.join(dataDir(), 'gaps-failures.json');
@@ -528,7 +534,7 @@ export function buildCli() {
               console.log(`  Details: ${logPath}`);
             }
             if (result.bookmarkedAtMissing > 0) {
-              console.log(`  ${result.bookmarkedAtMissing} bookmarks missing bookmark date \u2014 run ft sync to fill`);
+              console.log(`  ${result.bookmarkedAtMissing} bookmarks missing a reliable bookmark date`);
             }
           }
           return;
@@ -569,7 +575,7 @@ export function buildCli() {
           console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
           console.log(`  \u2713 Data: ${dataDir()}\n`);
           warnIfEmpty(result.totalBookmarks);
-          const newCount = await rebuildIndex(result.added);
+          const newCount = await rebuildIndex();
           if (options.classify && newCount > 0) {
             await classifyNew();
           }
@@ -578,6 +584,9 @@ export function buildCli() {
           let lastSync: SyncProgress = { page: 0, totalFetched: 0, newAdded: 0, running: true, done: false };
           const spinner = createSpinner(() => {
             const elapsed = Math.round((Date.now() - startTime) / 1000);
+            if (lastSync.stopReason && lastSync.running) {
+              return `${lastSync.stopReason}  \u2502  ${lastSync.newAdded} new  \u2502  ${elapsed}s`;
+            }
             return `Syncing bookmarks...  ${lastSync.newAdded} new  \u2502  page ${lastSync.page}  \u2502  ${elapsed}s`;
           });
           // Parse --cookies <ct0> [auth_token] — variadic, gives us an array
@@ -591,9 +600,32 @@ export function buildCli() {
             cookieHeader = parts.join('; ');
           }
 
+          // Load saved cursor for --continue mode
+          let resumeCursor: string | undefined;
+          if (options.continue) {
+            try {
+              const statePath = twitterBackfillStatePath();
+              const state = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+              resumeCursor = state?.lastCursor;
+            } catch { /* no state file yet */ }
+            if (resumeCursor) {
+              console.log('  Resuming from saved position...\n');
+            } else {
+              console.log('  No saved cursor — scanning past existing bookmarks to find new ones...\n');
+            }
+          }
+
+          // When continuing without a cursor, disable stale page limit so we can
+          // page through all existing bookmarks to reach the ones beyond the old cap.
+          // With a saved cursor we skip straight to where we left off, so the normal
+          // stale limit is fine.
+          const continueWithoutCursor = Boolean(options.continue) && !resumeCursor;
+
           const result = await runWithSpinner(spinner, () => syncBookmarksGraphQL({
-            incremental: !Boolean(options.rebuild),
-            maxPages: Number(options.maxPages) || 500,
+            incremental: !Boolean(options.rebuild) && !Boolean(options.continue),
+            resumeCursor,
+            stalePageLimit: continueWithoutCursor ? Infinity : undefined,
+            maxPages: options.maxPages != null ? Number(options.maxPages) : undefined,
             targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
             delayMs: Number(options.delayMs) || 600,
             maxMinutes: Number(options.maxMinutes) || 30,
@@ -611,11 +643,17 @@ export function buildCli() {
 
           console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
           console.log(`  ${friendlyStopReason(result.stopReason)}`);
+          if (result.bookmarkedAtRepaired > 0) {
+            console.log(`  \u2713 ${result.bookmarkedAtRepaired} invalid bookmark dates cleared`);
+          }
+          if (result.bookmarkedAtMissing > 0) {
+            console.log(`  ${result.bookmarkedAtMissing} bookmarks missing a reliable bookmark date`);
+          }
           console.log(`  \u2713 Data: ${dataDir()}\n`);
 
           warnIfEmpty(result.totalBookmarks);
 
-          const newCount = await rebuildIndex(result.added);
+          const newCount = await rebuildIndex();
           if (options.classify && newCount > 0) {
             await classifyNew();
           }
