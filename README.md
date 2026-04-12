@@ -36,8 +36,11 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | Command | Description |
 |---------|-------------|
 | `ft sync` | Download and sync bookmarks (no API required) |
-| `ft sync --full` | Full history crawl (not just incremental) |
-| `ft sync --gaps` | Backfill missing quoted tweets and expand truncated articles |
+| `ft sync --rebuild` | Full re-crawl of all bookmarks |
+| `ft sync --continue` | Resume an interrupted sync from the saved cursor |
+| `ft sync --gaps` | Backfill quoted tweets, expand truncated articles, enrich linked article content |
+| `ft sync --folders` | Also sync X bookmark folder tags (read-only mirror of X state) |
+| `ft sync --folder <name>` | Sync a single folder by name (exact or unambiguous prefix) |
 | `ft sync --classify` | Sync then classify new bookmarks with LLM |
 | `ft sync --api` | Sync via OAuth API (cross-platform) |
 | `ft auth` | Set up OAuth for API-based sync (optional) |
@@ -47,13 +50,15 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | Command | Description |
 |---------|-------------|
 | `ft search <query>` | Full-text search with BM25 ranking |
-| `ft list` | Filter by author, date, category, domain |
+| `ft list` | Filter by author, date, category, domain, or folder |
+| `ft list --folder <name>` | Show bookmarks in an X bookmark folder |
 | `ft show <id>` | Show one bookmark in detail |
 | `ft sample <category>` | Random sample from a category |
 | `ft stats` | Top authors, languages, date range |
 | `ft viz` | Terminal dashboard with sparklines, categories, and domains |
 | `ft categories` | Show category distribution |
 | `ft domains` | Subject domain distribution |
+| `ft folders` | Show X bookmark folder distribution (requires `ft sync --folders` first) |
 
 ### Classification
 
@@ -74,17 +79,6 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | `ft ask <question> --save` | Ask and save the answer as a concept page |
 | `ft lint` | Health-check the wiki for broken links and missing pages |
 | `ft lint --fix` | Auto-fix fixable wiki issues |
-
-### Adjacent possible
-
-| Command | Description |
-|---------|-------------|
-| `ft adjacent explore <seed>` | LLM-driven 2x2 idea expansion from a seed |
-| `ft adjacent list` | List recent considerations |
-| `ft adjacent show <id>` | Show a consideration and its dots |
-| `ft adjacent artifacts` | List stored artifacts |
-| `ft adjacent status` | Show Adjacent store stats |
-| `ft adjacent frames` | List available expansion frames |
 
 ### Agent integration
 
@@ -170,11 +164,11 @@ Use `ft classify` for LLM-powered classification that catches what regex misses.
 
 | Feature | macOS | Linux | Windows |
 |---------|-------|-------|---------|
-| Session sync (`ft sync`) | Chrome, Brave, Arc, Firefox | Firefox | Firefox |
+| Session sync (`ft sync`) | Chrome, Chromium, Brave, Helium, Comet, Firefox | Chrome, Chromium, Brave, Firefox | Chrome, Chromium, Brave, Firefox |
 | OAuth API sync (`ft sync --api`) | Yes | Yes | Yes |
 | Search, list, classify, viz, wiki | Yes | Yes | Yes |
 
-Session sync extracts cookies from your browser's local database. Use `ft sync --browser <name>` to pick a browser. On platforms where session sync isn't available, use `ft auth` + `ft sync --api`.
+Session sync extracts cookies from your browser's local database. Use `ft sync --browser <name>` to pick a browser. On Windows, Firefox requires Node.js 22.5+ or `sqlite3` on PATH. For unsupported browsers or platforms, use `ft auth` + `ft sync --api`.
 
 ## Security
 

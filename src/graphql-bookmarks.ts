@@ -3,8 +3,11 @@ import { ensureDataDir, twitterBookmarksCachePath, twitterBookmarksMetaPath, twi
 import { loadChromeSessionConfig } from './config.js';
 import { extractChromeXCookies } from './chrome-cookies.js';
 import { extractFirefoxXCookies } from './firefox-cookies.js';
-import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkRecord, QuotedTweetSnapshot } from './types.js';
-import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText } from './bookmarks-db.js';
+import { parseTimestampMs } from './date-utils.js';
+import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkFolder, BookmarkRecord, QuotedTweetSnapshot } from './types.js';
+import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText, updateArticleContent } from './bookmarks-db.js';
+import type { ArticleUpdate } from './bookmarks-db.js';
+import { fetchArticle, resolveTcoLink } from './bookmark-enrich.js';
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
 
@@ -13,6 +16,16 @@ const X_PUBLIC_BEARER =
 
 const BOOKMARKS_QUERY_ID = 'Z9GWmP0kP2dajyckAaDUBw';
 const BOOKMARKS_OPERATION = 'Bookmarks';
+
+// ──────────────────────────────────────────────────────────────────────────
+// Folder endpoints — READ ONLY. We never POST/PUT/DELETE to X.
+// The folder feature makes exactly these two GraphQL GET calls, nothing else.
+// If you're adding a third, justify it in review and update this comment.
+// ──────────────────────────────────────────────────────────────────────────
+const BOOKMARK_FOLDERS_QUERY_ID = 'i78YDd0Tza-dV4SYs58kRg';
+const BOOKMARK_FOLDERS_OPERATION = 'BookmarkFoldersSlice';
+const BOOKMARK_FOLDER_TIMELINE_QUERY_ID = 'LML09uXDwh87F1zd7pbf2w';
+const BOOKMARK_FOLDER_TIMELINE_OPERATION = 'BookmarkFolderTimeline';
 
 const GRAPHQL_FEATURES = {
   graphql_timeline_v2_bookmark_timeline: true,
@@ -41,7 +54,7 @@ const GRAPHQL_FEATURES = {
 export interface SyncOptions {
   /** Default true. Stop once we reach the newest already-stored bookmark. */
   incremental?: boolean;
-  /** Max pages to fetch (20 bookmarks per page). Default: 500 */
+  /** Max pages to fetch (20 bookmarks per page). Default: unlimited */
   maxPages?: number;
   /** Stop once this many *new* bookmarks have been added. Default: unlimited */
   targetAdds?: number;
@@ -51,6 +64,8 @@ export interface SyncOptions {
   maxMinutes?: number;
   /** Consecutive pages with 0 new bookmarks before stopping. Default: 3 */
   stalePageLimit?: number;
+  /** Bookmarks per page (1–100). Default: 20 */
+  pageSize?: number;
   /** Browser id (e.g. 'chrome', 'firefox', 'brave'). */
   browser?: string;
   /** Chrome-family user-data-dir override. */
@@ -65,6 +80,8 @@ export interface SyncOptions {
   cookieHeader?: string;
   /** Progress callback. */
   onProgress?: (status: SyncProgress) => void;
+  /** Resume from a saved cursor instead of starting from the newest bookmark. */
+  resumeCursor?: string;
   /** Flush to disk every N pages. Default: 25 */
   checkpointEvery?: number;
 }
@@ -80,7 +97,9 @@ export interface SyncProgress {
 
 export interface SyncResult {
   added: number;
+  bookmarkedAtRepaired: number;
   totalBookmarks: number;
+  bookmarkedAtMissing: number;
   pages: number;
   stopReason: string;
   cachePath: string;
@@ -96,17 +115,57 @@ function parseSnowflake(value?: string | null): bigint | null {
   }
 }
 
+const MAX_FUTURE_BOOKMARK_SKEW_MS = 5 * 60_000;
+
+export function sanitizeBookmarkedAt(record: BookmarkRecord): BookmarkRecord {
+  if (record.ingestedVia === 'graphql') {
+    return record.bookmarkedAt == null ? record : { ...record, bookmarkedAt: null };
+  }
+
+  const bookmarkedAtMs = parseTimestampMs(record.bookmarkedAt);
+  if (bookmarkedAtMs == null) {
+    return record.bookmarkedAt == null ? record : { ...record, bookmarkedAt: null };
+  }
+
+  const postedAtMs = parseTimestampMs(record.postedAt);
+  if (postedAtMs != null && bookmarkedAtMs < postedAtMs) {
+    return { ...record, bookmarkedAt: null };
+  }
+
+  const syncedAtMs = parseTimestampMs(record.syncedAt);
+  if (syncedAtMs != null && bookmarkedAtMs > syncedAtMs + MAX_FUTURE_BOOKMARK_SKEW_MS) {
+    return { ...record, bookmarkedAt: null };
+  }
+
+  return record;
+}
+
+function sanitizeRecords(records: BookmarkRecord[]): { records: BookmarkRecord[]; repaired: number } {
+  let repaired = 0;
+  const sanitized = records.map((record) => {
+    const next = sanitizeBookmarkedAt(record);
+    if (next.bookmarkedAt !== record.bookmarkedAt) repaired += 1;
+    return next;
+  });
+  return { records: sanitized, repaired };
+}
+
 function parseBookmarkTimestamp(record: BookmarkRecord): number | null {
   const candidates = [record.bookmarkedAt, record.postedAt, record.syncedAt];
   for (const candidate of candidates) {
-    if (!candidate) continue;
-    const parsed = Date.parse(candidate);
-    if (Number.isFinite(parsed)) return parsed;
+    const parsed = parseTimestampMs(candidate);
+    if (parsed != null) return parsed;
   }
   return null;
 }
 
 function compareBookmarkChronology(a: BookmarkRecord, b: BookmarkRecord): number {
+  const aSortIndex = parseSnowflake(a.sortIndex);
+  const bSortIndex = parseSnowflake(b.sortIndex);
+  if (aSortIndex != null && bSortIndex != null && aSortIndex !== bSortIndex) {
+    return aSortIndex > bSortIndex ? 1 : -1;
+  }
+
   const aTimestamp = parseBookmarkTimestamp(a);
   const bTimestamp = parseBookmarkTimestamp(b);
   if (aTimestamp != null && bTimestamp != null && aTimestamp !== bTimestamp) {
@@ -124,20 +183,20 @@ function compareBookmarkChronology(a: BookmarkRecord, b: BookmarkRecord): number
   return aStamp.localeCompare(bStamp);
 }
 
-async function loadExistingBookmarks(): Promise<BookmarkRecord[]> {
+async function loadExistingBookmarks(): Promise<{ records: BookmarkRecord[]; repaired: number }> {
   const cachePath = twitterBookmarksCachePath();
-  const existing = await readJsonLines<BookmarkRecord>(cachePath);
-  if (existing.length > 0) return existing;
+  const existing = sanitizeRecords(await readJsonLines<BookmarkRecord>(cachePath));
+  if (existing.records.length > 0) return existing;
   // On first run, no JSONL and no DB — return empty
   try {
-    return await exportBookmarksForSyncSeed();
+    return sanitizeRecords(await exportBookmarksForSyncSeed());
   } catch {
-    return [];
+    return { records: [], repaired: 0 };
   }
 }
 
-function buildUrl(cursor?: string): string {
-  const variables: Record<string, unknown> = { count: 20 };
+function buildUrl(cursor?: string, count = 20): string {
+  const variables: Record<string, unknown> = { count };
   if (cursor) variables.cursor = cursor;
   const params = new URLSearchParams({
     variables: JSON.stringify(variables),
@@ -292,19 +351,6 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
   };
 }
 
-const TWITTER_SNOWFLAKE_EPOCH = 1288834974657n;
-
-function snowflakeToIso(snowflake: string): string | null {
-  try {
-    const id = BigInt(snowflake);
-    const ms = Number(id >> 22n) + Number(TWITTER_SNOWFLAKE_EPOCH);
-    const date = new Date(ms);
-    return Number.isFinite(date.getTime()) ? date.toISOString() : null;
-  } catch {
-    return null;
-  }
-}
-
 export function parseBookmarksResponse(json: any, now?: string): PageResult {
   const ts = now ?? new Date().toISOString();
   const instructions = json?.data?.bookmark_timeline_v2?.timeline?.instructions ?? [];
@@ -329,22 +375,19 @@ export function parseBookmarksResponse(json: any, now?: string): PageResult {
 
     const record = convertTweetToRecord(tweetResult, ts);
     if (record) {
-      // Extract bookmarkedAt from the entry's sortIndex (snowflake timestamp)
-      if (entry.sortIndex) {
-        record.bookmarkedAt = snowflakeToIso(entry.sortIndex) ?? record.bookmarkedAt;
-      }
-      records.push(record);
+      record.sortIndex = typeof entry.sortIndex === 'string' ? entry.sortIndex : null;
+      records.push(sanitizeBookmarkedAt(record));
     }
   }
 
   return { records, nextCursor };
 }
 
-async function fetchPageWithRetry(csrfToken: string, cursor?: string, cookieHeader?: string): Promise<PageResult> {
+async function fetchPageWithRetry(csrfToken: string, cursor?: string, cookieHeader?: string, pageSize?: number): Promise<PageResult> {
   let lastError: Error | undefined;
 
   for (let attempt = 0; attempt < 4; attempt++) {
-    const response = await fetch(buildUrl(cursor), { headers: buildHeaders(csrfToken, cookieHeader) });
+    const response = await fetch(buildUrl(cursor, pageSize), { headers: buildHeaders(csrfToken, cookieHeader) });
 
     if (response.status === 429) {
       const waitSec = Math.min(15 * Math.pow(2, attempt), 120);
@@ -404,6 +447,7 @@ export function mergeRecords(
   for (const record of incoming) {
     const prev = byId.get(record.id);
     if (!prev) added += 1;
+    // Preserve folder arrays from prev since main sync never carries folder data.
     byId.set(record.id, mergeBookmarkRecord(prev, record));
   }
   const merged = Array.from(byId.values());
@@ -413,7 +457,7 @@ export function mergeRecords(
 
 function updateState(
   prev: BookmarkBackfillState,
-  input: { added: number; seenIds: string[]; stopReason: string; lastRunAt?: string }
+  input: { added: number; seenIds: string[]; stopReason: string; lastRunAt?: string; lastCursor?: string }
 ): BookmarkBackfillState {
   return {
     provider: 'twitter',
@@ -423,6 +467,7 @@ function updateState(
     lastAdded: input.added,
     lastSeenIds: input.seenIds.slice(-20),
     stopReason: input.stopReason,
+    lastCursor: input.lastCursor,
   };
 }
 
@@ -430,7 +475,9 @@ export function formatSyncResult(result: SyncResult): string {
   return [
     'Sync complete.',
     `- bookmarks added: ${result.added}`,
+    `- bookmark dates repaired: ${result.bookmarkedAtRepaired}`,
     `- total bookmarks: ${result.totalBookmarks}`,
+    `- missing reliable bookmark dates: ${result.bookmarkedAtMissing}`,
     `- pages fetched: ${result.pages}`,
     `- stop reason: ${result.stopReason}`,
     `- cache: ${result.cachePath}`,
@@ -442,11 +489,12 @@ export async function syncBookmarksGraphQL(
   options: SyncOptions = {}
 ): Promise<SyncResult> {
   const incremental = options.incremental ?? true;
-  const maxPages = options.maxPages ?? 500;
+  const maxPages = options.maxPages ?? Infinity;
   const delayMs = options.delayMs ?? 600;
   const maxMinutes = options.maxMinutes ?? 30;
   const stalePageLimit = options.stalePageLimit ?? 3;
   const checkpointEvery = options.checkpointEvery ?? 25;
+  const pageSize = Math.max(1, Math.min(options.pageSize ?? 20, 100));
 
   let csrfToken: string;
   let cookieHeader: string | undefined;
@@ -474,10 +522,10 @@ export async function syncBookmarksGraphQL(
   const cachePath = twitterBookmarksCachePath();
   const metaPath = twitterBookmarksMetaPath();
   const statePath = twitterBackfillStatePath();
-  let existing = await loadExistingBookmarks();
-  const newestKnownId = incremental
-    ? existing.slice().sort((a, b) => compareBookmarkChronology(b, a))[0]?.id
-    : undefined;
+  const loaded = await loadExistingBookmarks();
+  let existing = loaded.records;
+  const bookmarkedAtRepaired = loaded.repaired;
+  const newestKnownId = incremental ? existing[0]?.id : undefined;
   const previousMeta = (await pathExists(metaPath))
     ? await readJson<BookmarkCacheMeta>(metaPath)
     : undefined;
@@ -489,7 +537,7 @@ export async function syncBookmarksGraphQL(
   let page = 0;
   let totalAdded = 0;
   let stalePages = 0;
-  let cursor: string | undefined;
+  let cursor: string | undefined = options.resumeCursor;
   const allSeenIds: string[] = [];
   let stopReason = 'unknown';
 
@@ -499,7 +547,7 @@ export async function syncBookmarksGraphQL(
       break;
     }
 
-    const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader);
+    const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader, pageSize);
     page += 1;
 
     if (result.records.length === 0 && !result.nextCursor) {
@@ -523,6 +571,9 @@ export async function syncBookmarksGraphQL(
       done: false,
     });
 
+    // Update cursor before stop checks so auto-continue has the right position
+    cursor = result.nextCursor;
+
     if (options.targetAdds && totalAdded >= options.targetAdds) {
       stopReason = 'target additions reached';
       break;
@@ -535,20 +586,100 @@ export async function syncBookmarksGraphQL(
       stopReason = 'no new bookmarks (stale)';
       break;
     }
-    if (!result.nextCursor) {
+    if (!cursor) {
       stopReason = 'end of bookmarks';
       break;
     }
 
     if (page % checkpointEvery === 0) await writeJsonLines(cachePath, existing);
 
-    cursor = result.nextCursor;
     if (page < maxPages) await new Promise((r) => setTimeout(r, delayMs));
   }
 
   if (stopReason === 'unknown') stopReason = page >= maxPages ? 'max pages reached' : 'unknown';
 
+  // ── Auto-continue: detect users stuck at the old 10k cap ──────────
+  // If we finished an incremental sync, the user has ≥9,500 bookmarks,
+  // and there's a cursor to keep going, automatically page through to
+  // find bookmarks the old 20-per-page × 500-page cap missed.
+  const OLD_CAP_THRESHOLD = 9_500;
+  const terminalStops = new Set(['end of bookmarks']);
+  const shouldAutoContinue =
+    incremental &&
+    !options.resumeCursor &&
+    existing.length >= OLD_CAP_THRESHOLD &&
+    !terminalStops.has(stopReason) &&
+    cursor != null;
+
+  if (shouldAutoContinue) {
+    // Use the first page's actual item count to estimate how many pages
+    // we need to scan through before reaching bookmarks beyond the old cap.
+    const firstPageSize = allSeenIds.length > 0 ? Math.min(allSeenIds.length, pageSize) : pageSize;
+    const estimatedScanPages = Math.ceil(existing.length / firstPageSize);
+    const scanStartPage = page;
+
+    let continueAdded = 0;
+
+    options.onProgress?.({
+      page,
+      totalFetched: allSeenIds.length,
+      newAdded: totalAdded,
+      running: true,
+      done: false,
+      stopReason: `scanning past ${existing.length.toLocaleString()} existing bookmarks (~${estimatedScanPages} pages)...`,
+    });
+
+    // Continue paginating with no stale-page or caught-up limits
+    while (page < maxPages) {
+      if (Date.now() - started > maxMinutes * 60_000) {
+        stopReason = 'max runtime reached';
+        break;
+      }
+
+      const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader, pageSize);
+      page += 1;
+
+      if (result.records.length === 0 && !result.nextCursor) {
+        stopReason = 'end of bookmarks';
+        break;
+      }
+
+      const { merged, added } = mergeRecords(existing, result.records);
+      existing = merged;
+      totalAdded += added;
+      continueAdded += added;
+      result.records.forEach((r) => allSeenIds.push(r.id));
+      cursor = result.nextCursor;
+
+      const scanProgress = page - scanStartPage;
+      options.onProgress?.({
+        page,
+        totalFetched: allSeenIds.length,
+        newAdded: totalAdded,
+        running: true,
+        done: false,
+        stopReason: continueAdded > 0
+          ? undefined // found new bookmarks — normal progress display
+          : `scanning past existing bookmarks (${scanProgress}/~${estimatedScanPages})...`,
+      });
+
+      if (!cursor) {
+        stopReason = 'end of bookmarks';
+        break;
+      }
+
+      if (page % checkpointEvery === 0) await writeJsonLines(cachePath, existing);
+
+      if (page < maxPages) await new Promise((r) => setTimeout(r, delayMs));
+    }
+
+    if (stopReason !== 'end of bookmarks' && page >= maxPages) {
+      stopReason = 'max pages reached';
+    }
+  }
+
   const syncedAt = new Date().toISOString();
+  const bookmarkedAtMissing = existing.filter((record) => !record.bookmarkedAt).length;
   await writeJsonLines(cachePath, existing);
   await writeJson(metaPath, {
     provider: 'twitter',
@@ -557,11 +688,16 @@ export async function syncBookmarksGraphQL(
     lastIncrementalSyncAt: incremental ? syncedAt : previousMeta?.lastIncrementalSyncAt,
     totalBookmarks: existing.length,
   } satisfies BookmarkCacheMeta);
+  // Save cursor for resumption if sync stopped before reaching the end
+  const terminalReasons = new Set(['end of bookmarks', 'caught up to newest stored bookmark']);
+  const savedCursor = terminalReasons.has(stopReason) ? undefined : cursor;
+
   await writeJson(statePath, updateState(prevState, {
     added: totalAdded,
     seenIds: allSeenIds.slice(-20),
     stopReason,
     lastRunAt: syncedAt,
+    lastCursor: savedCursor,
   }));
 
   options.onProgress?.({
@@ -573,7 +709,545 @@ export async function syncBookmarksGraphQL(
     stopReason,
   });
 
-  return { added: totalAdded, totalBookmarks: existing.length, pages: page, stopReason, cachePath, statePath };
+  return {
+    added: totalAdded,
+    bookmarkedAtRepaired,
+    totalBookmarks: existing.length,
+    bookmarkedAtMissing,
+    pages: page,
+    stopReason,
+    cachePath,
+    statePath,
+  };
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Bookmark folders (READ ONLY — GET requests only)
+//
+// Mirror semantics: for each folder we walk successfully, the local cache
+// is updated to reflect X's CURRENT state of that folder. No stale data
+// accumulates. NEVER writes to X — only reads.
+// ──────────────────────────────────────────────────────────────────────────
+
+function buildFoldersListUrl(): string {
+  const params = new URLSearchParams({
+    variables: JSON.stringify({}),
+    features: JSON.stringify(GRAPHQL_FEATURES),
+  });
+  return `https://x.com/i/api/graphql/${BOOKMARK_FOLDERS_QUERY_ID}/${BOOKMARK_FOLDERS_OPERATION}?${params}`;
+}
+
+function buildFolderTimelineUrl(folderId: string, cursor?: string, count = 20): string {
+  const variables: Record<string, unknown> = {
+    bookmark_collection_id: folderId,
+    count,
+  };
+  if (cursor) variables.cursor = cursor;
+  const params = new URLSearchParams({
+    variables: JSON.stringify(variables),
+    features: JSON.stringify(GRAPHQL_FEATURES),
+  });
+  return `https://x.com/i/api/graphql/${BOOKMARK_FOLDER_TIMELINE_QUERY_ID}/${BOOKMARK_FOLDER_TIMELINE_OPERATION}?${params}`;
+}
+
+export async function fetchBookmarkFolders(
+  csrfToken: string,
+  cookieHeader?: string,
+): Promise<BookmarkFolder[]> {
+  const response = await fetch(buildFoldersListUrl(), {
+    headers: buildHeaders(csrfToken, cookieHeader),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(
+      `BookmarkFoldersSlice API returned ${response.status}.\n` +
+        `Response: ${text.slice(0, 300)}\n\n` +
+        (response.status === 401 || response.status === 403
+          ? 'Fix: Your X session may have expired. Open your browser, log into x.com, and retry.'
+          : 'This may be a temporary issue. Try again in a few minutes.')
+    );
+  }
+
+  const json = await response.json();
+  // Try the known response paths in order (X has used a few shapes).
+  const items: any[] =
+    json?.data?.viewer?.user_results?.result?.bookmark_collections_slice?.items ??
+    json?.data?.viewer?.bookmark_collections_slice?.items ??
+    json?.data?.bookmark_collections_slice?.items ??
+    [];
+
+  return items
+    .map((item: any) => ({
+      id: String(item.id ?? item.rest_id ?? ''),
+      name: String(item.name ?? ''),
+    }))
+    .filter((f) => f.id && f.name);
+}
+
+export function parseFolderTimelineResponse(json: any, now?: string): PageResult {
+  const ts = now ?? new Date().toISOString();
+  // Try both known response paths — X has used both at various times.
+  const instructions =
+    json?.data?.bookmark_collection_timeline?.timeline?.instructions ??
+    json?.data?.bookmark_folder_timeline?.timeline?.instructions ??
+    [];
+
+  const entries: any[] = [];
+  for (const inst of instructions) {
+    if (inst.type === 'TimelineAddEntries' && Array.isArray(inst.entries)) {
+      entries.push(...inst.entries);
+    }
+  }
+
+  const records: BookmarkRecord[] = [];
+  let nextCursor: string | undefined;
+
+  for (const entry of entries) {
+    if (typeof entry.entryId === 'string' && entry.entryId.startsWith('cursor-bottom')) {
+      nextCursor = entry.content?.value;
+      continue;
+    }
+    const tweetResult = entry?.content?.itemContent?.tweet_results?.result;
+    if (!tweetResult) continue;
+    const record = convertTweetToRecord(tweetResult, ts);
+    if (record) {
+      record.sortIndex = typeof entry.sortIndex === 'string' ? entry.sortIndex : null;
+      records.push(sanitizeBookmarkedAt(record));
+    }
+  }
+
+  return { records, nextCursor };
+}
+
+async function fetchFolderPage(
+  csrfToken: string,
+  folderId: string,
+  cursor?: string,
+  cookieHeader?: string,
+  pageSize = 20,
+): Promise<PageResult> {
+  let lastError: Error | undefined;
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const response = await fetch(buildFolderTimelineUrl(folderId, cursor, pageSize), {
+      headers: buildHeaders(csrfToken, cookieHeader),
+    });
+
+    if (response.status === 429) {
+      const waitSec = Math.min(15 * Math.pow(2, attempt), 120);
+      lastError = new Error(`Rate limited (429) on attempt ${attempt + 1}`);
+      await new Promise((r) => setTimeout(r, waitSec * 1000));
+      continue;
+    }
+    if (response.status >= 500) {
+      lastError = new Error(`Server error (${response.status}) on attempt ${attempt + 1}`);
+      await new Promise((r) => setTimeout(r, 5000 * (attempt + 1)));
+      continue;
+    }
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(
+        `BookmarkFolderTimeline API returned ${response.status}.\n` +
+          `Response: ${text.slice(0, 300)}`
+      );
+    }
+
+    const json = await response.json();
+    return parseFolderTimelineResponse(json);
+  }
+
+  throw lastError ?? new Error('BookmarkFolderTimeline: all retry attempts failed.');
+}
+
+export interface FolderWalkResult {
+  /** True only if we paginated to the natural end of the folder. */
+  complete: boolean;
+  records: BookmarkRecord[];
+}
+
+/** Soft cap on walked records per folder. Folders larger than this abort
+ * with complete=false so the caller skips modifying DB state. 50k records
+ * is comfortably above any realistic X bookmark folder. */
+const MAX_RECORDS_PER_FOLDER = 50_000;
+
+export async function walkFolderTimeline(
+  csrfToken: string,
+  folderId: string,
+  options: { cookieHeader?: string; delayMs?: number; pageSize?: number; maxPages?: number } = {},
+): Promise<FolderWalkResult> {
+  const delayMs = options.delayMs ?? 600;
+  const pageSize = Math.max(1, Math.min(options.pageSize ?? 20, 100));
+  const maxPages = options.maxPages ?? 1000;
+
+  const seen = new Map<string, BookmarkRecord>();
+  let cursor: string | undefined;
+  let page = 0;
+
+  while (page < maxPages) {
+    const result = await fetchFolderPage(csrfToken, folderId, cursor, options.cookieHeader, pageSize);
+    page += 1;
+
+    for (const r of result.records) seen.set(r.id, r);
+
+    // Defensive: stop walking if we blow past the soft cap. Treat as incomplete
+    // so the caller skips modifying state — we'd rather leave tags stale than
+    // risk OOM or an endless pagination loop.
+    if (seen.size > MAX_RECORDS_PER_FOLDER) {
+      return { complete: false, records: Array.from(seen.values()) };
+    }
+
+    if (!result.nextCursor) {
+      return { complete: true, records: Array.from(seen.values()) };
+    }
+
+    cursor = result.nextCursor;
+    if (page < maxPages) await new Promise((r) => setTimeout(r, delayMs));
+  }
+
+  return { complete: false, records: Array.from(seen.values()) };
+}
+
+export interface FolderMirrorStats {
+  added: number;     // new records added during the mirror
+  tagged: number;    // existing records that gained this folder tag
+  untagged: number;  // existing records that lost this folder tag
+  unchanged: number; // records that already had the tag and still do
+}
+
+/**
+ * Return a new record with every occurrence of this folder id removed
+ * from both parallel arrays. Returns the same reference unchanged if the
+ * folder wasn't present. Uses filter rather than indexOf so duplicate ids
+ * (from a corrupted JSONL, say) are all cleared, not just the first.
+ */
+function withoutFolder(record: BookmarkRecord, folderId: string): BookmarkRecord {
+  const oldIds = record.folderIds ?? [];
+  if (!oldIds.includes(folderId)) return record;
+  const oldNames = record.folderNames ?? [];
+  const newIds: string[] = [];
+  const newNames: string[] = [];
+  for (let i = 0; i < oldIds.length; i++) {
+    if (oldIds[i] === folderId) continue;
+    newIds.push(oldIds[i]);
+    newNames.push(oldNames[i] ?? '');
+  }
+  return { ...record, folderIds: newIds, folderNames: newNames };
+}
+
+/**
+ * Return a new record with this folder present exactly once.
+ * Removes any prior instances of this folder id first (defensive against
+ * corrupt duplicates), then appends a single clean entry with the current
+ * display name. Handles folder rename on X as a side effect.
+ */
+function withFolder(record: BookmarkRecord, folder: BookmarkFolder): BookmarkRecord {
+  const oldIds = record.folderIds ?? [];
+  const oldNames = record.folderNames ?? [];
+
+  // Fast path: already tagged exactly once with the current name — no-op.
+  const firstIdx = oldIds.indexOf(folder.id);
+  const matchCount = oldIds.reduce((n, id) => (id === folder.id ? n + 1 : n), 0);
+  if (matchCount === 1 && oldNames[firstIdx] === folder.name) return record;
+
+  // Slow path: remove every existing occurrence (defensive against duplicates)
+  // and append exactly one clean entry.
+  const cleanedIds: string[] = [];
+  const cleanedNames: string[] = [];
+  for (let i = 0; i < oldIds.length; i++) {
+    if (oldIds[i] === folder.id) continue;
+    cleanedIds.push(oldIds[i]);
+    cleanedNames.push(oldNames[i] ?? '');
+  }
+  return {
+    ...record,
+    folderIds: [...cleanedIds, folder.id],
+    folderNames: [...cleanedNames, folder.name],
+  };
+}
+
+/**
+ * Apply a folder mirror to the record set.
+ *
+ * IMPORTANT: only call with records from a COMPLETE walk
+ * (FolderWalkResult.complete === true). On incomplete walks, do not call —
+ * old data stays intact rather than being corrupted.
+ *
+ * Semantics (mirror X's current state for this one folder):
+ *  - Records in walked set gain/keep the folder tag
+ *  - Records NOT in walked set have this folder tag removed (if present)
+ *  - Other folder tags on the same records are untouched
+ *  - Records for tweets we've never seen are added with this folder tag
+ */
+export function applyFolderMirror(
+  existing: BookmarkRecord[],
+  folder: BookmarkFolder,
+  walkedRecords: BookmarkRecord[],
+): { merged: BookmarkRecord[]; stats: FolderMirrorStats } {
+  const byId = new Map(existing.map((r) => [r.id, r]));
+  const walkedIds = new Set(walkedRecords.map((r) => r.id));
+
+  let added = 0;
+  let tagged = 0;
+  let untagged = 0;
+  let unchanged = 0;
+
+  // Pass 1: remove this folder's tag from records no longer in the folder.
+  for (const [id, record] of byId) {
+    if (walkedIds.has(id)) continue;
+    const stripped = withoutFolder(record, folder.id);
+    if (stripped !== record) {
+      byId.set(id, stripped);
+      untagged += 1;
+    }
+  }
+
+  // Pass 2: tag records currently in the folder.
+  for (const walked of walkedRecords) {
+    const prev = byId.get(walked.id);
+
+    if (!prev) {
+      byId.set(walked.id, withFolder(walked, folder));
+      added += 1;
+      continue;
+    }
+
+    const wasTagged = (prev.folderIds ?? []).includes(folder.id);
+    const base = mergeBookmarkRecord(prev, walked);
+    byId.set(walked.id, withFolder(base, folder));
+    if (wasTagged) unchanged += 1;
+    else tagged += 1;
+  }
+
+  const merged = Array.from(byId.values());
+  merged.sort((a, b) => compareBookmarkChronology(b, a));
+  return { merged, stats: { added, tagged, untagged, unchanged } };
+}
+
+/**
+ * Remove a folder tag from every record. Used for orphan cleanup when a
+ * folder has been deleted on X.
+ */
+export function clearFolderEverywhere(
+  existing: BookmarkRecord[],
+  folderId: string,
+): { merged: BookmarkRecord[]; cleared: number } {
+  let cleared = 0;
+  const merged = existing.map((record) => {
+    const next = withoutFolder(record, folderId);
+    if (next !== record) cleared += 1;
+    return next;
+  });
+  return { merged, cleared };
+}
+
+export interface FolderSyncOptions {
+  csrfToken?: string;
+  cookieHeader?: string;
+  browser?: string;
+  chromeUserDataDir?: string;
+  chromeProfileDirectory?: string;
+  firefoxProfileDir?: string;
+  /** If set, sync only the folder with this id (resolved ahead of time). */
+  onlyFolderId?: string;
+  /**
+   * If set, sync only the folder matching this display name.
+   * Resolved against the fetched folder list (case-insensitive
+   * exact-match, then unambiguous prefix).
+   */
+  onlyFolderName?: string;
+  delayMs?: number;
+  onProgress?: (status: FolderSyncProgress) => void;
+}
+
+export interface FolderSyncProgress {
+  phase: 'listing' | 'walking' | 'applying' | 'done';
+  folder?: BookmarkFolder;
+  folderIndex?: number;
+  totalFolders?: number;
+  stats?: FolderMirrorStats;
+}
+
+export interface FolderSyncResult {
+  folders: BookmarkFolder[];
+  perFolder: Array<{ folder: BookmarkFolder; stats: FolderMirrorStats | null; skipped?: string }>;
+  totalAdded: number;
+  totalTagged: number;
+  totalUntagged: number;
+  skippedFolders: Array<{ folder: BookmarkFolder; reason: string }>;
+  orphanFoldersCleared: Array<{ folderId: string; recordsAffected: number }>;
+}
+
+async function resolveFolderSyncCookies(
+  options: FolderSyncOptions,
+): Promise<{ csrfToken: string; cookieHeader?: string }> {
+  if (options.csrfToken) {
+    return { csrfToken: options.csrfToken, cookieHeader: options.cookieHeader };
+  }
+  const config = loadChromeSessionConfig({ browserId: options.browser });
+  if (config.browser.cookieBackend === 'firefox') {
+    const cookies = extractFirefoxXCookies(options.firefoxProfileDir);
+    return { csrfToken: cookies.csrfToken, cookieHeader: cookies.cookieHeader };
+  }
+  const chromeDir = options.chromeUserDataDir ?? config.chromeUserDataDir;
+  const chromeProfile = options.chromeProfileDirectory ?? config.chromeProfileDirectory;
+  const cookies = extractChromeXCookies(chromeDir, chromeProfile, config.browser);
+  return { csrfToken: cookies.csrfToken, cookieHeader: cookies.cookieHeader };
+}
+
+/**
+ * Persist the record set and update meta so `ft status` reflects the new total.
+ * Folder sync can change `totalBookmarks` if the walk discovers records the main
+ * timeline missed; without this, meta stays stale.
+ */
+async function persistFolderCheckpoint(
+  cachePath: string,
+  metaPath: string,
+  records: BookmarkRecord[],
+): Promise<void> {
+  await writeJsonLines(cachePath, records);
+  const syncedAt = new Date().toISOString();
+  const previousMeta: BookmarkCacheMeta | undefined = (await pathExists(metaPath))
+    ? await readJson<BookmarkCacheMeta>(metaPath)
+    : undefined;
+  await writeJson(metaPath, {
+    provider: 'twitter',
+    schemaVersion: 1,
+    lastFullSyncAt: previousMeta?.lastFullSyncAt,
+    lastIncrementalSyncAt: syncedAt,
+    totalBookmarks: records.length,
+  } satisfies BookmarkCacheMeta);
+}
+
+export async function syncBookmarkFolders(
+  options: FolderSyncOptions = {},
+): Promise<FolderSyncResult> {
+  const { csrfToken, cookieHeader } = await resolveFolderSyncCookies(options);
+  const delayMs = options.delayMs ?? 600;
+
+  ensureDataDir();
+  const cachePath = twitterBookmarksCachePath();
+  const metaPath = twitterBookmarksMetaPath();
+  const loaded = await loadExistingBookmarks();
+  let existing = loaded.records;
+
+  options.onProgress?.({ phase: 'listing' });
+  const allFolders = await fetchBookmarkFolders(csrfToken, cookieHeader);
+
+  let targetFolders: BookmarkFolder[];
+  if (options.onlyFolderId) {
+    const match = allFolders.find((f) => f.id === options.onlyFolderId);
+    if (!match) {
+      throw new Error(
+        `Folder "${options.onlyFolderName ?? options.onlyFolderId}" not found on X. ` +
+          `Available: ${allFolders.map((f) => f.name).join(', ') || '(none)'}`
+      );
+    }
+    targetFolders = [match];
+  } else if (options.onlyFolderName) {
+    // Resolve name against fetched list: exact match (case-insensitive) > unambiguous prefix.
+    // Trim whitespace so `ft sync --folder " Coding "` works the same as `--folder Coding`.
+    const lower = options.onlyFolderName.trim().toLowerCase();
+    const exact = allFolders.find((f) => f.name.trim().toLowerCase() === lower);
+    const prefix = allFolders.filter((f) => f.name.trim().toLowerCase().startsWith(lower));
+    const resolved = exact ?? (prefix.length === 1 ? prefix[0] : undefined);
+    if (!resolved) {
+      const hint = prefix.length > 1
+        ? `Multiple matches: ${prefix.map((f) => f.name).join(', ')}. Be more specific.`
+        : `Available: ${allFolders.map((f) => f.name).join(', ') || '(none)'}`;
+      throw new Error(`No folder matches "${options.onlyFolderName}". ${hint}`);
+    }
+    targetFolders = [resolved];
+  } else {
+    targetFolders = allFolders;
+  }
+
+  const perFolder: Array<{ folder: BookmarkFolder; stats: FolderMirrorStats | null; skipped?: string }> = [];
+  const skippedFolders: Array<{ folder: BookmarkFolder; reason: string }> = [];
+  let totalAdded = 0;
+  let totalTagged = 0;
+  let totalUntagged = 0;
+
+  for (let i = 0; i < targetFolders.length; i++) {
+    const folder = targetFolders[i];
+    options.onProgress?.({ phase: 'walking', folder, folderIndex: i, totalFolders: targetFolders.length });
+
+    let walkResult: FolderWalkResult;
+    try {
+      walkResult = await walkFolderTimeline(csrfToken, folder.id, { cookieHeader, delayMs });
+    } catch (err) {
+      const reason = (err as Error).message ?? 'unknown error';
+      skippedFolders.push({ folder, reason });
+      perFolder.push({ folder, stats: null, skipped: reason });
+      continue;
+    }
+
+    if (!walkResult.complete) {
+      const reason = 'incomplete walk (hit page limit)';
+      skippedFolders.push({ folder, reason });
+      perFolder.push({ folder, stats: null, skipped: reason });
+      continue;
+    }
+
+    // A complete walk with 0 records is a legitimate state: the user may have
+    // intentionally emptied the folder on X. Mirror semantics require us to
+    // clear any prior tags for this folder. We rely on walkFolderTimeline's
+    // `complete: true` signal — not a heuristic about prior state — to know
+    // the walk is authoritative.
+    const mirror = applyFolderMirror(existing, folder, walkResult.records);
+    existing = mirror.merged;
+    perFolder.push({ folder, stats: mirror.stats });
+    totalAdded += mirror.stats.added;
+    totalTagged += mirror.stats.tagged;
+    totalUntagged += mirror.stats.untagged;
+
+    options.onProgress?.({
+      phase: 'applying',
+      folder,
+      folderIndex: i,
+      totalFolders: targetFolders.length,
+      stats: mirror.stats,
+    });
+
+    // Checkpoint after each successful folder so a crash loses at most one folder's work.
+    // Also updates bookmarks-meta.json so `ft status` reflects the new total.
+    await persistFolderCheckpoint(cachePath, metaPath, existing);
+
+    if (i < targetFolders.length - 1) {
+      await new Promise((r) => setTimeout(r, Math.max(delayMs, 1000)));
+    }
+  }
+
+  // Orphan cleanup: only on full sync (not single-folder mode).
+  const orphanFoldersCleared: Array<{ folderId: string; recordsAffected: number }> = [];
+  if (!options.onlyFolderId) {
+    const currentFolderIds = new Set(allFolders.map((f) => f.id));
+    const knownTaggedIds = new Set<string>();
+    for (const r of existing) {
+      for (const fid of r.folderIds ?? []) knownTaggedIds.add(fid);
+    }
+    for (const fid of knownTaggedIds) {
+      if (currentFolderIds.has(fid)) continue;
+      const { merged, cleared } = clearFolderEverywhere(existing, fid);
+      existing = merged;
+      if (cleared > 0) orphanFoldersCleared.push({ folderId: fid, recordsAffected: cleared });
+    }
+    if (orphanFoldersCleared.length > 0) {
+      await persistFolderCheckpoint(cachePath, metaPath, existing);
+    }
+  }
+
+  options.onProgress?.({ phase: 'done' });
+
+  return {
+    folders: allFolders,
+    perFolder,
+    totalAdded,
+    totalTagged,
+    totalUntagged,
+    skippedFolders,
+    orphanFoldersCleared,
+  };
 }
 
 // ── Gap-fill: backfill missing data for existing bookmarks ────────────
@@ -643,6 +1317,7 @@ export interface GapFillProgress {
   total: number;
   quotedFetched: number;
   textExpanded: number;
+  articlesEnriched: number;
   failed: number;
 }
 
@@ -655,6 +1330,8 @@ export interface GapFillFailure {
 export interface GapFillResult {
   quotedTweetsFilled: number;
   textExpanded: number;
+  articlesEnriched: number;
+  bookmarkedAtRepaired: number;
   bookmarkedAtMissing: number;
   failed: number;
   failures: GapFillFailure[];
@@ -667,7 +1344,8 @@ export async function syncGaps(options?: {
 }): Promise<GapFillResult> {
   const delayMs = options?.delayMs ?? 300;
   const cachePath = twitterBookmarksCachePath();
-  const records = await readJsonLines<BookmarkRecord>(cachePath);
+  const loaded = sanitizeRecords(await readJsonLines<BookmarkRecord>(cachePath));
+  const records = loaded.records;
 
   // Gap 1: missing quoted tweets
   const needsQuotedTweet = records.filter((r) => r.quotedStatusId && !r.quotedTweet);
@@ -758,6 +1436,7 @@ export async function syncGaps(options?: {
       total,
       quotedFetched,
       textExpanded,
+      articlesEnriched: 0,
       failed,
     });
 
@@ -774,10 +1453,88 @@ export async function syncGaps(options?: {
   // Find bookmarks missing bookmarkedAt (filled on next sync, not via syndication)
   const bookmarkedAtMissing = records.filter((r) => !r.bookmarkedAt).length;
 
-  // Final persist
+  // Final persist (gaps 1+2)
   await writeJsonLines(cachePath, records);
   if (dbQuotedUpdates.length > 0) await updateQuotedTweets(dbQuotedUpdates);
   if (dbTextUpdates.length > 0) await updateBookmarkText(dbTextUpdates);
 
-  return { quotedTweetsFilled: quotedFetched, textExpanded, bookmarkedAtMissing, failed, failures, total };
+  // ── Gap 3: Article enrichment for link-only bookmarks ───────────────────
+  // Bookmarks with < 80 chars of text after stripping URLs are "link-only"
+  // and invisible to search. Fetch the linked article to make them searchable.
+  // Article content goes directly to SQLite (not JSONL) to avoid memory bloat.
+
+  const LINK_ONLY_THRESHOLD = 80;
+  const articleDbUpdates: ArticleUpdate[] = [];
+  let articlesEnriched = 0;
+
+  // Read enriched_at from DB to skip already-enriched bookmarks
+  const enrichedIds = new Set<string>();
+  try {
+    const { openDb } = await import('./db.js');
+    const { twitterBookmarksIndexPath } = await import('./paths.js');
+    const db = await openDb(twitterBookmarksIndexPath());
+    try {
+      const rows = db.exec('SELECT id FROM bookmarks WHERE enriched_at IS NOT NULL');
+      for (const row of rows[0]?.values ?? []) enrichedIds.add(row[0] as string);
+    } finally { db.close(); }
+  } catch { /* DB may not exist yet */ }
+
+  // Filter to link-only bookmarks not yet enriched
+  const textWithoutUrls = (text: string) => text.replace(/https?:\/\/\S+/g, '').trim();
+  const needsEnrichment = records.filter((r) => {
+    if (enrichedIds.has(r.id)) return false;
+    if (!r.links?.length) return false;
+    return textWithoutUrls(r.text ?? '').length < LINK_ONLY_THRESHOLD;
+  });
+
+  const articleTotal = Math.min(needsEnrichment.length, 50); // cap per run
+  for (let i = 0; i < articleTotal; i++) {
+    const record = needsEnrichment[i];
+    // Find the first non-twitter link
+    let targetUrl: string | null = null;
+    for (const link of record.links ?? []) {
+      const resolved = link.includes('t.co/') ? await resolveTcoLink(link) : link;
+      if (resolved) { targetUrl = resolved; break; }
+    }
+
+    if (targetUrl) {
+      const article = await fetchArticle(targetUrl);
+      if (article && article.text.length >= 50) {
+        articleDbUpdates.push({
+          id: record.id,
+          articleTitle: article.title,
+          articleText: article.text,
+          articleSite: article.siteName,
+        });
+        articlesEnriched++;
+      }
+    }
+
+    options?.onProgress?.({
+      done: allFetchIds.length + i + 1,
+      total: allFetchIds.length + articleTotal,
+      quotedFetched,
+      textExpanded,
+      articlesEnriched,
+      failed,
+    });
+
+    // Rate limit: 500ms between fetches
+    if (i < articleTotal - 1) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+
+  if (articleDbUpdates.length > 0) await updateArticleContent(articleDbUpdates);
+
+  return {
+    quotedTweetsFilled: quotedFetched,
+    textExpanded,
+    articlesEnriched,
+    bookmarkedAtRepaired: loaded.repaired,
+    bookmarkedAtMissing,
+    failed,
+    failures,
+    total: allFetchIds.length + articleTotal,
+  };
 }

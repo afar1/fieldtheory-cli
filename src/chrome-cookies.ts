@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, unlinkSync, copyFileSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, win32 as winPath } from 'node:path';
 import { tmpdir, platform } from 'node:os';
 import { pbkdf2Sync, createDecipheriv, randomUUID } from 'node:crypto';
 import type { BrowserDef } from './browsers.js';
@@ -78,6 +78,129 @@ function getLinuxKeys(browser: BrowserDef): LinuxKeys {
 
 // ── Windows DPAPI ────────────────────────────────────────────────────────────
 
+type WindowsDpapiOutputMode = 'base64' | 'utf8';
+
+const WINDOWS_DPAPI_RUNTIME_HINT =
+  'DPAPI types are unavailable in this PowerShell runtime. Prefer Windows PowerShell (powershell.exe).';
+
+export function windowsPowerShellCandidates(
+  env: NodeJS.ProcessEnv = process.env,
+  pathExists: (path: string) => boolean = existsSync,
+): string[] {
+  const systemRoot = env.SystemRoot || env.WINDIR;
+  if (!systemRoot || !winPath.isAbsolute(systemRoot)) {
+    return [];
+  }
+
+  const candidates = [
+    winPath.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    winPath.join(systemRoot, 'Sysnative', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+  ];
+
+  return [...new Set(candidates.filter(candidate => pathExists(candidate)))];
+}
+
+export function buildWindowsDpapiScript(outputMode: WindowsDpapiOutputMode): string {
+  const outputLine = outputMode === 'base64'
+    ? '    [System.Console]::WriteLine([System.Convert]::ToBase64String($dec))'
+    : '    [System.Console]::WriteLine([System.Text.Encoding]::UTF8.GetString($dec))';
+
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    "$assemblies = @('System.Security.Cryptography.ProtectedData', 'System.Security')",
+    '$dpapiReady = $false',
+    'foreach ($assembly in $assemblies) {',
+    '  try { Add-Type -AssemblyName $assembly -ErrorAction Stop | Out-Null } catch {}',
+    '  try {',
+    '    [void][System.Security.Cryptography.ProtectedData]',
+    '    [void][System.Security.Cryptography.DataProtectionScope]',
+    '    $dpapiReady = $true',
+    '    break',
+    '  } catch {}',
+    '}',
+    'if (-not $dpapiReady) {',
+    `  throw '${WINDOWS_DPAPI_RUNTIME_HINT}'`,
+    '}',
+    '$input | ForEach-Object {',
+    '  $line = "$_".Trim()',
+    '  if ($line) {',
+    '    $bytes = [System.Convert]::FromBase64String($line)',
+    '    $dec = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)',
+    outputLine,
+    '  }',
+    '}',
+  ].join('\n');
+}
+
+interface WindowsDpapiOptions {
+  env?: NodeJS.ProcessEnv;
+  failureLabel: string;
+  pathExists?: (path: string) => boolean;
+  spawn?: typeof spawnSync;
+  timeoutMs: number;
+}
+
+export function runWindowsDpapi(
+  encryptedValue: Buffer,
+  outputMode: WindowsDpapiOutputMode,
+  options: WindowsDpapiOptions,
+): string {
+  const spawn = options.spawn ?? spawnSync;
+  const script = buildWindowsDpapiScript(outputMode);
+  const commands = windowsPowerShellCandidates(options.env, options.pathExists);
+  let sawRuntime = false;
+  let lastProblem = '';
+
+  for (const command of commands) {
+    const result = spawn(
+      command,
+      ['-NonInteractive', '-NoProfile', '-Command', script],
+      {
+        input: encryptedValue.toString('base64'),
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: options.timeoutMs,
+        windowsHide: true,
+      }
+    );
+
+    const out = typeof result.stdout === 'string' ? result.stdout.trim() : '';
+    const err = typeof result.stderr === 'string' ? result.stderr.trim() : '';
+
+    if (result.error) {
+      const error = result.error as NodeJS.ErrnoException;
+      if (error.code === 'ENOENT') continue;
+      sawRuntime = true;
+      lastProblem = `${command}: ${error.message}`;
+      continue;
+    }
+
+    sawRuntime = true;
+    if (result.status === 0 && out) return out;
+
+    const detail = err || `Process exited with status ${result.status ?? 'unknown'}.`;
+    if (!lastProblem || detail.includes(WINDOWS_DPAPI_RUNTIME_HINT)) {
+      lastProblem = `${command}: ${detail}`;
+    }
+  }
+
+  if (!sawRuntime) {
+    throw new Error(
+      `${options.failureLabel}\n` +
+      'Could not find a trusted Windows PowerShell binary for DPAPI decryption.\n' +
+      'Expected Windows PowerShell under %SystemRoot%\\System32 or %SystemRoot%\\Sysnative.\n' +
+      'Or pass cookies manually:  ft sync --cookies <ct0> <auth_token>'
+    );
+  }
+
+  throw new Error(
+    `${options.failureLabel}\n` +
+    (lastProblem ? `${lastProblem}\n` : '') +
+    'Try running as the same Windows user that owns the browser profile.\n' +
+    'Or pass cookies manually:  ft sync --cookies <ct0> <auth_token>'
+  );
+}
+
 function getWindowsKey(chromeUserDataDir: string, browser: BrowserDef): Buffer {
   const localStatePath = join(chromeUserDataDir, 'Local State');
   if (!existsSync(localStatePath)) {
@@ -109,34 +232,10 @@ function getWindowsKey(chromeUserDataDir: string, browser: BrowserDef): Buffer {
   }
   const encryptedKey = encryptedKeyWithPrefix.subarray(5);
 
-  // Pipe the encrypted key via stdin to avoid command injection.
-  const result = spawnSync(
-    'powershell',
-    ['-NonInteractive', '-NoProfile', '-Command', [
-      '$input | ForEach-Object {',
-      '  $bytes = [System.Convert]::FromBase64String($_)',
-      '  $dec = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)',
-      '  [System.Console]::WriteLine([System.Convert]::ToBase64String($dec))',
-      '}',
-    ].join('\n')],
-    {
-      input: encryptedKey.toString('base64'),
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 10000,
-    }
-  );
-
-  const out = typeof result.stdout === 'string' ? result.stdout.trim() : '';
-  const err = typeof result.stderr === 'string' ? result.stderr.trim() : '';
-  if (result.status !== 0 || !out) {
-    throw new Error(
-      'Could not decrypt encryption key via DPAPI.\n' +
-      (err ? err + '\n' : '') +
-      'Try running as the same Windows user that owns the browser profile.\n' +
-      'Or pass cookies manually:  ft sync --cookies <ct0> <auth_token>'
-    );
-  }
+  const out = runWindowsDpapi(encryptedKey, 'base64', {
+    failureLabel: 'Could not decrypt encryption key via DPAPI.',
+    timeoutMs: 10000,
+  });
 
   return Buffer.from(out, 'base64');
 }
@@ -157,25 +256,15 @@ function decryptWindowsCookie(encryptedValue: Buffer, key: Buffer): string {
   }
 
   // Older DPAPI-only cookies — pipe via stdin to PowerShell
-  const result = spawnSync(
-    'powershell',
-    ['-NonInteractive', '-NoProfile', '-Command', [
-      '$input | ForEach-Object {',
-      '  $bytes = [System.Convert]::FromBase64String($_)',
-      '  $dec = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)',
-      '  [System.Console]::WriteLine([System.Text.Encoding]::UTF8.GetString($dec))',
-      '}',
-    ].join('\n')],
-    {
-      input: encryptedValue.toString('base64'),
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 5000,
-    }
-  );
-
-  const out = typeof result.stdout === 'string' ? result.stdout.trim() : '';
-  if (result.status === 0 && out) return out;
+  try {
+    const out = runWindowsDpapi(encryptedValue, 'utf8', {
+      failureLabel: 'Could not decrypt Windows cookie via DPAPI.',
+      timeoutMs: 5000,
+    });
+    if (out) return out;
+  } catch {
+    // Fall back to raw UTF-8 to preserve older best-effort behavior.
+  }
 
   return encryptedValue.toString('utf8');
 }

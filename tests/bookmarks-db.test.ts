@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildIndex, searchBookmarks, getStats, formatSearchResults } from '../src/bookmarks-db.js';
+import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, sanitizeFtsQuery } from '../src/bookmarks-db.js';
+import { openDb, saveDb } from '../src/db.js';
+import { twitterBookmarksIndexPath } from '../src/paths.js';
 
 const FIXTURES = [
   { id: '1', tweetId: '1', url: 'https://x.com/alice/status/1', text: 'Machine learning is transforming healthcare', authorHandle: 'alice', authorName: 'Alice Smith', syncedAt: '2026-01-01T00:00:00Z', postedAt: '2026-01-01T12:00:00Z', language: 'en', engagement: { likeCount: 100, repostCount: 10 }, mediaObjects: [], links: ['https://example.com'], tags: [], ingestedVia: 'graphql' },
@@ -11,9 +13,9 @@ const FIXTURES = [
   { id: '3', tweetId: '3', url: 'https://x.com/alice/status/3', text: 'Deep learning models need massive compute', authorHandle: 'alice', authorName: 'Alice Smith', syncedAt: '2026-03-01T00:00:00Z', postedAt: '2026-03-01T12:00:00Z', language: 'en', engagement: { likeCount: 200, repostCount: 30 }, mediaObjects: [{ type: 'photo', url: 'https://img.com/1.jpg' }], links: [], tags: [], ingestedVia: 'graphql' },
 ];
 
-async function withIsolatedDataDir(fn: () => Promise<void>): Promise<void> {
+async function withIsolatedDataDir(fn: () => Promise<void>, fixtures: any[] = FIXTURES): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), 'ft-test-'));
-  const jsonl = FIXTURES.map((r) => JSON.stringify(r)).join('\n') + '\n';
+  const jsonl = fixtures.map((r) => JSON.stringify(r)).join('\n') + '\n';
   await writeFile(path.join(dir, 'bookmarks.jsonl'), jsonl);
 
   const saved = process.env.FT_DATA_DIR;
@@ -31,6 +33,52 @@ test('buildIndex creates a searchable database', async () => {
     const result = await buildIndex();
     assert.equal(result.recordCount, 3);
     assert.equal(result.newRecords, 3);
+  });
+});
+
+test('buildIndex refreshes existing rows without dropping classifications', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+
+    const dbPath = twitterBookmarksIndexPath();
+    const db = await openDb(dbPath);
+    try {
+      db.run(
+        `UPDATE bookmarks
+         SET categories = ?, primary_category = ?, domains = ?, primary_domain = ?, github_urls = ?
+         WHERE id = ?`,
+        ['ai,ml', 'research', 'example.com', 'example.com', '["https://github.com/openai/test"]', '1']
+      );
+      saveDb(db, dbPath);
+    } finally {
+      db.close();
+    }
+
+    const updatedFixtures = FIXTURES.map((fixture) =>
+      fixture.id === '1'
+        ? {
+            ...fixture,
+            text: 'Machine learning note updated',
+            bookmarkedAt: '2026-04-02T00:00:00Z',
+          }
+        : fixture
+    );
+    const jsonl = updatedFixtures.map((r) => JSON.stringify(r)).join('\n') + '\n';
+    await writeFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), jsonl);
+
+    const result = await buildIndex();
+    assert.equal(result.recordCount, 3);
+    assert.equal(result.newRecords, 0);
+
+    const bookmark = await getBookmarkById('1');
+    assert.ok(bookmark);
+    assert.equal(bookmark.text, 'Machine learning note updated');
+    assert.equal(bookmark.bookmarkedAt, '2026-04-02T00:00:00Z');
+    assert.deepEqual(bookmark.categories, ['ai', 'ml']);
+    assert.equal(bookmark.primaryCategory, 'research');
+    assert.deepEqual(bookmark.domains, ['example.com']);
+    assert.equal(bookmark.primaryDomain, 'example.com');
+    assert.deepEqual(bookmark.githubUrls, ['https://github.com/openai/test']);
   });
 });
 
@@ -82,6 +130,46 @@ test('getStats returns correct aggregate data', async () => {
   });
 });
 
+test('getStats returns chronological date range for legacy Twitter timestamps', async () => {
+  const fixtures = [
+    {
+      id: 'old',
+      tweetId: '10',
+      url: 'https://x.com/old/status/10',
+      text: 'Old tweet',
+      authorHandle: 'old',
+      authorName: 'Old',
+      syncedAt: '2026-04-01T00:00:00Z',
+      postedAt: 'Fri Apr 03 12:00:00 +0000 2020',
+      mediaObjects: [],
+      links: [],
+      tags: [],
+      ingestedVia: 'graphql',
+    },
+    {
+      id: 'new',
+      tweetId: '20',
+      url: 'https://x.com/new/status/20',
+      text: 'New tweet',
+      authorHandle: 'new',
+      authorName: 'New',
+      syncedAt: '2026-04-01T00:00:00Z',
+      postedAt: 'Wed Apr 08 06:30:15 +0000 2026',
+      mediaObjects: [],
+      links: [],
+      tags: [],
+      ingestedVia: 'graphql',
+    },
+  ];
+
+  await withIsolatedDataDir(async () => {
+    await buildIndex({ force: true });
+    const stats = await getStats();
+    assert.equal(stats.dateRange.earliest, '2020-04-03');
+    assert.equal(stats.dateRange.latest, '2026-04-08');
+  }, fixtures);
+});
+
 test('formatSearchResults: formats results with author, date, text, url', () => {
   const results = [
     { id: '1', url: 'https://x.com/test/status/1', text: 'Hello world', authorHandle: 'test', authorName: 'Test', postedAt: '2026-01-15T00:00:00Z', score: -1.5 },
@@ -95,4 +183,49 @@ test('formatSearchResults: formats results with author, date, text, url', () => 
 
 test('formatSearchResults: returns message for empty results', () => {
   assert.equal(formatSearchResults([]), 'No results found.');
+});
+
+// ── sanitizeFtsQuery: FTS5 operator handling ──────────────────────────
+
+test('sanitizeFtsQuery: leaves plain queries alone', () => {
+  assert.equal(sanitizeFtsQuery('rust async'), 'rust async');
+  assert.equal(sanitizeFtsQuery('machine learning'), 'machine learning');
+});
+
+test('sanitizeFtsQuery: escapes parentheses (was parse error before)', () => {
+  const result = sanitizeFtsQuery('foo(bar)');
+  assert.ok(result.includes('"foo(bar)"'));
+});
+
+test('sanitizeFtsQuery: escapes leading dash', () => {
+  const result = sanitizeFtsQuery('-foo');
+  assert.ok(result.includes('"-foo"'));
+});
+
+test('sanitizeFtsQuery: escapes leading plus', () => {
+  const result = sanitizeFtsQuery('+foo');
+  assert.ok(result.includes('"+foo"'));
+});
+
+test('sanitizeFtsQuery: escapes column filters', () => {
+  const result = sanitizeFtsQuery('author:foo');
+  assert.ok(result.includes('"author:foo"'));
+});
+
+test('sanitizeFtsQuery: escapes Boolean keywords', () => {
+  const result = sanitizeFtsQuery('rust AND async');
+  assert.ok(result.includes('"rust"'));
+  assert.ok(result.includes('"AND"'));
+  assert.ok(result.includes('"async"'));
+});
+
+test('sanitizeFtsQuery: escapes prefix wildcards', () => {
+  const result = sanitizeFtsQuery('java*');
+  assert.ok(result.includes('"java*"'));
+});
+
+test('sanitizeFtsQuery: strips internal quotes to avoid double-escaping', () => {
+  const result = sanitizeFtsQuery('"foo"bar');
+  // Internal quotes stripped; term wrapped once
+  assert.ok(!result.includes('""'));
 });
