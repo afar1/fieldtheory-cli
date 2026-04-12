@@ -38,13 +38,13 @@ Chrome cookies → GraphQL API → JSONL cache → SQLite FTS5 index
                                     ↓
                            Regex classification
                                     ↓
-                         Search / List / Viz
+                       Search / List / Viz / Browse (fzf)
 ```
 
 ### Dependencies
 
-All pure JavaScript/WASM — no native bindings:
 - `commander` — CLI framework
 - `sql.js` + `sql.js-fts5` — SQLite in WebAssembly
 - `zod` — schema validation
 - `dotenv` — .env file loading
+- `fzf` — required for `ft browse` (external binary)
