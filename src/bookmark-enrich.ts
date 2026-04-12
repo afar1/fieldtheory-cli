@@ -104,18 +104,117 @@ function isTwitterUrl(url: string): boolean {
   } catch { return false; }
 }
 
-function isSafeUrl(url: string): boolean {
+/**
+ * Block any URL that would resolve to a loopback, private, link-local,
+ * or unique-local address in either IPv4 or IPv6, including numeric
+ * encodings and IPv4-mapped-in-IPv6 forms. Also rejects non-http(s) schemes.
+ *
+ * This is called on the initial URL AND every redirect hop.
+ */
+export function isSafeUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-    // Block common private/reserved hostnames
-    const host = parsed.hostname;
-    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return false;
-    if (host.startsWith('10.') || host.startsWith('192.168.')) return false;
-    if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return false;
-    if (host === '169.254.169.254') return false; // cloud metadata
+
+    // URL.hostname for IPv6 normalizes brackets differently across Node versions;
+    // strip them so downstream string checks are uniform.
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+
+    if (host === 'localhost') return false;
+
+    // ─── Numeric IPv4 encodings (decimal, hex, octal) ───────────────
+    // new URL('http://2130706433/').hostname === '2130706433'
+    // new URL('http://0x7f000001/').hostname === '0x7f000001'
+    if (/^\d+$/.test(host)) return false;           // decimal: 2130706433
+    if (/^0x[0-9a-f]+$/.test(host)) return false;   // hex: 0x7f000001
+    if (/^0\d/.test(host) && /^\d+$/.test(host.slice(1))) return false; // octal leading zero
+
+    // ─── Standard IPv4 dotted quad checks ───────────────────────────
+    // Match as dotted quad first so startsWith tests don't accidentally match domains
+    // starting with "10" or "127" that happen to contain a dot.
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+      if (host === '0.0.0.0') return false;
+      if (/^127\./.test(host)) return false;                    // 127.0.0.0/8 loopback
+      if (/^10\./.test(host)) return false;                     // 10.0.0.0/8
+      if (/^192\.168\./.test(host)) return false;               // 192.168.0.0/16
+      if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return false; // 172.16.0.0/12
+      if (/^169\.254\./.test(host)) return false;               // 169.254.0.0/16 link-local + metadata
+      if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host)) return false; // 100.64/10 CGNAT
+    }
+
+    // ─── IPv6 checks ────────────────────────────────────────────────
+    if (host === '::' || host === '::1') return false;
+    if (host.startsWith('fe80:')) return false;  // fe80::/10 link-local
+    if (host.startsWith('fc') && host.includes(':')) return false; // fc00::/8 unique-local
+    if (host.startsWith('fd') && host.includes(':')) return false; // fd00::/8 unique-local
+    if (host.startsWith('::ffff:')) return false; // IPv4-mapped IPv6: ::ffff:127.0.0.1 etc.
+    if (host.startsWith('::') && /\./.test(host)) return false; // IPv4-compat IPv6
+
     return true;
   } catch { return false; }
+}
+
+// ── Manual redirect walker ─────────────────────────────────────────────────
+
+const MAX_REDIRECT_HOPS = 5;
+
+const BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+};
+
+/**
+ * Fetch a URL, walking redirects manually and re-validating every hop
+ * against isSafeUrl. A safe-looking URL that redirects to 127.0.0.1 or
+ * AWS metadata is blocked on the next hop, not allowed through.
+ *
+ * Returns null if any hop fails validation, the fetch errors, or the
+ * redirect limit is exceeded.
+ */
+async function fetchFollowingRedirects(
+  url: string,
+  options: { signal?: AbortSignal; method?: 'GET' | 'HEAD' } = {},
+): Promise<{ response: Response; finalUrl: string } | null> {
+  const method = options.method ?? 'GET';
+  let current = url;
+
+  for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+    if (!isSafeUrl(current)) return null;
+
+    let res: Response;
+    try {
+      res = await fetch(current, {
+        method,
+        headers: BROWSER_HEADERS,
+        redirect: 'manual',
+        signal: options.signal,
+      });
+    } catch {
+      return null;
+    }
+
+    // 304 Not Modified is in the 3xx range but isn't a redirect.
+    const isRedirect = res.status >= 300 && res.status < 400 && res.status !== 304;
+    if (!isRedirect) {
+      return { response: res, finalUrl: current };
+    }
+
+    const location = res.headers.get('location');
+    if (!location) {
+      return { response: res, finalUrl: current };
+    }
+
+    try { await res.body?.cancel(); } catch { /* ignore */ }
+
+    try {
+      // Relative redirects resolve against the current URL.
+      current = new URL(location, current).toString();
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
 }
 
 // ── Fetch with size limit ──────────────────────────────────────────────────
@@ -125,15 +224,9 @@ async function fetchWithLimit(url: string): Promise<string | null> {
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
   try {
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      },
-      redirect: 'follow',
-      signal: controller.signal,
-    });
-
+    const result = await fetchFollowingRedirects(url, { signal: controller.signal });
+    if (!result) return null;
+    const res = result.response;
     if (!res.ok) return null;
 
     const contentType = res.headers.get('content-type') ?? '';
@@ -176,20 +269,22 @@ export async function fetchArticle(url: string): Promise<ArticleContent | null> 
 }
 
 /**
- * Resolve t.co shortlinks — returns the expanded URL without fetching the full page.
- * Returns null if resolution fails.
+ * Resolve t.co shortlinks — returns the expanded URL after walking
+ * redirects, with isSafeUrl re-checked on every hop. Returns null if any
+ * hop points at a blocked host or resolution fails.
  */
 export async function resolveTcoLink(url: string): Promise<string | null> {
   if (!url.includes('t.co/')) return url;
-  try {
-    const res = await fetch(url, {
-      method: 'HEAD',
-      redirect: 'follow',
-      signal: AbortSignal.timeout(5_000),
-    });
-    const resolved = res.url;
-    // Skip if it resolved to another t.co or to a twitter media URL
-    if (resolved.includes('t.co/') || isTwitterUrl(resolved)) return null;
-    return resolved;
-  } catch { return null; }
+
+  const result = await fetchFollowingRedirects(url, {
+    method: 'HEAD',
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!result) return null;
+
+  try { await result.response.body?.cancel(); } catch { /* ignore */ }
+
+  const resolved = result.finalUrl;
+  if (resolved.includes('t.co/') || isTwitterUrl(resolved)) return null;
+  return resolved;
 }

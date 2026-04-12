@@ -3,13 +3,17 @@ import assert from 'node:assert/strict';
 import {
   convertTweetToRecord,
   parseBookmarksResponse,
+  parseFolderTimelineResponse,
   sanitizeBookmarkedAt,
   scoreRecord,
   mergeBookmarkRecord,
   mergeRecords,
+  applyFolderMirror,
+  clearFolderEverywhere,
   formatSyncResult,
 } from '../src/graphql-bookmarks.js';
-import type { BookmarkRecord } from '../src/types.js';
+import { resolveFolder, formatFolderMirrorStats } from '../src/cli.js';
+import type { BookmarkFolder, BookmarkRecord } from '../src/types.js';
 
 const NOW = '2026-03-28T00:00:00.000Z';
 
@@ -583,4 +587,349 @@ test('formatSyncResult: formats all fields', () => {
   assert.ok(result.includes('300'));
   assert.ok(result.includes('end of bookmarks'));
   assert.ok(result.includes('/tmp/cache.jsonl'));
+});
+
+// ── Folder support ─────────────────────────────────────────────────────
+
+const CODING_FOLDER: BookmarkFolder = { id: 'f-coding', name: 'Coding' };
+const AI_FOLDER: BookmarkFolder = { id: 'f-ai', name: 'AI Research' };
+
+test('parseFolderTimelineResponse: parses bookmark_collection_timeline shape', () => {
+  const tr = makeTweetResult();
+  const resp = {
+    data: {
+      bookmark_collection_timeline: {
+        timeline: {
+          instructions: [
+            {
+              type: 'TimelineAddEntries',
+              entries: [
+                { entryId: 'tweet-0', content: { itemContent: { tweet_results: { result: tr } } } },
+                { entryId: 'cursor-bottom-xyz', content: { value: 'cursor-abc' } },
+              ],
+            },
+          ],
+        },
+      },
+    },
+  };
+  const result = parseFolderTimelineResponse(resp, NOW);
+  assert.equal(result.records.length, 1);
+  assert.equal(result.records[0].id, '1234567890');
+  assert.equal(result.nextCursor, 'cursor-abc');
+});
+
+test('parseFolderTimelineResponse: falls back to bookmark_folder_timeline shape', () => {
+  const tr = makeTweetResult();
+  const resp = {
+    data: {
+      bookmark_folder_timeline: {
+        timeline: {
+          instructions: [
+            { type: 'TimelineAddEntries', entries: [
+              { entryId: 'tweet-0', content: { itemContent: { tweet_results: { result: tr } } } },
+            ] },
+          ],
+        },
+      },
+    },
+  };
+  const result = parseFolderTimelineResponse(resp, NOW);
+  assert.equal(result.records.length, 1);
+});
+
+test('parseFolderTimelineResponse: returns empty for missing data', () => {
+  const result = parseFolderTimelineResponse({}, NOW);
+  assert.equal(result.records.length, 0);
+  assert.equal(result.nextCursor, undefined);
+});
+
+test('applyFolderMirror: tags records in the walked set', () => {
+  const existing = [
+    makeRecord({ id: '1', tweetId: '1' }),
+    makeRecord({ id: '2', tweetId: '2' }),
+  ];
+  const walked = [makeRecord({ id: '1', tweetId: '1' })];
+
+  const { merged, stats } = applyFolderMirror(existing, CODING_FOLDER, walked);
+
+  assert.equal(stats.tagged, 1);
+  assert.equal(stats.untagged, 0);
+  assert.equal(stats.added, 0);
+
+  const record1 = merged.find((r) => r.id === '1')!;
+  const record2 = merged.find((r) => r.id === '2')!;
+  assert.deepEqual(record1.folderIds, ['f-coding']);
+  assert.deepEqual(record1.folderNames, ['Coding']);
+  assert.deepEqual(record2.folderIds ?? [], []);
+});
+
+test('applyFolderMirror: removes folder tag from records NOT in walked set (mirror semantics)', () => {
+  const existing = [
+    makeRecord({ id: '1', tweetId: '1', folderIds: ['f-coding'], folderNames: ['Coding'] }),
+    makeRecord({ id: '2', tweetId: '2', folderIds: ['f-coding'], folderNames: ['Coding'] }),
+  ];
+  // User moved record 2 out of Coding on X; walk only returns record 1
+  const walked = [makeRecord({ id: '1', tweetId: '1' })];
+
+  const { merged, stats } = applyFolderMirror(existing, CODING_FOLDER, walked);
+
+  assert.equal(stats.untagged, 1);
+  const record2 = merged.find((r) => r.id === '2')!;
+  assert.deepEqual(record2.folderIds, []);
+  assert.deepEqual(record2.folderNames, []);
+});
+
+test('applyFolderMirror: preserves OTHER folder tags when removing one', () => {
+  const existing = [
+    makeRecord({
+      id: '1',
+      tweetId: '1',
+      folderIds: ['f-coding', 'f-ai'],
+      folderNames: ['Coding', 'AI Research'],
+    }),
+  ];
+  // Record 1 is no longer in Coding, but should still be in AI Research
+  const walked: BookmarkRecord[] = [];
+
+  const { merged, stats } = applyFolderMirror(existing, CODING_FOLDER, walked);
+
+  assert.equal(stats.untagged, 1);
+  const record = merged[0];
+  assert.deepEqual(record.folderIds, ['f-ai']);
+  assert.deepEqual(record.folderNames, ['AI Research']);
+});
+
+test('applyFolderMirror: adds new records discovered during folder walk', () => {
+  const existing: BookmarkRecord[] = [];
+  const walked = [makeRecord({ id: 'new-1', tweetId: 'new-1' })];
+
+  const { merged, stats } = applyFolderMirror(existing, CODING_FOLDER, walked);
+
+  assert.equal(stats.added, 1);
+  assert.equal(merged.length, 1);
+  assert.deepEqual(merged[0].folderIds, ['f-coding']);
+  assert.deepEqual(merged[0].folderNames, ['Coding']);
+});
+
+test('applyFolderMirror: re-tagging an already-tagged record is unchanged', () => {
+  const existing = [
+    makeRecord({ id: '1', tweetId: '1', folderIds: ['f-coding'], folderNames: ['Coding'] }),
+  ];
+  const walked = [makeRecord({ id: '1', tweetId: '1' })];
+
+  const { merged, stats } = applyFolderMirror(existing, CODING_FOLDER, walked);
+
+  assert.equal(stats.unchanged, 1);
+  assert.equal(stats.added, 0);
+  assert.equal(stats.tagged, 0);
+  assert.equal(stats.untagged, 0);
+  assert.deepEqual(merged[0].folderIds, ['f-coding']);
+  assert.deepEqual(merged[0].folderNames, ['Coding']);
+});
+
+test('applyFolderMirror: updates folder name on rename (same folder id)', () => {
+  const existing = [
+    makeRecord({ id: '1', tweetId: '1', folderIds: ['f-coding'], folderNames: ['Coding'] }),
+  ];
+  const walked = [makeRecord({ id: '1', tweetId: '1' })];
+  const renamedFolder: BookmarkFolder = { id: 'f-coding', name: 'Software' };
+
+  const { merged } = applyFolderMirror(existing, renamedFolder, walked);
+
+  assert.deepEqual(merged[0].folderIds, ['f-coding']);
+  assert.deepEqual(merged[0].folderNames, ['Software']);
+});
+
+test('applyFolderMirror: does not duplicate tags on repeated mirrors', () => {
+  const existing = [makeRecord({ id: '1', tweetId: '1' })];
+  const walked = [makeRecord({ id: '1', tweetId: '1' })];
+
+  const first = applyFolderMirror(existing, CODING_FOLDER, walked);
+  const second = applyFolderMirror(first.merged, CODING_FOLDER, walked);
+
+  assert.deepEqual(second.merged[0].folderIds, ['f-coding']);
+  assert.deepEqual(second.merged[0].folderNames, ['Coding']);
+  assert.equal(second.merged[0].folderIds!.length, 1);
+});
+
+test('clearFolderEverywhere: removes folder tag from all records', () => {
+  const existing = [
+    makeRecord({ id: '1', tweetId: '1', folderIds: ['f-coding', 'f-ai'], folderNames: ['Coding', 'AI Research'] }),
+    makeRecord({ id: '2', tweetId: '2', folderIds: ['f-coding'], folderNames: ['Coding'] }),
+    makeRecord({ id: '3', tweetId: '3' }),
+  ];
+
+  const { merged, cleared } = clearFolderEverywhere(existing, 'f-coding');
+
+  assert.equal(cleared, 2);
+  const r1 = merged.find((r) => r.id === '1')!;
+  const r2 = merged.find((r) => r.id === '2')!;
+  const r3 = merged.find((r) => r.id === '3')!;
+  assert.deepEqual(r1.folderIds, ['f-ai']);
+  assert.deepEqual(r1.folderNames, ['AI Research']);
+  assert.deepEqual(r2.folderIds, []);
+  assert.deepEqual(r2.folderNames, []);
+  assert.equal(r3.folderIds, undefined);
+});
+
+test('applyFolderMirror: parallel arrays stay aligned after multiple untags', () => {
+  // Record has three folders. Two of them get emptied (walked sets return nothing).
+  // After both clears, folderIds and folderNames should still match positionally.
+  const F1: BookmarkFolder = { id: 'f1', name: 'F-One' };
+  const F2: BookmarkFolder = { id: 'f2', name: 'F-Two' };
+  const F3: BookmarkFolder = { id: 'f3', name: 'F-Three' };
+  const existing = [
+    makeRecord({
+      id: '1',
+      tweetId: '1',
+      folderIds: ['f1', 'f2', 'f3'],
+      folderNames: ['F-One', 'F-Two', 'F-Three'],
+    }),
+  ];
+
+  // Simulate clearing f1 (no records in walk)
+  const step1 = applyFolderMirror(existing, F1, []);
+  assert.equal(step1.stats.untagged, 1);
+  assert.equal(step1.merged[0].folderIds!.length, 2);
+  assert.equal(step1.merged[0].folderNames!.length, 2);
+  assert.deepEqual(step1.merged[0].folderIds, ['f2', 'f3']);
+  assert.deepEqual(step1.merged[0].folderNames, ['F-Two', 'F-Three']);
+
+  // Now clear f3 — f2 must remain and arrays still aligned
+  const step2 = applyFolderMirror(step1.merged, F3, []);
+  assert.deepEqual(step2.merged[0].folderIds, ['f2']);
+  assert.deepEqual(step2.merged[0].folderNames, ['F-Two']);
+
+  // Unused reference to avoid unused-var lint noise
+  void F2;
+});
+
+test('applyFolderMirror: tag-then-rename-then-walk keeps arrays aligned', () => {
+  const original: BookmarkFolder = { id: 'f1', name: 'Coding' };
+  const renamed: BookmarkFolder = { id: 'f1', name: 'Software' };
+  const existing = [makeRecord({ id: '1', tweetId: '1' })];
+  const walked = [makeRecord({ id: '1', tweetId: '1' })];
+
+  const first = applyFolderMirror(existing, original, walked);
+  assert.deepEqual(first.merged[0].folderIds, ['f1']);
+  assert.deepEqual(first.merged[0].folderNames, ['Coding']);
+
+  const second = applyFolderMirror(first.merged, renamed, walked);
+  assert.deepEqual(second.merged[0].folderIds, ['f1']);
+  assert.deepEqual(second.merged[0].folderNames, ['Software']);
+});
+
+test('main-sync merge preserves folder tags on existing records', () => {
+  // Main sync never carries folder data — records from main sync have
+  // no folderIds/folderNames. Spread merge should preserve them.
+  const existing = [
+    makeRecord({ id: '1', tweetId: '1', folderIds: ['f-coding'], folderNames: ['Coding'] }),
+  ];
+  const incoming = [makeRecord({ id: '1', tweetId: '1', text: 'Updated' })];
+
+  const { merged } = mergeRecords(existing, incoming);
+
+  assert.equal(merged[0].text, 'Updated');
+  assert.deepEqual(merged[0].folderIds, ['f-coding']);
+  assert.deepEqual(merged[0].folderNames, ['Coding']);
+});
+
+// ── resolveFolder helper ───────────────────────────────────────────────
+
+const FOLDERS: BookmarkFolder[] = [
+  { id: 'f1', name: 'Coding' },
+  { id: 'f2', name: 'AI Research' },
+  { id: 'f3', name: 'AI Tools' },
+  { id: 'f4', name: 'Music' },
+];
+
+test('resolveFolder: exact case-insensitive match', () => {
+  assert.equal(resolveFolder(FOLDERS, 'coding').id, 'f1');
+  assert.equal(resolveFolder(FOLDERS, 'CODING').id, 'f1');
+  assert.equal(resolveFolder(FOLDERS, 'Music').id, 'f4');
+});
+
+test('resolveFolder: unambiguous prefix match', () => {
+  assert.equal(resolveFolder(FOLDERS, 'Cod').id, 'f1');
+  assert.equal(resolveFolder(FOLDERS, 'Mus').id, 'f4');
+});
+
+test('resolveFolder: ambiguous prefix throws with folder names listed', () => {
+  assert.throws(
+    () => resolveFolder(FOLDERS, 'AI'),
+    (err: Error) =>
+      err.message.includes('Multiple folders') &&
+      err.message.includes('AI Research') &&
+      err.message.includes('AI Tools'),
+  );
+});
+
+test('resolveFolder: no match throws with available folders listed', () => {
+  assert.throws(
+    () => resolveFolder(FOLDERS, 'Nonexistent'),
+    (err: Error) => err.message.includes('No folder matches') && err.message.includes('Coding'),
+  );
+});
+
+test('formatFolderMirrorStats: shows only non-zero fields', () => {
+  assert.equal(
+    formatFolderMirrorStats({ added: 3, tagged: 5, untagged: 0, unchanged: 10 }),
+    '3 new, 5 tagged, 10 unchanged',
+  );
+});
+
+test('formatFolderMirrorStats: returns "no changes" when all zero', () => {
+  assert.equal(
+    formatFolderMirrorStats({ added: 0, tagged: 0, untagged: 0, unchanged: 0 }),
+    'no changes',
+  );
+});
+
+// ── resolveFolder whitespace handling ──────────────────────────────────
+
+test('resolveFolder: trims whitespace on both sides', () => {
+  assert.equal(resolveFolder(FOLDERS, '  coding  ').id, 'f1');
+  assert.equal(resolveFolder(FOLDERS, '\tcoding\n').id, 'f1');
+});
+
+test('resolveFolder: trims whitespace on folder names too', () => {
+  const padded: BookmarkFolder[] = [{ id: 'fx', name: '  Spaced  ' }];
+  assert.equal(resolveFolder(padded, 'spaced').id, 'fx');
+});
+
+// ── withoutFolder dedup (M1) ───────────────────────────────────────────
+
+test('applyFolderMirror: removes all duplicate folder id occurrences on untag', () => {
+  // Simulate a corrupt record with duplicate folder ids. Should be fully cleared.
+  const existing = [
+    makeRecord({
+      id: '1',
+      tweetId: '1',
+      folderIds: ['f-coding', 'f-ai', 'f-coding'],
+      folderNames: ['Coding', 'AI', 'Coding'],
+    }),
+  ];
+  const walked: BookmarkRecord[] = []; // empty walk → should clear all Coding tags
+
+  const { merged } = applyFolderMirror(existing, CODING_FOLDER, walked);
+  assert.deepEqual(merged[0].folderIds, ['f-ai']);
+  assert.deepEqual(merged[0].folderNames, ['AI']);
+});
+
+test('applyFolderMirror: collapses duplicate folder id occurrences on re-tag', () => {
+  // Corrupt record with duplicates. Re-tagging should produce exactly one entry.
+  const existing = [
+    makeRecord({
+      id: '1',
+      tweetId: '1',
+      folderIds: ['f-coding', 'f-coding'],
+      folderNames: ['Coding', 'Coding'],
+    }),
+  ];
+  const walked = [makeRecord({ id: '1', tweetId: '1' })];
+
+  const { merged } = applyFolderMirror(existing, CODING_FOLDER, walked);
+  assert.deepEqual(merged[0].folderIds, ['f-coding']);
+  assert.deepEqual(merged[0].folderNames, ['Coding']);
 });
