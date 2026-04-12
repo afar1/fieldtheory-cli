@@ -4,13 +4,15 @@ import {
   readConsideration,
   readArtifact,
 } from './adjacent/librarian.js';
+import { readIdeasSeed, touchIdeasSeed } from './ideas-seeds.js';
 import { DEFAULT_FRAMES, getFrame } from './adjacent/frames.js';
 import { runPipeline, renderTwoByTwo, renderDotList } from './adjacent/pipeline.js';
 import type { Consideration, Dot, Artifact } from './adjacent/types.js';
 import { resolveEngine } from './engine.js';
 
 export interface IdeasRunOptions {
-  seedArtifactId: string;
+  seedArtifactId?: string;
+  seedId?: string;
   repo: string;
   frameId?: string;
   depth?: 'quick' | 'standard' | 'deep';
@@ -148,8 +150,21 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
     throw new Error(`Unknown frame: ${options.frameId}`);
   }
 
+  let seedArtifactId = options.seedArtifactId;
+  if (!seedArtifactId && options.seedId) {
+    const seed = readIdeasSeed(options.seedId);
+    if (!seed) throw new Error(`Seed not found: ${options.seedId}`);
+    if (seed.artifactIds.length === 0) throw new Error(`Seed has no artifacts: ${options.seedId}`);
+    seedArtifactId = seed.artifactIds[0];
+    touchIdeasSeed(seed.id);
+  }
+
+  if (!seedArtifactId) {
+    throw new Error('Provide either --seed-artifact <id> or --seed <seed-id>.');
+  }
+
   const result = await runPipeline({
-    seedArtifactId: options.seedArtifactId,
+    seedArtifactId,
     frame,
     repo: ideasRoot(options.repo),
     depth: options.depth ?? 'standard',

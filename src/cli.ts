@@ -44,6 +44,15 @@ import {
   runIdeas,
   resolveIdeaRun,
 } from './ideas.js';
+import {
+  createIdeasSeedFromArtifacts,
+  createIdeasSeedFromText,
+  deleteIdeasSeed,
+  formatIdeasSeed,
+  formatIdeasSeedList,
+  listIdeasSeeds,
+  readIdeasSeed,
+} from './ideas-seeds.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -1341,16 +1350,23 @@ export function buildCli() {
 
   ideas
     .command('run')
-    .description('Run an ideas exploration from an existing seed artifact')
-    .requiredOption('--seed-artifact <id>', 'Seed artifact id to start from')
+    .description('Run an ideas exploration from a seed or seed artifact')
+    .option('--seed-artifact <id>', 'Seed artifact id to start from')
+    .option('--seed <id>', 'Saved seed id to start from')
     .requiredOption('--repo <path>', 'Repo path to explore against')
     .option('--frame <id>', 'Frame id', 'leverage-specificity')
     .option('--depth <depth>', 'Depth: quick | standard | deep', 'standard')
     .option('--steering <text>', 'Optional steering nudge')
     .action(safe(async (options) => {
+      if (!options.seedArtifact && !options.seed) {
+        console.log('  Provide either --seed-artifact <id> or --seed <seed-id>.');
+        process.exitCode = 1;
+        return;
+      }
       console.log('  Ideas runs on your local machine. Keep your laptop awake for longer debates.');
       const summary = await runIdeas({
-        seedArtifactId: String(options.seedArtifact),
+        seedArtifactId: options.seedArtifact ? String(options.seedArtifact) : undefined,
+        seedId: options.seed ? String(options.seed) : undefined,
         repo: String(options.repo),
         frameId: String(options.frame),
         depth: options.depth,
@@ -1417,6 +1433,82 @@ export function buildCli() {
     .argument('<dotId>', 'Dot artifact id')
     .action(safe(async (dotId: string) => {
       console.log(getIdeaPrompt(String(dotId)));
+    }));
+
+  const ideasSeed = ideas
+    .command('seed')
+    .description('Create, inspect, and manage reusable ideas seeds');
+
+  ideasSeed
+    .command('list')
+    .description('List saved seeds')
+    .action(safe(async () => {
+      console.log(formatIdeasSeedList(listIdeasSeeds()));
+    }));
+
+  ideasSeed
+    .command('show')
+    .description('Show one saved seed')
+    .argument('<seedId>', 'Seed id')
+    .action(safe(async (seedId: string) => {
+      const seed = readIdeasSeed(String(seedId));
+      if (!seed) {
+        console.log(`  Seed not found: ${String(seedId)}`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(formatIdeasSeed(seed));
+    }));
+
+  ideasSeed
+    .command('create')
+    .description('Create a saved seed from one or more existing artifacts')
+    .requiredOption('--artifact <id...>', 'One or more artifact ids')
+    .option('--title <text>', 'Seed title')
+    .option('--notes <text>', 'Optional notes')
+    .action(safe(async (options) => {
+      const seed = createIdeasSeedFromArtifacts({
+        artifactIds: (options.artifact as string[]).map(String),
+        title: options.title ? String(options.title) : undefined,
+        notes: options.notes ? String(options.notes) : undefined,
+      });
+      console.log(`  ✓ Created seed: ${seed.id}`);
+      console.log(`  Title: ${seed.title}`);
+      console.log(`  Artifacts: ${seed.artifactIds.join(', ')}`);
+      console.log(`\n  Next:`);
+      console.log(`    ft ideas run --seed ${seed.id} --repo .`);
+    }));
+
+  ideasSeed
+    .command('text')
+    .description('Create a saved seed from raw text')
+    .argument('<text>', 'Seed text')
+    .option('--title <text>', 'Seed title')
+    .option('--notes <text>', 'Optional notes')
+    .action(safe(async (text: string, options) => {
+      const seed = createIdeasSeedFromText({
+        text: String(text),
+        title: options.title ? String(options.title) : undefined,
+        notes: options.notes ? String(options.notes) : undefined,
+      });
+      console.log(`  ✓ Created seed: ${seed.id}`);
+      console.log(`  Title: ${seed.title}`);
+      console.log(`\n  Next:`);
+      console.log(`    ft ideas run --seed ${seed.id} --repo .`);
+    }));
+
+  ideasSeed
+    .command('delete')
+    .description('Delete a saved seed')
+    .argument('<seedId>', 'Seed id')
+    .action(safe(async (seedId: string) => {
+      const deleted = deleteIdeasSeed(String(seedId));
+      if (!deleted) {
+        console.log(`  Seed not found: ${String(seedId)}`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`  Deleted seed: ${String(seedId)}`);
     }));
 
   // ── skill ──────────────────────────────────────────────────────────────
