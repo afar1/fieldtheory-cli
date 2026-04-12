@@ -176,6 +176,15 @@ function showCachedUpdateNotice(): void {
 // ── What's new ────────────────────────────────────────────────────────────
 
 const WHATS_NEW: Record<string, string[]> = {
+  '1.3.5': [
+    'ft sync --folders \u2014 sync X bookmark folder tags (read-only mirror)',
+    'ft sync --folder <name> \u2014 sync a single folder by name',
+    'ft list --folder <name> \u2014 filter bookmarks by folder',
+    'ft folders \u2014 show folder distribution',
+    'Security: SSRF fix in article enrichment (redirect chains now validated per hop)',
+    'Durability: writes are now crash-safe against power loss (fsync)',
+    'ft search handles punctuation like foo(bar) without FTS errors',
+  ],
   '1.2.2': [
     'ft sync --gaps \u2014 backfill missing quoted tweets and expand truncated articles',
     'Quoted tweet content and full article text now captured automatically during sync',
