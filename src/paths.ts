@@ -52,6 +52,41 @@ export function preferencesPath(): string {
   return path.join(dataDir(), '.preferences');
 }
 
+// ── Ideas / adjacent paths ──────────────────────────────────────────────
+
+export function adjacentDir(): string {
+  return path.join(dataDir(), 'automation', 'adjacent');
+}
+
+export function adjacentArtifactsDir(): string {
+  return path.join(adjacentDir(), 'artifacts');
+}
+
+export function adjacentConsiderationsDir(): string {
+  return path.join(adjacentDir(), 'considerations');
+}
+
+export function adjacentFramesDir(): string {
+  return path.join(adjacentDir(), 'frames');
+}
+
+export function adjacentCacheDir(): string {
+  return path.join(adjacentDir(), 'cache');
+}
+
+export function ensureAdjacentDirs(): string {
+  const root = adjacentDir();
+  ensureDirSync(root);
+  ensureDirSync(adjacentArtifactsDir());
+  ensureDirSync(adjacentConsiderationsDir());
+  ensureDirSync(adjacentFramesDir());
+  ensureDirSync(adjacentCacheDir());
+  ensureDirSync(path.join(adjacentCacheDir(), 'seed-briefs'));
+  ensureDirSync(path.join(adjacentCacheDir(), 'results'));
+  ensureDirSync(path.join(adjacentDir(), 'repo-indices'));
+  return root;
+}
+
 export function isFirstRun(): boolean {
   return !fs.existsSync(twitterBookmarksCachePath());
 }
