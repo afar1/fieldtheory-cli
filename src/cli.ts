@@ -1435,18 +1435,29 @@ export function buildCli() {
       console.log(getIdeaPrompt(String(dotId)));
     }));
 
-  const ideasSeed = ideas
-    .command('seed')
-    .description('Create, inspect, and manage reusable ideas seeds');
+  const seeds = program
+    .command('seeds')
+    .description('Create, inspect, and manage reusable seed context for ideas runs');
 
-  ideasSeed
+  seeds
+    .action(() => {
+      console.log('Seeds shape context. Use them to gather, save, and reuse source material before running ft ideas.');
+      console.log('');
+      console.log('Useful commands:');
+      console.log('  ft seeds list');
+      console.log('  ft seeds create --artifact <id...>');
+      console.log('  ft seeds text "..."');
+      console.log('  ft ideas run --seed <seed-id> --repo .');
+    });
+
+  seeds
     .command('list')
     .description('List saved seeds')
     .action(safe(async () => {
       console.log(formatIdeasSeedList(listIdeasSeeds()));
     }));
 
-  ideasSeed
+  seeds
     .command('show')
     .description('Show one saved seed')
     .argument('<seedId>', 'Seed id')
@@ -1460,7 +1471,7 @@ export function buildCli() {
       console.log(formatIdeasSeed(seed));
     }));
 
-  ideasSeed
+  seeds
     .command('create')
     .description('Create a saved seed from one or more existing artifacts')
     .requiredOption('--artifact <id...>', 'One or more artifact ids')
@@ -1479,7 +1490,7 @@ export function buildCli() {
       console.log(`    ft ideas run --seed ${seed.id} --repo .`);
     }));
 
-  ideasSeed
+  seeds
     .command('text')
     .description('Create a saved seed from raw text')
     .argument('<text>', 'Seed text')
@@ -1497,7 +1508,7 @@ export function buildCli() {
       console.log(`    ft ideas run --seed ${seed.id} --repo .`);
     }));
 
-  ideasSeed
+  seeds
     .command('delete')
     .description('Delete a saved seed')
     .argument('<seedId>', 'Seed id')
@@ -1510,6 +1521,18 @@ export function buildCli() {
       }
       console.log(`  Deleted seed: ${String(seedId)}`);
     }));
+
+  const ideasSeed = ideas
+    .command('seed')
+    .description('(alias) Seed commands live under ft seeds');
+
+  for (const cmd of ['list', 'show', 'create', 'text', 'delete']) {
+    ideasSeed.command(cmd).description(`Alias for: ft seeds ${cmd}`).allowUnknownOption(true)
+      .action(async () => {
+        const args = ['node', 'ft', 'seeds', cmd, ...process.argv.slice(4)];
+        await program.parseAsync(args);
+      });
+  }
 
   // ── skill ──────────────────────────────────────────────────────────────
 
