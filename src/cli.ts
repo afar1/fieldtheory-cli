@@ -61,6 +61,7 @@ import {
   summarizeSeedIntent,
 } from './seeds-strategies.js';
 import { formatSeedCandidates, queryRandomSeedCandidates, querySeedCandidates } from './seeds-query.js';
+import { formatSeedOrganization, organizeSeedCandidatesBy } from './seeds-organize.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -1710,6 +1711,38 @@ export function buildCli() {
         });
         console.log(`\n  ✓ Created seed: ${seed.id}`);
       }
+    }));
+
+  seeds
+    .command('organize')
+    .description('Group bookmark candidates into reusable seed organizations')
+    .requiredOption('--by <mode>', 'Grouping mode: category | domain | folder | time')
+    .option('--query <text>', 'Optional query filter')
+    .option('--category <name>', 'Filter by category')
+    .option('--domain <name>', 'Filter by domain')
+    .option('--folder <name>', 'Filter by folder')
+    .option('--author <handle>', 'Filter by author handle')
+    .option('--days <n>', 'Limit to the last N days', (v: string) => Number(v))
+    .option('--limit <n>', 'Max bookmarks to scan', (v: string) => Number(v), 60)
+    .action(safe(async (options) => {
+      const mode = String(options.by) as 'category' | 'domain' | 'folder' | 'time';
+      if (!['category', 'domain', 'folder', 'time'].includes(mode)) {
+        console.log(`  Unsupported organize mode: ${mode}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      const result = await organizeSeedCandidatesBy(mode, {
+        query: options.query ? String(options.query) : undefined,
+        category: options.category ? String(options.category) : undefined,
+        domain: options.domain ? String(options.domain) : undefined,
+        folder: options.folder ? String(options.folder) : undefined,
+        author: options.author ? String(options.author) : undefined,
+        days: typeof options.days === 'number' ? options.days : undefined,
+        limit: Number(options.limit) || 60,
+      });
+
+      console.log(formatSeedOrganization(result));
     }));
 
   const ideasSeed = ideas
