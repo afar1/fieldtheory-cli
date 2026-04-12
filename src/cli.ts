@@ -774,12 +774,13 @@ export function buildCli() {
     .command('classify')
     .description('Classify bookmarks by category and domain using LLM (requires claude or codex CLI)')
     .option('--regex', 'Use simple regex classification instead of LLM')
+    .option('--fail-fast', 'Stop immediately on first classification failure')
     .action(safe(async (options) => {
       if (!requireData()) return;
       if (options.regex) {
         process.stderr.write('Classifying bookmarks (regex)...\n');
         const result = await classifyAndRebuild();
-        console.log(`Indexed ${result.recordCount} bookmarks \u2192 ${result.dbPath}`);
+        console.log(`Indexed ${result.recordCount} bookmarks → ${result.dbPath}`);
         console.log(formatClassificationSummary(result.summary));
       } else {
         const engine = await resolveEngine();
@@ -788,10 +789,11 @@ export function buildCli() {
         process.stderr.write('Classifying categories with LLM (batches of 50, ~2 min per batch)...\n');
         const catResult = await classifyWithLlm({
           engine,
+          failFast: options.failFast ?? false,
           onBatch: (done: number, total: number) => {
             const pct = total > 0 ? Math.round((done / total) * 100) : 0;
             const elapsed = Math.round((Date.now() - catStart) / 1000);
-            process.stderr.write(`  Categories: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
+            process.stderr.write(`  Categories: ${done}/${total} (${pct}%) │ ${elapsed}s elapsed\n`);
           },
         });
         console.log(`\nEngine: ${catResult.engine}`);
@@ -802,10 +804,11 @@ export function buildCli() {
         const domResult = await classifyDomainsWithLlm({
           engine,
           all: false,
+          failFast: options.failFast ?? false,
           onBatch: (done: number, total: number) => {
             const pct = total > 0 ? Math.round((done / total) * 100) : 0;
             const elapsed = Math.round((Date.now() - domStart) / 1000);
-            process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
+            process.stderr.write(`  Domains: ${done}/${total} (${pct}%) │ ${elapsed}s elapsed\n`);
           },
         });
         console.log(`\nDomains: ${domResult.classified}/${domResult.totalUnclassified} classified`);
@@ -818,6 +821,7 @@ export function buildCli() {
     .command('classify-domains')
     .description('Classify bookmarks by subject domain using LLM (ai, finance, etc.)')
     .option('--all', 'Re-classify all bookmarks, not just missing')
+    .option('--fail-fast', 'Stop immediately on first classification failure')
     .action(safe(async (options) => {
       if (!requireData()) return;
       const engine = await resolveEngine();
@@ -826,10 +830,11 @@ export function buildCli() {
       const result = await classifyDomainsWithLlm({
         engine,
         all: options.all ?? false,
+        failFast: options.failFast ?? false,
         onBatch: (done: number, total: number) => {
           const pct = total > 0 ? Math.round((done / total) * 100) : 0;
           const elapsed = Math.round((Date.now() - start) / 1000);
-          process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
+          process.stderr.write(`  Domains: ${done}/${total} (${pct}%) │ ${elapsed}s elapsed\n`);
         },
       });
       console.log(`\nDomains: ${result.classified}/${result.totalUnclassified} classified`);
@@ -1022,12 +1027,14 @@ export function buildCli() {
     .command('md')
     .description('Export bookmarks as individual markdown files')
     .option('--force', 'Re-export all bookmarks (overwrite existing files)')
+    .option('--format <type>', 'Filename format: rev-iso (default), legacy', (v: string) => v as 'legacy' | 'rev-iso', 'rev-iso')
     .action(safe(async (options) => {
       if (!requireIndex()) return;
       let lastLine = '';
       const spinner = createSpinner(() => lastLine);
       const result = await exportBookmarks({
         force: options.force,
+        filenameFormat: options.format,
         onProgress: (s) => {
           lastLine = s;
           spinner.update();
