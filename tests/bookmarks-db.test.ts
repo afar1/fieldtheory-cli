@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById } from '../src/bookmarks-db.js';
+import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, sanitizeFtsQuery } from '../src/bookmarks-db.js';
 import { openDb, saveDb } from '../src/db.js';
 import { twitterBookmarksIndexPath } from '../src/paths.js';
 
@@ -183,4 +183,49 @@ test('formatSearchResults: formats results with author, date, text, url', () => 
 
 test('formatSearchResults: returns message for empty results', () => {
   assert.equal(formatSearchResults([]), 'No results found.');
+});
+
+// ── sanitizeFtsQuery: FTS5 operator handling ──────────────────────────
+
+test('sanitizeFtsQuery: leaves plain queries alone', () => {
+  assert.equal(sanitizeFtsQuery('rust async'), 'rust async');
+  assert.equal(sanitizeFtsQuery('machine learning'), 'machine learning');
+});
+
+test('sanitizeFtsQuery: escapes parentheses (was parse error before)', () => {
+  const result = sanitizeFtsQuery('foo(bar)');
+  assert.ok(result.includes('"foo(bar)"'));
+});
+
+test('sanitizeFtsQuery: escapes leading dash', () => {
+  const result = sanitizeFtsQuery('-foo');
+  assert.ok(result.includes('"-foo"'));
+});
+
+test('sanitizeFtsQuery: escapes leading plus', () => {
+  const result = sanitizeFtsQuery('+foo');
+  assert.ok(result.includes('"+foo"'));
+});
+
+test('sanitizeFtsQuery: escapes column filters', () => {
+  const result = sanitizeFtsQuery('author:foo');
+  assert.ok(result.includes('"author:foo"'));
+});
+
+test('sanitizeFtsQuery: escapes Boolean keywords', () => {
+  const result = sanitizeFtsQuery('rust AND async');
+  assert.ok(result.includes('"rust"'));
+  assert.ok(result.includes('"AND"'));
+  assert.ok(result.includes('"async"'));
+});
+
+test('sanitizeFtsQuery: escapes prefix wildcards', () => {
+  const result = sanitizeFtsQuery('java*');
+  assert.ok(result.includes('"java*"'));
+});
+
+test('sanitizeFtsQuery: strips internal quotes to avoid double-escaping', () => {
+  const result = sanitizeFtsQuery('"foo"bar');
+  // Internal quotes stripped; term wrapped once
+  assert.ok(!result.includes('""'));
 });

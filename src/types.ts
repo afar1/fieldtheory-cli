@@ -80,6 +80,14 @@ export interface BookmarkRecord {
   links?: string[];
   tags?: string[];
   ingestedVia?: 'api' | 'browser' | 'graphql';
+  /** Parallel arrays of folder IDs and display names this bookmark is in on X. */
+  folderIds?: string[];
+  folderNames?: string[];
+}
+
+export interface BookmarkFolder {
+  id: string;
+  name: string;
 }
 
 export interface BookmarkCacheMeta {

@@ -3,8 +3,9 @@ import { Command } from 'commander';
 import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
 import { runTwitterOAuthFlow } from './xauth.js';
-import { syncBookmarksGraphQL, syncGaps } from './graphql-bookmarks.js';
-import type { SyncProgress, GapFillProgress } from './graphql-bookmarks.js';
+import { syncBookmarksGraphQL, syncGaps, syncBookmarkFolders } from './graphql-bookmarks.js';
+import type { SyncProgress, GapFillProgress, FolderSyncProgress } from './graphql-bookmarks.js';
+import type { BookmarkFolder } from './types.js';
 import { fetchBookmarkMediaBatch } from './bookmark-media.js';
 import {
   buildIndex,
@@ -15,6 +16,7 @@ import {
   getCategoryCounts,
   sampleByCategory,
   getDomainCounts,
+  getFolderCounts,
   listBookmarks,
   getBookmarkById,
 } from './bookmarks-db.js';
@@ -335,6 +337,46 @@ function requireIndex(): boolean {
   return true;
 }
 
+/**
+ * Strip control characters and ANSI escape sequences from user-controlled
+ * strings before printing them. Folder names come from X — in principle
+ * the user controls them, but if their account is compromised an attacker
+ * could set a folder name that wipes the terminal or injects escape codes.
+ * Replacement character keeps lengths roughly stable for padding.
+ */
+export function sanitizeForDisplay(value: string): string {
+  return value.replace(/[\x00-\x1f\x7f-\x9f]/g, '?');
+}
+
+export function formatFolderMirrorStats(stats: { added: number; tagged: number; untagged: number; unchanged: number }): string {
+  const parts: string[] = [];
+  if (stats.added > 0) parts.push(`${stats.added} new`);
+  if (stats.tagged > 0) parts.push(`${stats.tagged} tagged`);
+  if (stats.untagged > 0) parts.push(`${stats.untagged} removed`);
+  if (stats.unchanged > 0) parts.push(`${stats.unchanged} unchanged`);
+  return parts.length > 0 ? parts.join(', ') : 'no changes';
+}
+
+/**
+ * Resolve a folder query to a specific folder, case-insensitive.
+ * Priority: exact match > unambiguous prefix. Ambiguity/no-match throws.
+ * Trims whitespace on both sides so `"  Coding  "` matches `"Coding"`.
+ */
+export function resolveFolder(folders: BookmarkFolder[], query: string): BookmarkFolder {
+  const lower = query.trim().toLowerCase();
+  const exact = folders.find((f) => f.name.trim().toLowerCase() === lower);
+  if (exact) return exact;
+  const prefix = folders.filter((f) => f.name.trim().toLowerCase().startsWith(lower));
+  if (prefix.length === 1) return prefix[0];
+  if (prefix.length > 1) {
+    throw new Error(
+      `Multiple folders match "${query}": ${prefix.map((f) => f.name).join(', ')}. Be more specific.`
+    );
+  }
+  const available = folders.map((f) => f.name).join(', ') || '(none)';
+  throw new Error(`No folder matches "${query}". Available: ${available}`);
+}
+
 /** Wrap an async action with graceful error handling. */
 function safe(fn: (...args: any[]) => Promise<void>): (...args: any[]) => Promise<void> {
   return async (...args: any[]) => {
@@ -428,6 +470,8 @@ export function buildCli() {
     .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
     .option('--chrome-profile-directory <name>', 'Chrome-family profile name')
     .option('--firefox-profile-dir <path>', 'Firefox profile directory')
+    .option('--folders', 'Also sync bookmark folder tags (mirrors X\u2019s current folder state)', false)
+    .option('--folder <name>', 'Sync only this folder (case-insensitive, supports unambiguous prefix)')
     .action(async (options) => {
       const firstRun = isFirstRun();
       if (firstRun) showSyncWelcome();
@@ -437,6 +481,26 @@ export function buildCli() {
         const mutuallyExclusive = [options.rebuild, options.continue, options.gaps].filter(Boolean).length;
         if (mutuallyExclusive > 1) {
           console.error('  Error: --rebuild, --continue, and --gaps cannot be used together.');
+          process.exitCode = 1;
+          return;
+        }
+
+        // Folder flags: --folders (all) and --folder <name> (one) are mutually exclusive.
+        const folderAll = Boolean(options.folders);
+        const folderName = options.folder ? String(options.folder) : undefined;
+        if (folderAll && folderName) {
+          console.error('  Error: --folders and --folder cannot be used together. Pick one.');
+          process.exitCode = 1;
+          return;
+        }
+        const folderMode: 'off' | 'all' | 'one' = folderName ? 'one' : folderAll ? 'all' : 'off';
+        if (folderMode !== 'off' && options.api) {
+          console.error('  Error: Folder sync requires browser session (GraphQL). Remove --api.');
+          process.exitCode = 1;
+          return;
+        }
+        if (folderMode !== 'off' && options.gaps) {
+          console.error('  Error: --folders/--folder cannot be combined with --gaps. Run them separately.');
           process.exitCode = 1;
           return;
         }
@@ -482,7 +546,7 @@ export function buildCli() {
               for (const f of result.failures) {
                 byReason[f.reason] = (byReason[f.reason] ?? 0) + 1;
               }
-              fs.writeFileSync(logPath, JSON.stringify({ failures: result.failures, summary: byReason }, null, 2));
+              fs.writeFileSync(logPath, JSON.stringify({ failures: result.failures, summary: byReason }, null, 2), { mode: 0o600 });
 
               console.log(`  ${result.failed} unavailable:`);
               for (const [reason, count] of Object.entries(byReason)) {
@@ -610,6 +674,58 @@ export function buildCli() {
 
           warnIfEmpty(result.totalBookmarks);
 
+          // ── Folder sync (runs after main timeline when --folders is passed) ──
+          if (folderMode !== 'off') {
+            try {
+              process.stderr.write(`\n  Syncing bookmark folders...\n`);
+              const folderResult = await syncBookmarkFolders({
+                csrfToken,
+                cookieHeader,
+                browser: options.browser ? String(options.browser) : undefined,
+                chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+                chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+                firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+                delayMs: Number(options.delayMs) || 600,
+                onlyFolderName: folderMode === 'one' ? folderName : undefined,
+                onProgress: (status: FolderSyncProgress) => {
+                  if (status.phase === 'walking' && status.folder) {
+                    process.stderr.write(`  \u2192 ${sanitizeForDisplay(status.folder.name)}...\n`);
+                  }
+                },
+              });
+
+              // Summary output — one line per folder that we actually walked
+              const synced = folderResult.perFolder.filter((f) => f.stats);
+              if (synced.length > 0) {
+                console.log('');
+                for (const { folder, stats } of synced) {
+                  if (!stats) continue;
+                  const safeName = sanitizeForDisplay(folder.name);
+                  console.log(`  \u2713 ${safeName.padEnd(24)}  ${formatFolderMirrorStats(stats)}`);
+                }
+              }
+
+              if (folderResult.skippedFolders.length > 0) {
+                console.log('');
+                for (const { folder, reason } of folderResult.skippedFolders) {
+                  console.log(`  \u26a0 Skipped ${sanitizeForDisplay(folder.name)}: ${reason}`);
+                }
+                const retryCmd = folderMode === 'one' ? `ft sync --folder "${folderName}"` : `ft sync --folders`;
+                console.log(`  Re-run \`${retryCmd}\` to retry.`);
+              }
+
+              if (folderResult.orphanFoldersCleared.length > 0) {
+                const total = folderResult.orphanFoldersCleared.reduce((a, b) => a + b.recordsAffected, 0);
+                console.log(`\n  \u2713 Cleaned up ${total} tags from ${folderResult.orphanFoldersCleared.length} deleted folder(s).`);
+              }
+
+              console.log('');
+            } catch (err) {
+              console.error(`\n  Folder sync error: ${(err as Error).message}\n`);
+              // Continue — main sync already succeeded, folders are bonus
+            }
+          }
+
           const newCount = await rebuildIndex();
           if (options.classify && newCount > 0) {
             await classifyNew();
@@ -685,11 +801,28 @@ export function buildCli() {
     .option('--before <date>', 'Posted before (YYYY-MM-DD)')
     .option('--category <category>', 'Filter by category')
     .option('--domain <domain>', 'Filter by domain')
+    .option('--folder <name>', 'Filter by X bookmark folder name (exact or unambiguous prefix)')
     .option('--limit <n>', 'Max results', (v: string) => Number(v), 30)
     .option('--offset <n>', 'Offset into results', (v: string) => Number(v), 0)
     .option('--json', 'JSON output')
     .action(safe(async (options) => {
       if (!requireIndex()) return;
+
+      // Resolve --folder to an exact name via the same exact-then-prefix rules
+      // that `ft sync --folder` uses, so both flags behave identically.
+      let resolvedFolder: string | undefined;
+      if (options.folder) {
+        const { counts } = await getFolderCounts();
+        const names = Object.keys(counts);
+        if (names.length === 0) {
+          console.error(`  No folder data in local cache. Run: ft sync --folders`);
+          process.exitCode = 1;
+          return;
+        }
+        const stubFolders: BookmarkFolder[] = names.map((name) => ({ id: name, name }));
+        resolvedFolder = resolveFolder(stubFolders, String(options.folder)).name;
+      }
+
       const items = await listBookmarks({
         query: options.query ? String(options.query) : undefined,
         author: options.author ? String(options.author) : undefined,
@@ -697,6 +830,7 @@ export function buildCli() {
         before: options.before ? String(options.before) : undefined,
         category: options.category ? String(options.category) : undefined,
         domain: options.domain ? String(options.domain) : undefined,
+        folder: resolvedFolder,
         limit: Number(options.limit) || 30,
         offset: Number(options.offset) || 0,
       });
@@ -933,6 +1067,32 @@ export function buildCli() {
         const pct = ((count / total) * 100).toFixed(1);
         console.log(`  ${dom.padEnd(20)} ${String(count).padStart(5)}  (${pct}%)`);
       }
+    }));
+
+  // ── folders ─────────────────────────────────────────────────────────────
+
+  program
+    .command('folders')
+    .description('Show X bookmark folder distribution (local counts)')
+    .action(safe(async () => {
+      if (!requireIndex()) return;
+      const { counts, untagged } = await getFolderCounts();
+      if (Object.keys(counts).length === 0) {
+        console.log('  No folder data. Run: ft sync --folders');
+        return;
+      }
+      const tagged = Object.values(counts).reduce((a, b) => a + b, 0);
+      const total = tagged + untagged;
+      const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+      for (const [name, count] of sorted) {
+        const pct = total > 0 ? ((count / total) * 100).toFixed(1) : '0.0';
+        console.log(`  ${sanitizeForDisplay(name).padEnd(24)} ${String(count).padStart(5)}  (${pct}%)`);
+      }
+      if (untagged > 0) {
+        const pct = total > 0 ? ((untagged / total) * 100).toFixed(1) : '0.0';
+        console.log(`  ${'(untagged)'.padEnd(24)} ${String(untagged).padStart(5)}  (${pct}%)`);
+      }
+      console.log(`\n  Total: ${total} bookmarks, ${Object.keys(counts).length} folder(s)`);
     }));
 
   // ── index ───────────────────────────────────────────────────────────────
@@ -1194,7 +1354,7 @@ export function buildCli() {
 
   const bookmarksAlias = program.command('bookmarks').description('(alias) Bookmark commands').helpOption(false);
   for (const cmd of ['sync', 'search', 'list', 'show', 'stats', 'viz', 'classify', 'classify-domains',
-    'categories', 'domains', 'model', 'index', 'auth', 'status', 'path', 'sample', 'fetch-media']) {
+    'categories', 'domains', 'folders', 'model', 'index', 'auth', 'status', 'path', 'sample', 'fetch-media']) {
     bookmarksAlias.command(cmd).description(`Alias for: ft ${cmd}`).allowUnknownOption(true)
       .action(async () => {
         const args = ['node', 'ft', cmd, ...process.argv.slice(4)];
