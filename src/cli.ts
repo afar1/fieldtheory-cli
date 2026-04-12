@@ -2,8 +2,11 @@
 import { Command } from 'commander';
 import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
+import { getLikesStatusView, formatLikesStatus } from './likes-service.js';
 import { runTwitterOAuthFlow } from './xauth.js';
 import { syncBookmarksGraphQL, syncGaps } from './graphql-bookmarks.js';
+import { syncLikesGraphQL, type LikesSyncProgress } from './graphql-likes.js';
+import { unlikeTweet, unbookmarkTweet } from './graphql-actions.js';
 import type { SyncProgress, GapFillProgress } from './graphql-bookmarks.js';
 import { fetchBookmarkMediaBatch } from './bookmark-media.js';
 import {
@@ -18,6 +21,13 @@ import {
   listBookmarks,
   getBookmarkById,
 } from './bookmarks-db.js';
+import {
+  buildLikesIndex,
+  searchLikes,
+  listLikes,
+  getLikeById,
+  formatLikeSearchResults,
+} from './likes-db.js';
 import { formatClassificationSummary } from './bookmark-classify.js';
 import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm.js';
 import { resolveEngine, detectAvailableEngines } from './engine.js';
@@ -27,10 +37,22 @@ import { askMd } from './md-ask.js';
 import { lintMd, fixLintIssues } from './md-lint.js';
 import { exportBookmarks } from './md-export.js';
 import { renderViz } from './bookmarks-viz.js';
+import { removeBookmarkFromArchive, removeLikeFromArchive } from './archive-actions.js';
 import { listBrowserIds } from './browsers.js';
-import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir } from './paths.js';
+import {
+  dataDir,
+  ensureDataDir,
+  isFirstRun,
+  isLikesFirstRun,
+  twitterBookmarksIndexPath,
+  twitterBackfillStatePath,
+  twitterLikesIndexPath,
+  mdDir,
+} from './paths.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
+import { assertWebAssetsBuilt, startWebServer } from './web.js';
+import { trimLikes } from './likes-trim.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -230,8 +252,8 @@ function logo(): string {
 export function showWelcome(): void {
   console.log(logo());
   console.log(`
-  Save a local copy of your X/Twitter bookmarks. Search them,
-  classify them, and make them available to any AI agent.
+  Save a local copy of your X/Twitter bookmarks and likes. Search them,
+  classify bookmarks, and make them available to any AI agent.
   Your data never leaves your machine.
 
   Get started:
@@ -262,10 +284,11 @@ export async function showDashboard(): Promise<void> {
       }
     }
 
-    console.log(`
+  console.log(`
   \x1b[2mSync now:\x1b[0m     ft sync
   \x1b[2mSearch:\x1b[0m       ft search "query"
   \x1b[2mExplore:\x1b[0m      ft viz
+  \x1b[2mWeb UI:\x1b[0m       ft web
   \x1b[2mAll commands:\x1b[0m  ft --help
 `);
   } catch {
@@ -328,6 +351,33 @@ function requireIndex(): boolean {
   Search index not built yet.
 
   Run: ft index
+`);
+    process.exitCode = 1;
+    return false;
+  }
+  return true;
+}
+
+function requireLikesData(): boolean {
+  if (isLikesFirstRun()) {
+    console.log(`
+  No likes synced yet.
+
+  Run: ft likes sync
+`);
+    process.exitCode = 1;
+    return false;
+  }
+  return true;
+}
+
+function requireLikesIndex(): boolean {
+  if (!requireLikesData()) return false;
+  if (!fs.existsSync(twitterLikesIndexPath())) {
+    console.log(`
+  Likes search index not built yet.
+
+  Run: ft likes index
 `);
     process.exitCode = 1;
     return false;
@@ -400,8 +450,8 @@ export function buildCli() {
 
   program
     .name('ft')
-    .description('Self-custody for your X/Twitter bookmarks. Sync, search, classify, and explore locally.')
-    .version('1.2.2')
+    .description('Self-custody for your X/Twitter bookmarks and likes. Sync, search, classify bookmarks, and explore locally.')
+    .version(getLocalVersion())
     .showHelpAfterError()
     .hook('preAction', () => {
       console.log(logo());
@@ -616,6 +666,7 @@ export function buildCli() {
           console.log(`\n  Explore:`);
           console.log(`        ft search "machine learning"`);
           console.log(`        ft viz`);
+          console.log(`        ft web`);
           console.log(`        ft categories`);
           console.log(`\n  You can also just tell Claude to use the ft CLI to search and`);
           console.log(`  explore your bookmarks. It already knows how.\n`);
@@ -759,6 +810,41 @@ export function buildCli() {
     .action(safe(async () => {
       if (!requireIndex()) return;
       console.log(await renderViz());
+    }));
+
+  // ── web ─────────────────────────────────────────────────────────────────
+
+  program
+    .command('web')
+    .description('Serve a local web UI for bookmarks and likes')
+    .option('--host <host>', 'Host interface to bind', '127.0.0.1')
+    .option('--port <n>', 'Port to listen on', (v: string) => Number(v), 3147)
+    .option('--open', 'Open the web UI in your default browser')
+    .action(safe(async (options) => {
+      assertWebAssetsBuilt();
+      const requestedPort = typeof options.port === 'number' && !Number.isNaN(options.port)
+        ? options.port
+        : 3147;
+      const server = await startWebServer({
+        host: String(options.host),
+        port: requestedPort,
+        open: Boolean(options.open),
+      });
+
+      console.log(`  Field Theory web UI`);
+      console.log(`  URL: ${server.url}`);
+      console.log(`  Press Ctrl+C to stop.\n`);
+
+      await new Promise<void>((resolve) => {
+        const shutdown = async () => {
+          process.removeListener('SIGINT', shutdown);
+          process.removeListener('SIGTERM', shutdown);
+          await server.close();
+          resolve();
+        };
+        process.on('SIGINT', shutdown);
+        process.on('SIGTERM', shutdown);
+      });
     }));
 
   // ── classify ────────────────────────────────────────────────────────────
@@ -961,6 +1047,348 @@ export function buildCli() {
       if (!requireData()) return;
       const view = await getBookmarkStatusView();
       console.log(formatBookmarkStatus(view));
+    }));
+
+  program
+    .command('unbookmark')
+    .description('Remove one bookmark on X and reconcile the local archive')
+    .argument('<id>', 'Bookmarked post id')
+    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
+    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
+    .action(safe(async (id: string, options) => {
+      let csrfToken: string | undefined;
+      let cookieHeader: string | undefined;
+      if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
+        csrfToken = String(options.cookies[0]);
+        const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
+        const parts = [`ct0=${csrfToken}`];
+        if (authToken) parts.push(`auth_token=${authToken}`);
+        cookieHeader = parts.join('; ');
+      }
+
+      await unbookmarkTweet(String(id), {
+        browser: options.browser ? String(options.browser) : undefined,
+        csrfToken,
+        cookieHeader,
+        chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+        chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+        firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+      });
+
+      try {
+        const local = await removeBookmarkFromArchive(String(id));
+        console.log(`\n  ✓ Removed bookmark on X: ${id}`);
+        console.log(`  Local archive: ${local.removed ? 'removed cached record' : 'record not found locally'}`);
+        console.log(`  Remaining bookmarks: ${local.totalRemaining}`);
+        console.log(`  Cache: ${local.cachePath}`);
+        console.log(`  Index: ${local.dbPath}\n`);
+      } catch (error) {
+        throw new Error(
+          `Removed bookmark on X, but failed to update the local archive.\n` +
+          `Recovery: run ft sync or ft index.\n` +
+          `Details: ${(error as Error).message}`
+        );
+      }
+    }));
+
+  // ── likes ───────────────────────────────────────────────────────────────
+
+  const likes = program
+    .command('likes')
+    .description('Sync and query your liked posts as a separate local archive');
+
+  likes
+    .command('sync')
+    .description('Sync liked posts from X into your local likes archive')
+    .option('--max-pages <n>', 'Max pages to fetch', (v: string) => Number(v), 500)
+    .option('--delay-ms <n>', 'Delay between requests in ms', (v: string) => Number(v), 600)
+    .option('--max-minutes <n>', 'Max runtime in minutes', (v: string) => Number(v), 30)
+    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
+    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
+    .action(safe(async (options) => {
+      const firstRun = isLikesFirstRun();
+      if (firstRun) showSyncWelcome();
+      ensureDataDir();
+
+      const startTime = Date.now();
+      let lastSync: LikesSyncProgress = { page: 0, totalFetched: 0, newAdded: 0, running: true, done: false };
+      const spinner = createSpinner(() => {
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        return `Syncing likes...  ${lastSync.newAdded} new  │  page ${lastSync.page}  │  ${elapsed}s`;
+      });
+
+      let csrfToken: string | undefined;
+      let cookieHeader: string | undefined;
+      if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
+        csrfToken = String(options.cookies[0]);
+        const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
+        const parts = [`ct0=${csrfToken}`];
+        if (authToken) parts.push(`auth_token=${authToken}`);
+        cookieHeader = parts.join('; ');
+      }
+
+      const result = await runWithSpinner(spinner, () => syncLikesGraphQL({
+        maxPages: Number(options.maxPages) || 500,
+        delayMs: Number(options.delayMs) || 600,
+        maxMinutes: Number(options.maxMinutes) || 30,
+        browser: options.browser ? String(options.browser) : undefined,
+        csrfToken,
+        cookieHeader,
+        chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+        chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+        firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+        onProgress: (status: LikesSyncProgress) => {
+          lastSync = status;
+          spinner.update();
+        },
+      }));
+
+      console.log(`\n  ✓ ${result.added} new likes synced (${result.totalLikes} total)`);
+      console.log(`  ${friendlyStopReason(result.stopReason)}`);
+      console.log(`  ✓ Data: ${dataDir()}\n`);
+
+      if (result.added > 0) {
+        process.stderr.write('  Building likes search index...\n');
+        const idx = await buildLikesIndex();
+        process.stderr.write(`  ✓ ${idx.recordCount} likes indexed (${idx.newRecords} new)\n`);
+      }
+    }));
+
+  likes
+    .command('unlike')
+    .description('Unlike one post on X and reconcile the local likes archive')
+    .argument('<id>', 'Liked post id')
+    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
+    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
+    .action(safe(async (id: string, options) => {
+      let csrfToken: string | undefined;
+      let cookieHeader: string | undefined;
+      if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
+        csrfToken = String(options.cookies[0]);
+        const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
+        const parts = [`ct0=${csrfToken}`];
+        if (authToken) parts.push(`auth_token=${authToken}`);
+        cookieHeader = parts.join('; ');
+      }
+
+      await unlikeTweet(String(id), {
+        browser: options.browser ? String(options.browser) : undefined,
+        csrfToken,
+        cookieHeader,
+        chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+        chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+        firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+      });
+
+      try {
+        const local = await removeLikeFromArchive(String(id));
+        console.log(`\n  ✓ Unliked on X: ${id}`);
+        console.log(`  Local archive: ${local.removed ? 'removed cached record' : 'record not found locally'}`);
+        console.log(`  Remaining likes: ${local.totalRemaining}`);
+        console.log(`  Cache: ${local.cachePath}`);
+        console.log(`  Index: ${local.dbPath}\n`);
+      } catch (error) {
+        throw new Error(
+          `Unliked on X, but failed to update the local archive.\n` +
+          `Recovery: run ft likes sync or ft likes index.\n` +
+          `Details: ${(error as Error).message}`
+        );
+      }
+    }));
+
+  likes
+    .command('trim')
+    .description('Keep only the latest likes and unlike older posts on X in throttled batches')
+    .option('--keep <n>', 'Number of newest likes to keep locally and remotely', (v: string) => Number(v), 200)
+    .option('--batch-size <n>', 'How many likes to unlike per batch', (v: string) => Number(v), 25)
+    .option('--pause-seconds <n>', 'Seconds to pause between batches', (v: string) => Number(v), 45)
+    .option('--rate-limit-backoff-seconds <n>', 'Seconds to wait before retrying a 429 response', (v: string) => Number(v), 300)
+    .option('--max-rate-limit-retries <n>', 'How many times to retry the same like after a 429', (v: string) => Number(v), 3)
+    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
+    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
+    .action(safe(async (options) => {
+      if (!requireLikesData()) return;
+
+      let csrfToken: string | undefined;
+      let cookieHeader: string | undefined;
+      if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
+        csrfToken = String(options.cookies[0]);
+        const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
+        const parts = [`ct0=${csrfToken}`];
+        if (authToken) parts.push(`auth_token=${authToken}`);
+        cookieHeader = parts.join('; ');
+      }
+
+      const keep = Math.max(0, Number(options.keep) || 0);
+      const batchSize = Math.max(1, Number(options.batchSize) || 25);
+      const pauseSeconds = Math.max(0, Number(options.pauseSeconds) || 0);
+      const rateLimitBackoffSeconds = Math.max(1, Number(options.rateLimitBackoffSeconds) || 300);
+      const maxRateLimitRetries = Math.max(0, Number(options.maxRateLimitRetries) || 0);
+
+      console.log(`\n  Trimming likes archive`);
+      console.log(`  Keep newest: ${keep}`);
+      console.log(`  Batch size: ${batchSize}`);
+      console.log(`  Pause: ${pauseSeconds}s\n`);
+
+      const result = await trimLikes({
+        keep,
+        batchSize,
+        pauseSeconds,
+        rateLimitBackoffSeconds,
+        maxRateLimitRetries,
+        browser: options.browser ? String(options.browser) : undefined,
+        csrfToken,
+        cookieHeader,
+        chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+        chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+        firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+        onProgress: (progress) => {
+          if (progress.currentTweetId) {
+            if (progress.pausedSeconds) {
+              process.stderr.write(
+                `  Rate limited on ${progress.currentTweetId} · ` +
+                `${progress.completed}/${progress.totalToRemove} complete · ` +
+                `retrying in ${progress.pausedSeconds}s\n`,
+              );
+              return;
+            }
+            process.stderr.write(
+              `  Batch ${progress.batchNumber}/${progress.batchTotal} · ` +
+              `${progress.completed}/${progress.totalToRemove} complete · ` +
+              `unliking ${progress.currentTweetId}\n`,
+            );
+            return;
+          }
+
+          if (progress.pausedSeconds) {
+            process.stderr.write(
+              `  Batch ${progress.batchNumber}/${progress.batchTotal} complete · ` +
+              `${progress.completed}/${progress.totalToRemove} done · ` +
+              `pausing ${progress.pausedSeconds}s\n`,
+            );
+          }
+        },
+      });
+
+      if (result.removed === 0) {
+        console.log(`  No trim needed. Likes already at or below ${keep}.`);
+        console.log(`  Current likes: ${result.totalAfter}\n`);
+        return;
+      }
+
+      console.log(`  ✓ Removed ${result.removed} old likes on X`);
+      console.log(`  Remaining likes: ${result.totalAfter}`);
+      if (result.keepBoundaryId) console.log(`  Oldest kept like: ${result.keepBoundaryId}`);
+      if (result.cachePath) console.log(`  Cache: ${result.cachePath}`);
+      if (result.dbPath) console.log(`  Index: ${result.dbPath}`);
+      console.log();
+    }));
+
+  likes
+    .command('status')
+    .description('Show likes sync status and data location')
+    .action(safe(async () => {
+      if (!requireLikesData()) return;
+      const view = await getLikesStatusView();
+      console.log(formatLikesStatus(view));
+    }));
+
+  likes
+    .command('search')
+    .description('Full-text search across liked posts')
+    .argument('<query>', 'Search query (supports FTS5 syntax: AND, OR, NOT, "exact phrase")')
+    .option('--author <handle>', 'Filter by author handle')
+    .option('--after <date>', 'Likes after this date (YYYY-MM-DD)')
+    .option('--before <date>', 'Likes before this date (YYYY-MM-DD)')
+    .option('--limit <n>', 'Max results', (v: string) => Number(v), 20)
+    .action(safe(async (query: string, options) => {
+      if (!requireLikesIndex()) return;
+      const results = await searchLikes({
+        query,
+        author: options.author ? String(options.author) : undefined,
+        after: options.after ? String(options.after) : undefined,
+        before: options.before ? String(options.before) : undefined,
+        limit: Number(options.limit) || 20,
+      });
+      console.log(formatLikeSearchResults(results));
+    }));
+
+  likes
+    .command('list')
+    .description('List liked posts with filters')
+    .option('--query <query>', 'Text query (FTS5 syntax)')
+    .option('--author <handle>', 'Filter by author handle')
+    .option('--after <date>', 'Liked after (YYYY-MM-DD)')
+    .option('--before <date>', 'Liked before (YYYY-MM-DD)')
+    .option('--limit <n>', 'Max results', (v: string) => Number(v), 30)
+    .option('--offset <n>', 'Offset into results', (v: string) => Number(v), 0)
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      if (!requireLikesIndex()) return;
+      const items = await listLikes({
+        query: options.query ? String(options.query) : undefined,
+        author: options.author ? String(options.author) : undefined,
+        after: options.after ? String(options.after) : undefined,
+        before: options.before ? String(options.before) : undefined,
+        limit: Number(options.limit) || 30,
+        offset: Number(options.offset) || 0,
+      });
+      if (options.json) {
+        console.log(JSON.stringify(items, null, 2));
+        return;
+      }
+      for (const item of items) {
+        const summary = item.text.length > 120 ? `${item.text.slice(0, 117)}...` : item.text;
+        console.log(`${item.id}  ${item.authorHandle ? `@${item.authorHandle}` : '@?'}  ${(item.likedAt ?? item.postedAt)?.slice(0, 10) ?? '?'}`);
+        console.log(`  ${summary}`);
+        console.log(`  ${item.url}`);
+        console.log();
+      }
+    }));
+
+  likes
+    .command('show')
+    .description('Show one liked post in detail')
+    .argument('<id>', 'Liked post id')
+    .option('--json', 'JSON output')
+    .action(safe(async (id: string, options) => {
+      if (!requireLikesIndex()) return;
+      const item = await getLikeById(String(id));
+      if (!item) {
+        console.log(`  Like not found: ${String(id)}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (options.json) {
+        console.log(JSON.stringify(item, null, 2));
+        return;
+      }
+      console.log(`${item.id}  ${item.authorHandle ? `@${item.authorHandle}` : '@?'}  ${(item.likedAt ?? item.postedAt)?.slice(0, 10) ?? '?'}`);
+      console.log(item.text);
+      console.log(`\n${item.url}`);
+    }));
+
+  likes
+    .command('index')
+    .description('Rebuild the SQLite search index from the likes JSONL cache')
+    .option('--force', 'Drop and rebuild from scratch')
+    .action(safe(async (options) => {
+      if (!requireLikesData()) return;
+      process.stderr.write('Building likes search index...\n');
+      const result = await buildLikesIndex({ force: Boolean(options.force) });
+      console.log(`Indexed ${result.recordCount} likes (${result.newRecords} new) → ${result.dbPath}`);
     }));
 
   // ── path ────────────────────────────────────────────────────────────────
@@ -1187,7 +1615,7 @@ export function buildCli() {
 
   const bookmarksAlias = program.command('bookmarks').description('(alias) Bookmark commands').helpOption(false);
   for (const cmd of ['sync', 'search', 'list', 'show', 'stats', 'viz', 'classify', 'classify-domains',
-    'categories', 'domains', 'model', 'index', 'auth', 'status', 'path', 'sample', 'fetch-media']) {
+    'categories', 'domains', 'model', 'index', 'auth', 'status', 'path', 'sample', 'fetch-media', 'unbookmark']) {
     bookmarksAlias.command(cmd).description(`Alias for: ft ${cmd}`).allowUnknownOption(true)
       .action(async () => {
         const args = ['node', 'ft', cmd, ...process.argv.slice(4)];

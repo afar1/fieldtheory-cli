@@ -8,9 +8,11 @@
     "fieldtheory": "bin/ft.mjs"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && vite build --config web/vite.config.ts",
+    "build:web": "vite build --config web/vite.config.ts",
     "test": "tsx --test tests/**/*.test.ts",
     "dev": "tsx src/cli.ts",
+    "dev:web": "vite --config web/vite.config.ts",
     "start": "node dist/cli.js",
     "prepublishOnly": "npm run build"
   },
@@ -40,15 +42,23 @@
     "cli"
   ],
   "dependencies": {
+    "@hono/node-server": "^1.19.13",
     "commander": "^14.0.3",
     "dotenv": "^17.3.1",
+    "hono": "^4.12.12",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
     "sql.js": "^1.14.1",
     "sql.js-fts5": "^1.4.0"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
     "@types/sql.js": "^1.4.11",
+    "@vitejs/plugin-react": "^5.1.0",
     "tsx": "^4.21.0",
-    "typescript": "^6.0.2"
+    "typescript": "^6.0.2",
+    "vite": "^8.0.7"
   }
 }

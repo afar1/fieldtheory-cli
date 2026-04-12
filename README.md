@@ -1,6 +1,6 @@
 # Field Theory CLI
 
-Sync and store locally all of your X/Twitter bookmarks. Search, classify, and make them available to Claude Code, Codex, or any agent with shell access.
+Sync and store locally your X/Twitter bookmarks and likes. Search them, classify bookmarks, and make them available to Claude Code, Codex, or any agent with shell access.
 
 Free and open source. Designed for Mac.
 
@@ -10,7 +10,7 @@ Free and open source. Designed for Mac.
 npm install -g fieldtheory
 ```
 
-Requires Node.js 20+. Chrome recommended for session sync; OAuth available for all platforms.
+Requires Node.js 20+. Chrome recommended for session sync; OAuth available for bookmark sync on all platforms.
 
 ## Quick start
 
@@ -18,16 +18,24 @@ Requires Node.js 20+. Chrome recommended for session sync; OAuth available for a
 # 1. Sync your bookmarks (needs Chrome logged into X)
 ft sync
 
-# 2. Search them
-ft search "distributed systems"
+# 2. Sync your likes into a separate local archive
+ft likes sync
 
-# 3. Explore
+# 3. Search them
+ft search "distributed systems"
+ft likes search "distributed systems"
+
+# 4. Trim old likes in throttled batches
+ft likes trim --keep 200 --batch-size 25 --pause-seconds 45
+
+# 5. Explore bookmarks
 ft viz
+ft web
 ft categories
 ft stats
 ```
 
-On first run, `ft sync` extracts your X session from Chrome and downloads your bookmarks into `~/.ft-bookmarks/`.
+On first run, `ft sync` and `ft likes sync` reuse your browser session from Chrome/Firefox and download data into `~/.ft-bookmarks/`.
 
 ## Commands
 
@@ -36,11 +44,12 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | Command | Description |
 |---------|-------------|
 | `ft sync` | Download and sync bookmarks (no API required) |
-| `ft sync --full` | Full history crawl (not just incremental) |
+| `ft sync --rebuild` | Full history re-crawl of bookmarks |
 | `ft sync --gaps` | Backfill missing quoted tweets and expand truncated articles |
 | `ft sync --classify` | Sync then classify new bookmarks with LLM |
 | `ft sync --api` | Sync via OAuth API (cross-platform) |
 | `ft auth` | Set up OAuth for API-based sync (optional) |
+| `ft likes sync` | Download and sync liked posts into a separate local archive |
 
 ### Search and browse
 
@@ -49,6 +58,14 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | `ft search <query>` | Full-text search with BM25 ranking |
 | `ft list` | Filter by author, date, category, domain |
 | `ft show <id>` | Show one bookmark in detail |
+| `ft unbookmark <id>` | Remove a bookmark on X and update the local bookmark archive |
+| `ft likes search <query>` | Full-text search across liked posts |
+| `ft likes list` | Filter liked posts by query, author, and like date |
+| `ft likes show <id>` | Show one liked post in detail |
+| `ft likes unlike <id>` | Unlike a post on X and update the local likes archive |
+| `ft likes trim` | Keep only the latest likes and unlike older posts on X in throttled batches |
+| `ft likes status` | Show likes archive status |
+| `ft web` | Launch a local web UI for bookmarks and likes |
 | `ft sample <category>` | Random sample from a category |
 | `ft stats` | Top authors, languages, date range |
 | `ft viz` | Terminal dashboard with sparklines, categories, and domains |
@@ -88,6 +105,7 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | Command | Description |
 |---------|-------------|
 | `ft index` | Rebuild search index from JSONL cache (preserves classifications) |
+| `ft likes index` | Rebuild the likes search index from the likes cache |
 | `ft fetch-media` | Download media assets (static images only) |
 | `ft status` | Show sync status and data location |
 | `ft path` | Print data directory path |
@@ -129,6 +147,11 @@ All data is stored locally at `~/.ft-bookmarks/`:
   bookmarks.jsonl         # raw bookmark cache (one per line)
   bookmarks.db            # SQLite FTS5 search index
   bookmarks-meta.json     # sync metadata
+  bookmarks-backfill-state.json
+  likes.jsonl             # raw likes archive cache (one per line)
+  likes.db                # SQLite FTS5 search index for likes
+  likes-meta.json         # likes sync metadata
+  likes-backfill-state.json
   oauth-token.json        # OAuth token (if using API mode, chmod 600)
   md/                     # markdown knowledge base (ft wiki / ft md)
 ```
@@ -140,6 +163,43 @@ export FT_DATA_DIR=/path/to/custom/dir
 ```
 
 To remove all data: `rm -rf ~/.ft-bookmarks`
+
+Likes are intentionally a separate archive in v1. They support sync, search, list, show, status, and reindex. Classification, viz, stats, and media download remain bookmark-only features for now.
+
+Single-item remote cleanup is also supported:
+
+```bash
+ft unbookmark <tweet-id>
+ft likes unlike <tweet-id>
+```
+
+Both commands reuse your browser-authenticated X web session, then reconcile the matching local archive entry and index.
+
+For bulk likes cleanup, use the formal trim command:
+
+```bash
+ft likes trim --keep 200 --batch-size 25 --pause-seconds 45
+```
+
+The command recomputes the trim set from your current local archive on each run, so it is safe to resume after an interruption. It unlikes older posts on X in batches, rewrites `likes.jsonl`, updates `likes-meta.json`, and rebuilds `likes.db` once per batch.
+
+## Web UI
+
+Build and launch the local web UI:
+
+```bash
+npm run build
+node dist/cli.js web
+```
+
+Or during development:
+
+```bash
+npm run build
+tsx src/cli.ts web
+```
+
+The web UI is local-only by default and binds to `127.0.0.1`. It serves the built frontend assets, so run `npm run build` at least once before starting `ft web`.
 
 ## Categories
 
@@ -159,9 +219,10 @@ Use `ft classify` for LLM-powered classification that catches what regex misses.
 
 | Feature | macOS | Linux | Windows |
 |---------|-------|-------|---------|
-| Session sync (`ft sync`) | Chrome, Brave, Arc, Firefox | Firefox | Firefox |
+| Session sync (`ft sync`, `ft likes sync`) | Chrome, Brave, Arc, Firefox | Firefox | Firefox |
 | OAuth API sync (`ft sync --api`) | Yes | Yes | Yes |
-| Search, list, classify, viz, wiki | Yes | Yes | Yes |
+| Search, list, likes archive | Yes | Yes | Yes |
+| Bookmark classify, viz, wiki | Yes | Yes | Yes |
 
 Session sync extracts cookies from your browser's local database. Use `ft sync --browser <name>` to pick a browser. On platforms where session sync isn't available, use `ft auth` + `ft sync --api`.
 
@@ -173,7 +234,11 @@ Session sync extracts cookies from your browser's local database. Use `ft sync -
 
 **OAuth tokens** are stored with `chmod 600` (owner-only). Treat `~/.ft-bookmarks/oauth-token.json` like a password.
 
-**The default sync uses X's internal GraphQL API**, the same API that x.com uses in your browser. For the official v2 API, use `ft auth` + `ft sync --api`.
+**The default bookmark sync uses X's internal GraphQL API**, the same API that x.com uses in your browser. For the official v2 API, use `ft auth` + `ft sync --api`.
+
+**The likes archive sync also uses your browser-authenticated X web session.** In v1 it is browser-session based only; there is no OAuth likes sync path yet.
+
+**Remote unlike, unbookmark, and likes trim use the same browser-authenticated X web session path.** On success, the CLI also reconciles the matching local cached records and rebuilds the relevant search index.
 
 ## License
 
