@@ -7,6 +7,7 @@ import {
 import { linkIdeasSeedToRun, readIdeasSeed, touchIdeasSeed } from './ideas-seeds.js';
 import { writeIdeasNodeMds, writeIdeasRunMd } from './ideas-files.js';
 import { writeIdeasIndex } from './ideas-index.js';
+import { writeIdeasLatestPointers } from './ideas-latest.js';
 import { DEFAULT_FRAMES, getFrame } from './adjacent/frames.js';
 import { runPipeline, renderTwoByTwo, renderDotList } from './adjacent/pipeline.js';
 import type { Consideration, Dot, Artifact } from './adjacent/types.js';
@@ -182,6 +183,7 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
   await writeIdeasRunMd(result.consideration);
   await writeIdeasNodeMds(result.consideration);
   await writeIdeasIndex();
+  await writeIdeasLatestPointers();
 
   if (options.seedId) {
     await linkIdeasSeedToRun({

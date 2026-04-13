@@ -6,6 +6,7 @@ import { readArtifact, writeArtifact } from './adjacent/librarian.js';
 import type { Artifact } from './adjacent/types.js';
 import { writeIdeasSeedMd } from './ideas-files.js';
 import { writeIdeasIndex } from './ideas-index.js';
+import { writeIdeasLatestPointers } from './ideas-latest.js';
 
 export type IdeasSeedSourceType = 'artifact' | 'text';
 
@@ -114,6 +115,7 @@ export async function createIdeasSeedFromArtifacts(input: {
   persistSeedInStore(seed);
   await writeIdeasSeedMd(seed);
   await writeIdeasIndex();
+  await writeIdeasLatestPointers();
   return seed;
 }
 
@@ -161,6 +163,7 @@ export async function touchIdeasSeed(id: string): Promise<void> {
   persistSeedInStore(seed);
   await writeIdeasSeedMd(seed);
   await writeIdeasIndex();
+  await writeIdeasLatestPointers();
 }
 
 export async function linkIdeasSeedToRun(input: { seedId: string; runId: string; nodeIds?: string[] }): Promise<void> {
@@ -175,6 +178,7 @@ export async function linkIdeasSeedToRun(input: { seedId: string; runId: string;
   persistSeedInStore(seed);
   await writeIdeasSeedMd(seed);
   await writeIdeasIndex();
+  await writeIdeasLatestPointers();
 }
 
 export function getSeedArtifacts(seed: IdeasSeed): Artifact[] {

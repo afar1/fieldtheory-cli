@@ -385,8 +385,8 @@ export interface ExportablePromptInput {
 
 export function buildExportablePrompt(input: ExportablePromptInput): string {
   return `---
-name: adjacent/${input.title.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')}
-type: adjacent-dot
+name: ideas/${input.title.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')}
+type: ideas-node
 frame: ${input.frame.id}
 axis_a: ${input.frame.axisA.label} = ${input.axisAScore}
 axis_b: ${input.frame.axisB.label} = ${input.axisBScore}
@@ -402,7 +402,7 @@ axis_b: ${input.frame.axisB.label} = ${input.axisBScore}
 
 ${input.summary}
 
-## Why adjacent
+## Why it surfaced
 
 ${input.rationale}
 
