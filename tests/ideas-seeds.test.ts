@@ -97,6 +97,71 @@ test('resolveFrameIdForRun: empty-string explicit falls through to seed frame, n
   assert.equal(resolveFrameIdForRun('', ''), 'leverage-specificity');
 });
 
+test('resolveSeedForRun: passes through explicit artifact ids without touching the seed store', async () => {
+  await withIdeasStore(async () => {
+    const { resolveSeedForRun } = await import('../src/ideas.js');
+    const result = await resolveSeedForRun({
+      seedArtifactIds: ['bm-1', 'bm-2'],
+    });
+    assert.deepEqual(result.seedArtifactIds, ['bm-1', 'bm-2']);
+    assert.equal(result.seedFrameId, undefined);
+  });
+});
+
+test('resolveSeedForRun: loads a saved seed, returns its artifacts + frameId, and touches lastUsedAt', async () => {
+  await withIdeasStore(async () => {
+    const seeds = await getIdeasSeeds();
+    const seed = await seeds.createIdeasSeedFromText({
+      text: 'pinned seed',
+      title: 'Pinned',
+      frameId: 'impact-effort',
+    });
+    assert.equal(seed.lastUsedAt, undefined, 'precondition: fresh seed has no lastUsedAt');
+
+    const { resolveSeedForRun } = await import('../src/ideas.js');
+    const result = await resolveSeedForRun({ seedId: seed.id });
+    assert.deepEqual(result.seedArtifactIds, seed.artifactIds);
+    assert.equal(result.seedFrameId, 'impact-effort');
+
+    const reloaded = seeds.readIdeasSeed(seed.id);
+    assert.ok(reloaded);
+    assert.ok(reloaded!.lastUsedAt, 'resolveSeedForRun should touch the seed on use');
+  });
+});
+
+test('resolveSeedForRun: throws a clear error when neither explicit artifacts nor a seed id is given', async () => {
+  await withIdeasStore(async () => {
+    const { resolveSeedForRun } = await import('../src/ideas.js');
+    await assert.rejects(() => resolveSeedForRun({}), /--seed-artifact.*--seed/);
+  });
+});
+
+test('resolveSeedForRun: throws when the saved seed id is unknown', async () => {
+  await withIdeasStore(async () => {
+    const { resolveSeedForRun } = await import('../src/ideas.js');
+    await assert.rejects(() => resolveSeedForRun({ seedId: 'seed-nope' }), /Seed not found/);
+  });
+});
+
+test('resolveSeedForRun: prefers explicit seedArtifactIds over a saved seed even when both are given', async () => {
+  // If a caller passes both, explicit wins and the saved seed is not touched.
+  await withIdeasStore(async () => {
+    const seeds = await getIdeasSeeds();
+    const seed = await seeds.createIdeasSeedFromText({ text: 'saved', title: 'Saved' });
+
+    const { resolveSeedForRun } = await import('../src/ideas.js');
+    const result = await resolveSeedForRun({
+      seedArtifactIds: ['explicit-1'],
+      seedId: seed.id,
+    });
+    assert.deepEqual(result.seedArtifactIds, ['explicit-1']);
+
+    const reloaded = seeds.readIdeasSeed(seed.id);
+    assert.ok(reloaded);
+    assert.equal(reloaded!.lastUsedAt, undefined, 'saved seed should not be touched when explicit artifacts are supplied');
+  });
+});
+
 test('linkIdeasSeedToRun deduplicates and updates markdown', async () => {
   await withIdeasStore(async (dir) => {
     const seeds = await getIdeasSeeds();

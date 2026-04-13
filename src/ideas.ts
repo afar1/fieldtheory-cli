@@ -13,7 +13,7 @@ import { DEFAULT_FRAMES } from './adjacent/frames.js';
 import { getFrame } from './frames-registry.js';
 import { runPipeline, renderTwoByTwo, renderDotList } from './adjacent/pipeline.js';
 import type { Consideration, Dot, Artifact, Frame } from './adjacent/types.js';
-import { resolveEngine } from './engine.js';
+import { resolveEngine, type ResolvedEngine } from './engine.js';
 
 export interface IdeasRunOptions {
   /** Run against an explicit list of seed artifacts (bypasses any saved seed). */
@@ -215,77 +215,150 @@ export function resolveFrameIdForRun(
   return 'leverage-specificity';
 }
 
-export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummary> {
-  const engine = await resolveEngine();
+/**
+ * Resolve a frame id against the combined built-in + user registry. Throws
+ * with a descriptive message if the resolved id is unknown. One call site in
+ * runIdeas uses this; keeping the wrapper so runIdeas stays orchestration-only.
+ */
+function resolveFrameForRun(
+  explicit: string | undefined,
+  seedFrameId: string | undefined,
+): Frame {
+  const id = resolveFrameIdForRun(explicit, seedFrameId);
+  const frame = getFrame(id);
+  if (!frame) {
+    throw new Error(`Unknown frame: ${id}`);
+  }
+  return frame;
+}
 
+/**
+ * Resolve the seed artifact group for a run. Accepts either an explicit list
+ * of artifact ids (the `--seed-artifact <id...>` path) or a saved seed id
+ * (the `--seed <seed-id>` path). In the saved-seed case, the saved seed's
+ * lastUsedAt is touched as a side-effect so the seed listing reflects usage.
+ *
+ * Exported for testing: runIdeas itself needs the LLM pipeline to exercise,
+ * but seed resolution is pure-ish (only touches the disk store) and worth
+ * pinning in isolation.
+ */
+export async function resolveSeedForRun(
+  options: Pick<IdeasRunOptions, 'seedArtifactIds' | 'seedId'>,
+): Promise<{ seedArtifactIds: string[]; seedFrameId: string | undefined }> {
+  if (options.seedArtifactIds && options.seedArtifactIds.length > 0) {
+    return { seedArtifactIds: options.seedArtifactIds, seedFrameId: undefined };
+  }
+
+  if (!options.seedId) {
+    throw new Error('Provide either --seed-artifact <id...> or --seed <seed-id>.');
+  }
+
+  const seed = readIdeasSeed(options.seedId);
+  if (!seed) throw new Error(`Seed not found: ${options.seedId}`);
+  if (seed.artifactIds.length === 0) throw new Error(`Seed has no artifacts: ${options.seedId}`);
+
+  await touchIdeasSeed(seed.id);
+  return { seedArtifactIds: seed.artifactIds, seedFrameId: seed.frameId };
+}
+
+/**
+ * Shared context for every per-repo iteration of a run. Frozen before the
+ * loop starts so no stage can accidentally mutate options mid-batch.
+ */
+interface RunContext {
+  engine: ResolvedEngine;
+  frame: Frame;
+  seedArtifactIds: string[];
+  seedId: string | undefined;
+  depth: 'quick' | 'standard' | 'deep';
+  steering: string | undefined;
+  onProgress: ((message: string) => void) | undefined;
+}
+
+/**
+ * Execute one repo's worth of the pipeline: runPipeline → write run md →
+ * write node mds → link the seed (if saved) → convert the dots into the
+ * cross-repo DotEntry shape that aggregateTopDots expects. Kept as its own
+ * function so the batch loop in runIdeas is a one-liner instead of a
+ * 40-line inline block.
+ */
+async function runOneRepo(
+  ctx: RunContext,
+  repo: string,
+  batched: boolean,
+  repoIdx: number,
+  repoTotal: number,
+): Promise<{ runId: string; resolvedRepo: string; dotEntries: DotEntry[]; dotCount: number }> {
+  const resolvedRepo = ideasRoot(repo);
+  if (batched) {
+    ctx.onProgress?.(`[repo ${repoIdx + 1}/${repoTotal}] ${resolvedRepo}`);
+  }
+
+  const result = await runPipeline({
+    seedArtifactIds: ctx.seedArtifactIds,
+    frame: ctx.frame,
+    repo: resolvedRepo,
+    depth: ctx.depth,
+    steering: ctx.steering,
+    engine: ctx.engine,
+    onProgress: (_stage, message) => ctx.onProgress?.(message),
+  });
+
+  await writeIdeasRunMd(result.consideration);
+  await writeIdeasNodeMds(result.consideration);
+
+  if (ctx.seedId) {
+    await linkIdeasSeedToRun({
+      seedId: ctx.seedId,
+      runId: result.consideration.id,
+      nodeIds: result.dotArtifacts.map((artifact) => artifact.id),
+    });
+  }
+
+  const dotEntries: DotEntry[] = result.dots.map((dot, i) => ({
+    runId: result.consideration.id,
+    repo: resolvedRepo,
+    dotArtifactId: result.dotArtifacts[i]!.id,
+    dot,
+  }));
+
+  return {
+    runId: result.consideration.id,
+    resolvedRepo,
+    dotEntries,
+    dotCount: result.dots.length,
+  };
+}
+
+export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummary> {
   if (!Array.isArray(options.repos) || options.repos.length === 0) {
     throw new Error('Provide at least one repo via repos: [...]');
   }
 
-  let seedArtifactIds = options.seedArtifactIds;
-  let seedFrameId: string | undefined;
-  if ((!seedArtifactIds || seedArtifactIds.length === 0) && options.seedId) {
-    const seed = readIdeasSeed(options.seedId);
-    if (!seed) throw new Error(`Seed not found: ${options.seedId}`);
-    if (seed.artifactIds.length === 0) throw new Error(`Seed has no artifacts: ${options.seedId}`);
-    seedArtifactIds = seed.artifactIds;
-    seedFrameId = seed.frameId;
-    await touchIdeasSeed(seed.id);
-  }
+  const engine = await resolveEngine();
+  const { seedArtifactIds, seedFrameId } = await resolveSeedForRun(options);
+  const frame = resolveFrameForRun(options.frameId, seedFrameId);
 
-  if (!seedArtifactIds || seedArtifactIds.length === 0) {
-    throw new Error('Provide either --seed-artifact <id...> or --seed <seed-id>.');
-  }
+  const ctx: RunContext = {
+    engine,
+    frame,
+    seedArtifactIds,
+    seedId: options.seedId,
+    depth: options.depth ?? 'standard',
+    steering: options.steering,
+    onProgress: options.onProgress,
+  };
 
-  const resolvedFrameId = resolveFrameIdForRun(options.frameId, seedFrameId);
-  const frame = getFrame(resolvedFrameId);
-  if (!frame) {
-    throw new Error(`Unknown frame: ${resolvedFrameId}`);
-  }
-
-  const depth = options.depth ?? 'standard';
+  const batched = options.repos.length > 1;
   const repoRuns: RepoRun[] = [];
   const allDotEntries: DotEntry[] = [];
   let totalDotCount = 0;
 
   for (const [idx, repo] of options.repos.entries()) {
-    const resolvedRepo = ideasRoot(repo);
-    if (options.repos.length > 1) {
-      options.onProgress?.(`[repo ${idx + 1}/${options.repos.length}] ${resolvedRepo}`);
-    }
-
-    const result = await runPipeline({
-      seedArtifactIds,
-      frame,
-      repo: resolvedRepo,
-      depth,
-      steering: options.steering,
-      engine,
-      onProgress: (_stage, message) => options.onProgress?.(message),
-    });
-
-    await writeIdeasRunMd(result.consideration);
-    await writeIdeasNodeMds(result.consideration);
-
-    repoRuns.push({ repo: resolvedRepo, runId: result.consideration.id });
-    totalDotCount += result.dots.length;
-
-    for (let i = 0; i < result.dots.length; i++) {
-      allDotEntries.push({
-        runId: result.consideration.id,
-        repo: resolvedRepo,
-        dotArtifactId: result.dotArtifacts[i]!.id,
-        dot: result.dots[i]!,
-      });
-    }
-
-    if (options.seedId) {
-      await linkIdeasSeedToRun({
-        seedId: options.seedId,
-        runId: result.consideration.id,
-        nodeIds: result.dotArtifacts.map((artifact) => artifact.id),
-      });
-    }
+    const perRepo = await runOneRepo(ctx, repo, batched, idx, options.repos.length);
+    repoRuns.push({ repo: perRepo.resolvedRepo, runId: perRepo.runId });
+    allDotEntries.push(...perRepo.dotEntries);
+    totalDotCount += perRepo.dotCount;
   }
 
   const topDotsAggregated = aggregateTopDots(allDotEntries, 5);
@@ -294,11 +367,11 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
   if (repoRuns.length > 1) {
     batchId = await persistBatchSummary({
       repoRuns,
-      seedId: options.seedId,
-      seedArtifactIds,
-      frame,
-      depth,
-      steering: options.steering,
+      seedId: ctx.seedId,
+      seedArtifactIds: ctx.seedArtifactIds,
+      frame: ctx.frame,
+      depth: ctx.depth,
+      steering: ctx.steering,
       totalDotCount,
       topDots: topDotsAggregated,
     });
