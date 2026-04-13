@@ -157,7 +157,7 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
     if (!seed) throw new Error(`Seed not found: ${options.seedId}`);
     if (seed.artifactIds.length === 0) throw new Error(`Seed has no artifacts: ${options.seedId}`);
     seedArtifactId = seed.artifactIds[0];
-    touchIdeasSeed(seed.id);
+    await touchIdeasSeed(seed.id);
   }
 
   if (!seedArtifactId) {
@@ -181,17 +181,11 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
   await writeIdeasRunMd(result.consideration);
 
   if (options.seedId) {
-    linkIdeasSeedToRun({
+    await linkIdeasSeedToRun({
       seedId: options.seedId,
       runId: result.consideration.id,
       nodeIds: result.dotArtifacts.map((artifact) => artifact.id),
     });
-    const refreshedSeed = readIdeasSeed(options.seedId);
-    if (refreshedSeed) {
-      // Keep the markdown seed file in sync with the graph links.
-      const { writeIdeasSeedMd } = await import('./ideas-files.js');
-      await writeIdeasSeedMd(refreshedSeed);
-    }
   }
 
   return {

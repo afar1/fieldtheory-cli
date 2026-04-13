@@ -63,6 +63,7 @@ import {
 import { formatSeedCandidates, queryRandomSeedCandidates, querySeedCandidates } from './seeds-query.js';
 import { formatSeedOrganization, organizeSeedCandidatesBy } from './seeds-organize.js';
 import { modelOrganizeSeeds } from './seeds-model.js';
+import { saveSeedFromCandidates } from './seeds-save.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -1488,7 +1489,7 @@ export function buildCli() {
     .option('--title <text>', 'Seed title')
     .option('--notes <text>', 'Optional notes')
     .action(safe(async (options) => {
-      const seed = createIdeasSeedFromArtifacts({
+      const seed = await createIdeasSeedFromArtifacts({
         artifactIds: (options.artifact as string[]).map(String),
         title: options.title ? String(options.title) : undefined,
         notes: options.notes ? String(options.notes) : undefined,
@@ -1507,7 +1508,7 @@ export function buildCli() {
     .option('--title <text>', 'Seed title')
     .option('--notes <text>', 'Optional notes')
     .action(safe(async (text: string, options) => {
-      const seed = createIdeasSeedFromText({
+      const seed = await createIdeasSeedFromText({
         text: String(text),
         title: options.title ? String(options.title) : undefined,
         notes: options.notes ? String(options.notes) : undefined,
@@ -1589,8 +1590,8 @@ export function buildCli() {
       const candidates = await querySeedCandidates(spec.filters);
       console.log(formatSeedCandidates(candidates));
       if (options.create && candidates.length > 0) {
-        const seed = createIdeasSeedFromArtifacts({
-          artifactIds: candidates.map((item) => item.id),
+        const seed = await saveSeedFromCandidates({
+          candidates,
           title: options.title ? String(options.title) : summarizeSeedIntent('Search seed', spec.filters),
           notes: `strategy=${spec.strategy}`,
           strategy: spec.strategy,
@@ -1626,8 +1627,8 @@ export function buildCli() {
       const candidates = await querySeedCandidates(spec.filters);
       console.log(formatSeedCandidates(candidates));
       if (options.create && candidates.length > 0) {
-        const seed = createIdeasSeedFromArtifacts({
-          artifactIds: candidates.map((item) => item.id),
+        const seed = await saveSeedFromCandidates({
+          candidates,
           title: options.title ? String(options.title) : summarizeSeedIntent('Recent seed', spec.filters),
           notes: `strategy=${spec.strategy}`,
           strategy: spec.strategy,
@@ -1681,8 +1682,8 @@ export function buildCli() {
       }
       console.log(formatSeedCandidates(candidates));
       if (options.create && candidates.length > 0) {
-        const seed = createIdeasSeedFromArtifacts({
-          artifactIds: candidates.map((item) => item.id),
+        const seed = await saveSeedFromCandidates({
+          candidates,
           title: options.title ? String(options.title) : (options.pick ? `Random seed — ${String(options.pick)}` : summarizeSeedIntent('Random seed', spec.filters)),
           notes: `strategy=${spec.strategy}${options.pick ? ` pick=${String(options.pick)}` : ''}`,
           strategy: spec.strategy,
@@ -1721,8 +1722,8 @@ export function buildCli() {
       const picked = candidates.slice(0, spec.filters.limit ?? 5);
       console.log(formatSeedCandidates(picked));
       if (options.create && picked.length > 0) {
-        const seed = createIdeasSeedFromArtifacts({
-          artifactIds: picked.map((item) => item.id),
+        const seed = await saveSeedFromCandidates({
+          candidates: picked,
           title: options.title ? String(options.title) : summarizeSeedIntent('Lucky seed', spec.filters),
           notes: `strategy=${spec.strategy}`,
           strategy: spec.strategy,
@@ -1788,7 +1789,7 @@ export function buildCli() {
           console.log('Saved seeds');
           console.log('');
           for (const suggestion of result.suggestions) {
-            const seed = createIdeasSeedFromArtifacts({
+            const seed = await createIdeasSeedFromArtifacts({
               artifactIds: suggestion.itemIds,
               title: suggestion.title,
               notes: suggestion.rationale,

@@ -57,6 +57,14 @@ function saveStore(store: SeedStore): void {
   fs.writeFileSync(seedsPath(), JSON.stringify(store, null, 2), 'utf-8');
 }
 
+function persistSeedInStore(seed: IdeasSeed): void {
+  const store = loadStore();
+  const idx = store.seeds.findIndex((item) => item.id === seed.id);
+  if (idx >= 0) store.seeds[idx] = seed;
+  else store.seeds.unshift(seed);
+  saveStore(store);
+}
+
 export function listIdeasSeeds(): IdeasSeed[] {
   return loadStore().seeds.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
@@ -74,14 +82,14 @@ export function deleteIdeasSeed(id: string): boolean {
   return true;
 }
 
-export function createIdeasSeedFromArtifacts(input: {
+export async function createIdeasSeedFromArtifacts(input: {
   artifactIds: string[];
   title?: string;
   notes?: string;
   strategy?: string;
   strategyParams?: Record<string, string | number | boolean>;
   createdBy?: 'user' | 'model' | 'system';
-}): IdeasSeed {
+}): Promise<IdeasSeed> {
   const artifactIds = [...new Set(input.artifactIds.map((id) => String(id)).filter(Boolean))];
   if (artifactIds.length === 0) throw new Error('At least one artifact id is required.');
 
@@ -102,21 +110,19 @@ export function createIdeasSeedFromArtifacts(input: {
     strategyParams: input.strategyParams,
   };
 
-  const store = loadStore();
-  store.seeds.unshift(seed);
-  saveStore(store);
-  void writeIdeasSeedMd(seed);
+  persistSeedInStore(seed);
+  await writeIdeasSeedMd(seed);
   return seed;
 }
 
-export function createIdeasSeedFromText(input: {
+export async function createIdeasSeedFromText(input: {
   text: string;
   title?: string;
   notes?: string;
   strategy?: string;
   strategyParams?: Record<string, string | number | boolean>;
   createdBy?: 'user' | 'model' | 'system';
-}): IdeasSeed {
+}): Promise<IdeasSeed> {
   const text = input.text.trim();
   if (!text) throw new Error('Seed text cannot be empty.');
 
@@ -136,7 +142,7 @@ export function createIdeasSeedFromText(input: {
     },
   });
 
-  return createIdeasSeedFromArtifacts({
+  return await createIdeasSeedFromArtifacts({
     artifactIds: [artifact.id],
     title: input.title?.trim() || 'Seed from text',
     notes: input.notes,
@@ -146,17 +152,16 @@ export function createIdeasSeedFromText(input: {
   });
 }
 
-export function touchIdeasSeed(id: string): void {
-  const store = loadStore();
-  const seed = store.seeds.find((item) => item.id === id);
+export async function touchIdeasSeed(id: string): Promise<void> {
+  const seed = readIdeasSeed(id);
   if (!seed) return;
   seed.lastUsedAt = new Date().toISOString();
-  saveStore(store);
+  persistSeedInStore(seed);
+  await writeIdeasSeedMd(seed);
 }
 
-export function linkIdeasSeedToRun(input: { seedId: string; runId: string; nodeIds?: string[] }): void {
-  const store = loadStore();
-  const seed = store.seeds.find((item) => item.id === input.seedId);
+export async function linkIdeasSeedToRun(input: { seedId: string; runId: string; nodeIds?: string[] }): Promise<void> {
+  const seed = readIdeasSeed(input.seedId);
   if (!seed) return;
 
   seed.lastUsedAt = new Date().toISOString();
@@ -164,7 +169,8 @@ export function linkIdeasSeedToRun(input: { seedId: string; runId: string; nodeI
   if (input.nodeIds && input.nodeIds.length > 0) {
     seed.relatedNodeIds = [...new Set([...(seed.relatedNodeIds ?? []), ...input.nodeIds])];
   }
-  saveStore(store);
+  persistSeedInStore(seed);
+  await writeIdeasSeedMd(seed);
 }
 
 export function getSeedArtifacts(seed: IdeasSeed): Artifact[] {
