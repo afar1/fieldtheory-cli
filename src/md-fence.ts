@@ -1,11 +1,8 @@
 /**
  * Strip LLM-generated code fence wrappers from wiki page content.
  *
- * LLM engines (Claude CLI, etc.) sometimes wrap an entire markdown response in
- * a ```markdown ... ``` code block. When that lands on disk it renders the
- * whole file as a code block instead of markdown. This module both prevents
- * the corruption at write-time (called from compileMd) and cleans up pages
- * that were already written before the prevention landed.
+ * Some LLM engines wrap their whole response in a ```markdown ... ``` block,
+ * which otherwise renders the page as a code block instead of markdown.
  */
 
 import path from 'node:path';
@@ -33,10 +30,8 @@ export function stripLlmMarkdownFence(raw: string): string {
   const full = s.match(/^```[a-zA-Z0-9-]*\s*\r?\n([\s\S]*?)\r?\n```\s*$/);
   if (full) return full[1].trim();
 
-  // Case B — orphan leading language tag, but only if the next line is
-  // frontmatter. Category/domain/entity pages always start with `---`, so
-  // this guard prevents stripping legitimate content that happens to begin
-  // with the literal word "markdown".
+  // Case B — orphan leading language tag, guarded by frontmatter lookahead
+  // so we don't strip legitimate content starting with the word "markdown".
   s = s.replace(/^markdown\r?\n(?=---)/, '');
 
   // Case C — orphan trailing fence on its own line.

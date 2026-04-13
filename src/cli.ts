@@ -753,15 +753,13 @@ export function buildCli() {
           }
         }
 
-        // Opportunistic wiki hygiene: if previous `ft wiki` runs left fenced
-        // pages on disk, quietly fix them. Silent when clean; one-line summary
-        // when it repaired something.
+        // Opportunistic wiki hygiene: quietly fix any leftover fenced pages.
         try {
           const fence = await cleanWikiFences();
           if (fence.fixed > 0) {
             console.log(`  ✓ Tidied ${fence.fixed} wiki page${fence.fixed === 1 ? '' : 's'} with leftover code fences`);
           }
-        } catch { /* best effort — never fail sync on hygiene */ }
+        } catch { /* never fail sync on hygiene */ }
 
         if (firstRun) {
           console.log(`\n  Next steps:`);
