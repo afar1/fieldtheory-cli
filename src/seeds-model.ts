@@ -19,6 +19,7 @@ export function buildSeedOrganizeExplainPrompt(input: {
   candidateCount: number;
   candidatePreview: SeedCandidate[];
   suggestCount: number;
+  theme?: string;
 }): string {
   const preview = input.candidatePreview
     .slice(0, 12)
@@ -31,7 +32,7 @@ Task: explain how you will organize a candidate bookmark pool into ${input.sugge
 
 Candidate pool size: ${input.candidateCount}
 Filters: ${JSON.stringify(input.filters)}
-
+${input.theme ? `Theme prompt: ${input.theme}\n` : ''}
 Candidate preview:
 ${preview}
 
@@ -45,6 +46,7 @@ export function buildSeedOrganizeSuggestPrompt(input: {
   filters: SeedFilterSpec;
   candidates: SeedCandidate[];
   suggestCount: number;
+  theme?: string;
 }): string {
   const preview = input.candidates
     .map((item) => ({
@@ -62,7 +64,7 @@ export function buildSeedOrganizeSuggestPrompt(input: {
 Create ${input.suggestCount} interesting seed groupings from the candidate bookmarks below.
 Favor groups that are coherent, interesting, and likely to produce different kinds of repo-grounded ideas.
 Use the bookmark IDs exactly as provided.
-
+${input.theme ? `Interpret the grouping through this theme prompt: ${input.theme}\n` : ''}
 Filters: ${JSON.stringify(input.filters)}
 
 Candidates:
@@ -106,6 +108,7 @@ export async function modelOrganizeSeeds(input: {
   filters: SeedFilterSpec;
   candidates: SeedCandidate[];
   suggestCount?: number;
+  theme?: string;
   onProgress?: (message: string) => void;
   engine?: ResolvedEngine;
 }): Promise<SeedModelPlan> {
@@ -120,6 +123,7 @@ export async function modelOrganizeSeeds(input: {
       candidateCount: input.candidates.length,
       candidatePreview: input.candidates,
       suggestCount,
+      theme: input.theme,
     }),
     { timeout: 120_000, maxBuffer: 1024 * 1024 * 4 },
   );
@@ -132,6 +136,7 @@ export async function modelOrganizeSeeds(input: {
       filters: input.filters,
       candidates: input.candidates,
       suggestCount,
+      theme: input.theme,
     }),
     { timeout: 180_000, maxBuffer: 1024 * 1024 * 4 },
   );

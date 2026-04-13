@@ -14,11 +14,13 @@ test('buildSeedOrganizeExplainPrompt includes candidate count and preview', asyn
       { id: '1', text: 'agent reliability', url: 'u', authorHandle: 'afar0x' },
     ],
     suggestCount: 3,
+    theme: 'quiet leverage',
   });
 
   assert.ok(prompt.includes('Candidate pool size: 8'));
   assert.ok(prompt.includes('agent reliability'));
   assert.ok(prompt.includes('Filters:'));
+  assert.ok(prompt.includes('Theme prompt: quiet leverage'));
 });
 
 test('parseSeedOrganizeExplanation extracts explanation text', async () => {

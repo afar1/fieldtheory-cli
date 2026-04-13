@@ -1641,6 +1641,7 @@ export function buildCli() {
   seeds
     .command('random')
     .description('Play a random prompt mini-game and shape a seed from it')
+    .option('--mode <kind>', 'Random mode: sample | model', 'sample')
     .option('--category <name>', 'Filter by category')
     .option('--domain <name>', 'Filter by domain')
     .option('--folder <name>', 'Filter by folder')
@@ -1649,6 +1650,7 @@ export function buildCli() {
     .option('--limit <n>', 'Max bookmarks to use', (v: string) => Number(v), 5)
     .option('--prompts <n>', 'Show N random word-pair prompts', (v: string) => Number(v), 6)
     .option('--pick <text>', 'Chosen random prompt phrase')
+    .option('--suggest <n>', 'Number of model suggestions', (v: string) => Number(v), 3)
     .option('--create', 'Save the result as a seed', false)
     .option('--title <text>', 'Seed title override')
     .action(safe(async (options) => {
@@ -1673,6 +1675,60 @@ export function buildCli() {
         },
         strategyParams: options.pick ? { pick: String(options.pick) } : undefined,
       });
+
+      const mode = String(options.mode || 'sample');
+      if (mode === 'model' && options.pick) {
+        const candidates = await querySeedCandidates({ ...spec.filters, limit: Math.max((spec.filters.limit ?? 5) * 3, 15) });
+        if (candidates.length === 0) {
+          console.log('No candidate bookmarks found.');
+          return;
+        }
+
+        const result = await modelOrganizeSeeds({
+          filters: spec.filters,
+          candidates,
+          suggestCount: Number(options.suggest) || 3,
+          theme: String(options.pick),
+          onProgress: (message) => process.stderr.write(`  ${message}\n`),
+        });
+
+        console.log(`Picked prompt: ${String(options.pick)}`);
+        console.log('');
+        console.log('Plan');
+        console.log('');
+        console.log(result.explanation);
+        console.log('');
+        console.log('Suggestions');
+        console.log('');
+        for (const [idx, suggestion] of result.suggestions.entries()) {
+          console.log(`${idx + 1}. ${suggestion.title}  (${suggestion.itemIds.length})`);
+          console.log(`   ${suggestion.rationale}`);
+          console.log(`   ids: ${suggestion.itemIds.join(', ')}`);
+          console.log('');
+        }
+
+        if (options.create && result.suggestions.length > 0) {
+          console.log('Saved seeds');
+          console.log('');
+          for (const suggestion of result.suggestions) {
+            const seed = await createIdeasSeedFromArtifacts({
+              artifactIds: suggestion.itemIds,
+              title: options.title ? String(options.title) : suggestion.title,
+              notes: suggestion.rationale,
+              strategy: 'random-model',
+              strategyParams: {
+                pick: String(options.pick),
+                suggest: Number(options.suggest) || 3,
+              },
+              createdBy: 'model',
+            });
+            console.log(`- ${seed.id}  ${seed.title}`);
+          }
+          console.log('');
+        }
+        return;
+      }
+
       const candidates = await queryRandomSeedCandidates(spec.filters);
       if (options.pick) {
         console.log(`Picked prompt: ${String(options.pick)}`);
