@@ -9,7 +9,8 @@ import {
 import { linkIdeasSeedToRun, readIdeasSeed, touchIdeasSeed } from './ideas-seeds.js';
 import { writeIdeasBatchMd, writeIdeasNodeMds, writeIdeasRunMd } from './ideas-files.js';
 import { refreshIdeasDerivedState } from './ideas-derived.js';
-import { DEFAULT_FRAMES, getFrame } from './adjacent/frames.js';
+import { DEFAULT_FRAMES } from './adjacent/frames.js';
+import { getFrame } from './frames-registry.js';
 import { runPipeline, renderTwoByTwo, renderDotList } from './adjacent/pipeline.js';
 import type { Consideration, Dot, Artifact, Frame } from './adjacent/types.js';
 import { resolveEngine } from './engine.js';

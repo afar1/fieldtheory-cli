@@ -158,3 +158,7 @@ export function ideasBatchesDir(date?: string): string {
 export function ideasReposRegistryPath(): string {
   return path.join(ideasMdDir(), 'repos.json');
 }
+
+export function userFramesPath(): string {
+  return path.join(ideasMdDir(), 'frames.json');
+}

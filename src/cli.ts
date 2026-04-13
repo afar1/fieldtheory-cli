@@ -60,7 +60,15 @@ import {
   removeRepoFromRegistry,
   resolveRepoList,
 } from './ideas-repos.js';
-import { DEFAULT_FRAMES, getFrame } from './adjacent/frames.js';
+import { DEFAULT_FRAMES } from './adjacent/frames.js';
+import {
+  addUserFrameFromFile,
+  getFrame,
+  listAllFrames,
+  loadUserFrames,
+  removeUserFrame,
+  validateOptionalFrameId,
+} from './frames-registry.js';
 import {
   SEED_STRATEGIES,
   buildSeedStrategySpec,
@@ -423,22 +431,6 @@ export function resolveFolder(folders: BookmarkFolder[], query: string): Bookmar
   }
   const available = folders.map((f) => f.name).join(', ') || '(none)';
   throw new Error(`No folder matches "${query}". Available: ${available}`);
-}
-
-/**
- * Validate a user-supplied frame id. Returns the trimmed id if the frame
- * exists, undefined if the user did not pass one, and throws with a helpful
- * message if the id is non-empty but unknown.
- */
-function resolveOptionalFrameId(opt: unknown): string | undefined {
-  if (opt === undefined || opt === null) return undefined;
-  const id = String(opt).trim();
-  if (!id) return undefined;
-  if (!getFrame(id)) {
-    const known = DEFAULT_FRAMES.map((f) => f.id).join(', ');
-    throw new Error(`Unknown frame: "${id}". Available: ${known}.`);
-  }
-  return id;
 }
 
 /**
@@ -1564,7 +1556,7 @@ export function buildCli() {
     .option('--notes <text>', 'Optional notes')
     .option('--frame <id>', 'Pin a 2x2 frame on the saved seed')
     .action(safe(async (options) => {
-      const frameId = resolveOptionalFrameId(options.frame);
+      const frameId = validateOptionalFrameId(options.frame);
       const seed = await createIdeasSeedFromArtifacts({
         artifactIds: (options.artifact as string[]).map(String),
         title: options.title ? String(options.title) : undefined,
@@ -1587,7 +1579,7 @@ export function buildCli() {
     .option('--notes <text>', 'Optional notes')
     .option('--frame <id>', 'Pin a 2x2 frame on the saved seed')
     .action(safe(async (text: string, options) => {
-      const frameId = resolveOptionalFrameId(options.frame);
+      const frameId = validateOptionalFrameId(options.frame);
       const seed = await createIdeasSeedFromText({
         text: String(text),
         title: options.title ? String(options.title) : undefined,
@@ -1658,7 +1650,7 @@ export function buildCli() {
     .option('--title <text>', 'Seed title override')
     .option('--frame <id>', 'Pin a 2x2 frame on the saved seed')
     .action(safe(async (query: string, options) => {
-      const frameId = resolveOptionalFrameId(options.frame);
+      const frameId = validateOptionalFrameId(options.frame);
       const spec = buildSeedStrategySpec({
         strategy: 'search',
         filters: {
@@ -1699,7 +1691,7 @@ export function buildCli() {
     .option('--title <text>', 'Seed title override')
     .option('--frame <id>', 'Pin a 2x2 frame on the saved seed')
     .action(safe(async (options) => {
-      const frameId = resolveOptionalFrameId(options.frame);
+      const frameId = validateOptionalFrameId(options.frame);
       const spec = buildSeedStrategySpec({
         strategy: 'recent',
         filters: {
@@ -1743,7 +1735,7 @@ export function buildCli() {
     .option('--title <text>', 'Seed title override')
     .option('--frame <id>', 'Pin a 2x2 frame on the saved seed')
     .action(safe(async (options) => {
-      const frameId = resolveOptionalFrameId(options.frame);
+      const frameId = validateOptionalFrameId(options.frame);
       const prompts = generateRandomSeedPrompts(Number(options.prompts) || 6);
       console.log('Mini-game prompts');
       console.log('');
@@ -1855,7 +1847,7 @@ export function buildCli() {
     .option('--title <text>', 'Seed title override')
     .option('--frame <id>', 'Pin a 2x2 frame on the saved seed')
     .action(safe(async (options) => {
-      const frameId = resolveOptionalFrameId(options.frame);
+      const frameId = validateOptionalFrameId(options.frame);
       const spec = buildSeedStrategySpec({
         strategy: 'lucky',
         filters: {
@@ -1900,7 +1892,7 @@ export function buildCli() {
     .option('--limit <n>', 'Max bookmarks to scan', (v: string) => Number(v), 60)
     .option('--frame <id>', 'Pin a 2x2 frame on the saved seeds')
     .action(safe(async (options) => {
-      const frameId = resolveOptionalFrameId(options.frame);
+      const frameId = validateOptionalFrameId(options.frame);
       const filters = {
         query: options.query ? String(options.query) : undefined,
         category: options.category ? String(options.category) : undefined,
@@ -2044,6 +2036,90 @@ export function buildCli() {
     .action(safe(async () => {
       const count = clearReposRegistry();
       console.log(`  ✓ Cleared ${count} saved repo${count === 1 ? '' : 's'}.`);
+    }));
+
+  // ── frames ─────────────────────────────────────────────────────────────
+
+  const frames = program
+    .command('frames')
+    .description('List built-in and user-defined 2x2 frames');
+
+  frames.action(() => {
+    const all = listAllFrames();
+    const userIds = new Set(loadUserFrames().map((f) => f.id));
+    console.log(`Frames (${all.length} total: ${all.length - userIds.size} built-in, ${userIds.size} user):`);
+    for (const f of all) {
+      const origin = userIds.has(f.id) ? 'user' : 'built-in';
+      console.log(`  ${f.id.padEnd(28)} ${f.group.padEnd(9)} ${origin.padEnd(9)} ${f.name}`);
+    }
+  });
+
+  frames
+    .command('list')
+    .description('List every available frame (built-in + user)')
+    .action(safe(async () => {
+      const all = listAllFrames();
+      const userIds = new Set(loadUserFrames().map((f) => f.id));
+      for (const f of all) {
+        const origin = userIds.has(f.id) ? 'user' : 'built-in';
+        console.log(`${f.id}  ${f.group}  ${origin}  ${f.name}`);
+      }
+    }));
+
+  frames
+    .command('show')
+    .description('Show one frame in detail')
+    .argument('<id>', 'Frame id (built-in or user)')
+    .action(safe(async (id: string) => {
+      const frame = getFrame(String(id));
+      if (!frame) {
+        const known = listAllFrames().map((f) => f.id).join(', ');
+        console.log(`  Unknown frame: ${String(id)}`);
+        console.log(`  Available: ${known}`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`${frame.name} (${frame.id})`);
+      console.log(`  group: ${frame.group}`);
+      console.log(`  axis A: ${frame.axisA.label}`);
+      console.log(`    ${frame.axisA.rubricSentence}`);
+      console.log(`  axis B: ${frame.axisB.label}`);
+      console.log(`    ${frame.axisB.rubricSentence}`);
+      console.log(`  quadrants:`);
+      console.log(`    high A × high B: ${frame.quadrantLabels.highHigh}`);
+      console.log(`    high A × low  B: ${frame.quadrantLabels.highLow}`);
+      console.log(`    low  A × high B: ${frame.quadrantLabels.lowHigh}`);
+      console.log(`    low  A × low  B: ${frame.quadrantLabels.lowLow}`);
+      console.log(`  generation addition:`);
+      console.log(`    ${frame.generationPromptAddition}`);
+    }));
+
+  frames
+    .command('add')
+    .description('Add a user-defined frame from a JSON file')
+    .argument('<file>', 'Path to a JSON file describing the frame')
+    .action(safe(async (file: string) => {
+      const result = addUserFrameFromFile(String(file));
+      const verb = result.replacedExisting ? 'Updated' : 'Added';
+      console.log(`  ✓ ${verb} user frame: ${result.frame.id}`);
+      console.log(`  ${result.frame.name} (${result.frame.group})`);
+      console.log(`\n  Next:`);
+      console.log(`    ft frames show ${result.frame.id}`);
+      console.log(`    ft ideas run --seed <seed-id> --repo . --frame ${result.frame.id}`);
+    }));
+
+  frames
+    .command('remove')
+    .description('Remove a user-defined frame (built-ins cannot be removed)')
+    .argument('<id>', 'Frame id')
+    .action(safe(async (id: string) => {
+      const removed = removeUserFrame(String(id));
+      if (!removed) {
+        console.log(`  Not a user frame: ${String(id)}`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`  ✓ Removed user frame: ${String(id)}`);
     }));
 
   // ── skill ──────────────────────────────────────────────────────────────
