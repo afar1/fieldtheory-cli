@@ -33,7 +33,11 @@ export async function saveSeedFromCandidates(input: SaveSeedFromCandidatesInput)
   // store rather than from the bookmarks SQLite DB. The original bookmark id
   // is carried in metadata so future code can cross-reference back.
   const createdBy = input.createdBy ?? 'user';
-  const producer = createdBy === 'model' ? 'llm' : 'user';
+  // Provenance producer vocabulary is ('user' | 'llm' | 'system'). Map
+  // createdBy = 'model' → 'llm'; everything else passes through. An earlier
+  // version of this function squashed 'system' → 'user' by accident.
+  const producer: 'user' | 'llm' | 'system' =
+    createdBy === 'model' ? 'llm' : createdBy;
 
   const artifactIds = input.candidates.map((candidate) => {
     const artifact = writeArtifact({
