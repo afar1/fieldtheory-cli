@@ -47,22 +47,53 @@ export const DEPTH_BUDGETS: Record<Depth, DepthBudget> = {
 
 // ── Stage 1: Read — seed_brief ────────────────────────────────────────────────
 
+export interface SeedItem {
+  content: string;
+  type: string;
+}
+
 export interface SeedBriefInput {
-  seedContent: string;
-  seedType: string;
+  seedItems: SeedItem[];
+}
+
+const PER_ITEM_CAP = 1500;
+
+function buildSeedBlock(items: SeedItem[]): string {
+  if (items.length === 1) {
+    const sanitized = sanitizeUserContent(items[0]!.content, PER_ITEM_CAP);
+    return `<seed>\n${sanitized}\n</seed>`;
+  }
+
+  const labeled = items
+    .map((item, idx) => {
+      const sanitized = sanitizeUserContent(item.content, PER_ITEM_CAP);
+      return `[Item ${idx + 1}/${items.length} — type: ${item.type}]\n${sanitized}`;
+    })
+    .join('\n\n---\n\n');
+  return `<seed>\nThis seed contains ${items.length} related items. Read them all and synthesize across them; do not anchor on any single one.\n\n${labeled}\n</seed>`;
 }
 
 export function buildReadPrompt(input: SeedBriefInput): string {
-  const sanitized = sanitizeUserContent(input.seedContent, 1200);
+  if (input.seedItems.length === 0) {
+    throw new Error('buildReadPrompt: seedItems must contain at least one item.');
+  }
+
+  const isMulti = input.seedItems.length > 1;
+  const seedTypes = [...new Set(input.seedItems.map((i) => i.type))].join(', ');
+  const itemDescriptor = isMulti
+    ? `${input.seedItems.length} seed items (types: ${seedTypes})`
+    : `a seed artifact (type: ${seedTypes})`;
+  const synthesisNote = isMulti
+    ? ' When the seed contains multiple items, your brief should describe the *shared* domain, claim, and questions across them — not any single item in isolation.'
+    : '';
+
   return `${UNTRUSTED_NOTE}
 
 You are a research analyst helping a builder understand a piece of content deeply so they can explore adjacent ideas.
 
-Below is a seed artifact (type: ${input.seedType}). Produce a structured seed brief that will guide an LLM-driven exploration session.
+Below is ${itemDescriptor}. Produce a single structured seed brief that will guide an LLM-driven exploration session.${synthesisNote}
 
-<seed>
-${sanitized}
-</seed>
+${buildSeedBlock(input.seedItems)}
 
 Output a JSON object with exactly these fields — no markdown fencing, no extra commentary, just the JSON:
 

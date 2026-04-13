@@ -59,7 +59,8 @@ export type ProgressCallback = (stage: PipelineStage | 'init' | 'done', message:
 // ── Pipeline options ──────────────────────────────────────────────────────────
 
 export interface RunPipelineOptions {
-  seedArtifactId: string;
+  /** One or more seed artifact ids. The pipeline reads them all and synthesizes a single seed brief across them. */
+  seedArtifactIds: string[];
   frame: Frame;
   repo: string;
   depth: ConsiderationDepth;
@@ -107,34 +108,44 @@ function makeProvenance(stage: PipelineStage, engine: ResolvedEngine, inputIds: 
 // ── Stage 1: Read ─────────────────────────────────────────────────────────────
 
 async function stageRead(
-  seedArtifact: Artifact,
+  seedArtifacts: Artifact[],
   ctx: PipelineContext,
 ): Promise<{ briefArtifact: Artifact; brief: SeedBriefParsed }> {
-  emit(ctx, 'read', 'Reading seed...');
+  if (seedArtifacts.length === 0) {
+    throw new Error('stageRead: at least one seed artifact is required.');
+  }
 
-  const cached = readSeedBriefCache(seedArtifact.id, ctx.engine.name) as SeedBriefParsed | null;
+  const seedIds = seedArtifacts.map((a) => a.id);
+  const label = seedArtifacts.length === 1
+    ? 'Reading seed...'
+    : `Reading ${seedArtifacts.length} seed items...`;
+  emit(ctx, 'read', label);
+
+  const cached = readSeedBriefCache(seedIds, ctx.engine.name) as SeedBriefParsed | null;
   if (cached) {
     emit(ctx, 'read', 'Seed brief loaded from cache.');
     const briefArtifact = writeArtifact({
       type: 'seed_brief',
       source: 'adjacent',
-      provenance: makeProvenance('read', ctx.engine, [seedArtifact.id]),
+      provenance: makeProvenance('read', ctx.engine, seedIds),
       content: JSON.stringify(cached, null, 2),
       metadata: cached as unknown as Record<string, unknown>,
     });
     return { briefArtifact, brief: cached };
   }
 
-  const prompt = buildReadPrompt({ seedContent: seedArtifact.content, seedType: seedArtifact.type });
+  const prompt = buildReadPrompt({
+    seedItems: seedArtifacts.map((a) => ({ content: a.content, type: a.type })),
+  });
   const raw = await invokeEngineAsync(ctx.engine, prompt, { timeout: ctx.budget.timeoutMs });
   const brief = parseSeedBrief(raw);
 
-  writeSeedBriefCache(seedArtifact.id, ctx.engine.name, brief);
+  writeSeedBriefCache(seedIds, ctx.engine.name, brief);
 
   const briefArtifact = writeArtifact({
     type: 'seed_brief',
     source: 'adjacent',
-    provenance: makeProvenance('read', ctx.engine, [seedArtifact.id]),
+    provenance: makeProvenance('read', ctx.engine, seedIds),
     content: JSON.stringify(brief, null, 2),
     metadata: brief as unknown as Record<string, unknown>,
   });
@@ -370,7 +381,11 @@ export interface PipelineResult {
 }
 
 export async function runPipeline(opts: RunPipelineOptions): Promise<PipelineResult> {
-  const { seedArtifactId, frame, repo, depth, steering, parentId, engine, onProgress } = opts;
+  const { seedArtifactIds, frame, repo, depth, steering, parentId, engine, onProgress } = opts;
+
+  if (!Array.isArray(seedArtifactIds) || seedArtifactIds.length === 0) {
+    throw new Error('runPipeline: seedArtifactIds must contain at least one id.');
+  }
 
   const ctx: PipelineContext = {
     engine,
@@ -381,8 +396,12 @@ export async function runPipeline(opts: RunPipelineOptions): Promise<PipelineRes
     onProgress,
   };
 
-  const seedArtifact = readArtifact(seedArtifactId);
-  if (!seedArtifact) throw new Error(`Seed artifact not found: ${seedArtifactId}`);
+  const seedArtifacts: Artifact[] = [];
+  for (const id of seedArtifactIds) {
+    const artifact = readArtifact(id);
+    if (!artifact) throw new Error(`Seed artifact not found: ${id}`);
+    seedArtifacts.push(artifact);
+  }
 
   const considerationId = generateConsiderationId();
   const createdAt = nowIso();
@@ -394,7 +413,7 @@ export async function runPipeline(opts: RunPipelineOptions): Promise<PipelineRes
   // Captures stable fields; only outputIds and completedStages vary per checkpoint.
   const checkpoint = () => writeConsideration({
     id: considerationId,
-    inputIds: [seedArtifactId],
+    inputIds: [...seedArtifactIds],
     outputIds: [...outputIds],
     frame,
     steering,
@@ -407,7 +426,7 @@ export async function runPipeline(opts: RunPipelineOptions): Promise<PipelineRes
   });
 
   // ── Stage 1 ────────────────────────────────────────────────────────────────
-  const { briefArtifact, brief } = await stageRead(seedArtifact, ctx);
+  const { briefArtifact, brief } = await stageRead(seedArtifacts, ctx);
   outputIds.push(briefArtifact.id);
   completedStages.push('read');
   checkpoint();
@@ -437,7 +456,7 @@ export async function runPipeline(opts: RunPipelineOptions): Promise<PipelineRes
 
   const finalConsideration: Consideration = {
     id: considerationId,
-    inputIds: [seedArtifactId],
+    inputIds: [...seedArtifactIds],
     outputIds: [...outputIds],
     frame,
     steering,

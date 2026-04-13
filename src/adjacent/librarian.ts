@@ -264,8 +264,15 @@ export function readRepoIndex(repoPath: string): unknown | null {
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
 
-function seedBriefCachePath(artifactId: string, model: string): string {
-  const key = `${artifactId}-${model.replace(/[^a-z0-9-]/gi, '-')}`;
+function seedBriefCachePath(artifactIds: string[], model: string): string {
+  if (artifactIds.length === 0) {
+    throw new Error('seedBriefCachePath: artifactIds must not be empty.');
+  }
+  const sortedIds = [...artifactIds].sort();
+  const idHash = sortedIds.length === 1
+    ? sortedIds[0]!
+    : crypto.createHash('sha256').update(sortedIds.join('\n')).digest('hex').slice(0, 16);
+  const key = `${idHash}-${model.replace(/[^a-z0-9-]/gi, '-')}`;
   return path.join(adjacentCacheDir(), 'seed-briefs', `${key}.json`);
 }
 
@@ -274,12 +281,12 @@ function resultCachePath(seedId: string, frameId: string, steeringHash: string, 
   return path.join(adjacentCacheDir(), 'results', `${key}.json`);
 }
 
-export function readSeedBriefCache(artifactId: string, model: string): unknown | null {
-  try { return JSON.parse(fs.readFileSync(seedBriefCachePath(artifactId, model), 'utf-8')); } catch { return null; }
+export function readSeedBriefCache(artifactIds: string[], model: string): unknown | null {
+  try { return JSON.parse(fs.readFileSync(seedBriefCachePath(artifactIds, model), 'utf-8')); } catch { return null; }
 }
 
-export function writeSeedBriefCache(artifactId: string, model: string, data: unknown): void {
-  const p = seedBriefCachePath(artifactId, model);
+export function writeSeedBriefCache(artifactIds: string[], model: string, data: unknown): void {
+  const p = seedBriefCachePath(artifactIds, model);
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf-8');
 }

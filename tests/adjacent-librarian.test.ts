@@ -238,11 +238,11 @@ test('listConsiderations returns considerations sorted newest first', async () =
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
 
-test('seedBriefCache: write and read', async () => {
+test('seedBriefCache: write and read (single artifact)', async () => {
   await withAdjacentStore(async () => {
     const lib = await getLibrarian();
-    lib.writeSeedBriefCache('artifact-abc', 'claude-opus-4-6', { brief: 'A test brief', topics: ['gaze', 'ml'] });
-    const cached = lib.readSeedBriefCache('artifact-abc', 'claude-opus-4-6');
+    lib.writeSeedBriefCache(['artifact-abc'], 'claude-opus-4-6', { brief: 'A test brief', topics: ['gaze', 'ml'] });
+    const cached = lib.readSeedBriefCache(['artifact-abc'], 'claude-opus-4-6');
     assert.ok(cached, 'should find cache entry');
     assert.deepEqual((cached as any).topics, ['gaze', 'ml']);
   });
@@ -251,8 +251,32 @@ test('seedBriefCache: write and read', async () => {
 test('seedBriefCache: miss returns null', async () => {
   await withAdjacentStore(async () => {
     const lib = await getLibrarian();
-    const result = lib.readSeedBriefCache('missing', 'claude-opus-4-6');
+    const result = lib.readSeedBriefCache(['missing'], 'claude-opus-4-6');
     assert.equal(result, null);
+  });
+});
+
+test('seedBriefCache: multi-artifact key is order-independent', async () => {
+  await withAdjacentStore(async () => {
+    const lib = await getLibrarian();
+    lib.writeSeedBriefCache(['art-1', 'art-2', 'art-3'], 'claude-opus-4-6', { brief: 'group brief' });
+    // A different order should hit the same cache file.
+    const cached = lib.readSeedBriefCache(['art-3', 'art-1', 'art-2'], 'claude-opus-4-6');
+    assert.ok(cached, 'should find cache entry regardless of input order');
+    assert.equal((cached as any).brief, 'group brief');
+  });
+});
+
+test('seedBriefCache: different artifact sets do not collide', async () => {
+  await withAdjacentStore(async () => {
+    const lib = await getLibrarian();
+    lib.writeSeedBriefCache(['art-1', 'art-2'], 'claude-opus-4-6', { brief: 'pair' });
+    lib.writeSeedBriefCache(['art-1', 'art-2', 'art-3'], 'claude-opus-4-6', { brief: 'triple' });
+
+    const pair = lib.readSeedBriefCache(['art-2', 'art-1'], 'claude-opus-4-6');
+    const triple = lib.readSeedBriefCache(['art-3', 'art-2', 'art-1'], 'claude-opus-4-6');
+    assert.equal((pair as any).brief, 'pair');
+    assert.equal((triple as any).brief, 'triple');
   });
 });
 

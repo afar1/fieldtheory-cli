@@ -13,7 +13,9 @@ import type { Consideration, Dot, Artifact } from './adjacent/types.js';
 import { resolveEngine } from './engine.js';
 
 export interface IdeasRunOptions {
-  seedArtifactId?: string;
+  /** Run against an explicit list of seed artifacts (bypasses any saved seed). */
+  seedArtifactIds?: string[];
+  /** Run against a saved seed by id; the seed's artifact group is passed through to the pipeline. */
   seedId?: string;
   repo: string;
   frameId?: string;
@@ -152,21 +154,21 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
     throw new Error(`Unknown frame: ${options.frameId}`);
   }
 
-  let seedArtifactId = options.seedArtifactId;
-  if (!seedArtifactId && options.seedId) {
+  let seedArtifactIds = options.seedArtifactIds;
+  if ((!seedArtifactIds || seedArtifactIds.length === 0) && options.seedId) {
     const seed = readIdeasSeed(options.seedId);
     if (!seed) throw new Error(`Seed not found: ${options.seedId}`);
     if (seed.artifactIds.length === 0) throw new Error(`Seed has no artifacts: ${options.seedId}`);
-    seedArtifactId = seed.artifactIds[0];
+    seedArtifactIds = seed.artifactIds;
     await touchIdeasSeed(seed.id);
   }
 
-  if (!seedArtifactId) {
-    throw new Error('Provide either --seed-artifact <id> or --seed <seed-id>.');
+  if (!seedArtifactIds || seedArtifactIds.length === 0) {
+    throw new Error('Provide either --seed-artifact <id...> or --seed <seed-id>.');
   }
 
   const result = await runPipeline({
-    seedArtifactId,
+    seedArtifactIds,
     frame,
     repo: ideasRoot(options.repo),
     depth: options.depth ?? 'standard',

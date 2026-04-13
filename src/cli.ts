@@ -1361,22 +1361,25 @@ export function buildCli() {
 
   ideas
     .command('run')
-    .description('Run an ideas exploration from a seed or seed artifact')
-    .option('--seed-artifact <id>', 'Seed artifact id to start from')
+    .description('Run an ideas exploration from a seed or seed artifact group')
+    .option('--seed-artifact <id...>', 'One or more seed artifact ids to start from')
     .option('--seed <id>', 'Saved seed id to start from')
     .requiredOption('--repo <path>', 'Repo path to explore against')
     .option('--frame <id>', 'Frame id', 'leverage-specificity')
     .option('--depth <depth>', 'Depth: quick | standard | deep', 'standard')
     .option('--steering <text>', 'Optional steering nudge')
     .action(safe(async (options) => {
-      if (!options.seedArtifact && !options.seed) {
-        console.log('  Provide either --seed-artifact <id> or --seed <seed-id>.');
+      const seedArtifactIds = Array.isArray(options.seedArtifact)
+        ? (options.seedArtifact as string[]).map(String)
+        : options.seedArtifact ? [String(options.seedArtifact)] : undefined;
+      if ((!seedArtifactIds || seedArtifactIds.length === 0) && !options.seed) {
+        console.log('  Provide either --seed-artifact <id...> or --seed <seed-id>.');
         process.exitCode = 1;
         return;
       }
       console.log('  Ideas runs on your local machine. Keep your laptop awake for longer debates.');
       const summary = await runIdeas({
-        seedArtifactId: options.seedArtifact ? String(options.seedArtifact) : undefined,
+        seedArtifactIds,
         seedId: options.seed ? String(options.seed) : undefined,
         repo: String(options.repo),
         frameId: String(options.frame),
