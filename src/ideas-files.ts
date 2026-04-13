@@ -36,6 +36,7 @@ export function renderIdeasSeedMd(seed: IdeasSeed): string {
     `source_type: ${seed.sourceType}`,
     ...(seed.strategy ? [`strategy: ${seed.strategy}`] : []),
     ...(seed.strategyParams ? [`strategy_params: "${escapeYaml(JSON.stringify(seed.strategyParams))}"`] : []),
+    ...(seed.frameId ? [`frame_id: ${seed.frameId}`] : []),
     `artifact_ids: [${seed.artifactIds.map((id) => `"${escapeYaml(id)}"`).join(', ')}]`,
     ...(seed.lastUsedAt ? [`last_used_at: ${seed.lastUsedAt}`] : []),
     ...(seed.relatedRunIds && seed.relatedRunIds.length > 0 ? [`related_run_ids: [${seed.relatedRunIds.map((id) => `"${escapeYaml(id)}"`).join(', ')}]`] : []),
@@ -51,6 +52,7 @@ export function renderIdeasSeedMd(seed: IdeasSeed): string {
     `- Seed id: ${seed.id}`,
     `- Source type: ${seed.sourceType}`,
     ...(seed.strategy ? [`- Strategy: ${seed.strategy}`] : []),
+    ...(seed.frameId ? [`- Frame: ${seed.frameId}`] : []),
     `- Artifact count: ${seed.artifactIds.length}`,
     `- Created: ${seed.createdAt}`,
     ...(seed.lastUsedAt ? [`- Last used: ${seed.lastUsedAt}`] : []),
@@ -67,7 +69,7 @@ export function renderIdeasSeedMd(seed: IdeasSeed): string {
     '',
     'Use this seed in a repo-aware ideas run:',
     '',
-    `\`ft ideas run --seed ${seed.id} --repo /path/to/repo\``,
+    `\`ft ideas run --seed ${seed.id} --repo /path/to/repo${seed.frameId ? '' : ' --frame <frame-id>'}\``,
     '',
   ].join('\n');
 }

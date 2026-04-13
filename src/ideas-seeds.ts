@@ -19,6 +19,8 @@ export interface IdeasSeed {
   notes?: string;
   strategy?: string;
   strategyParams?: Record<string, string | number | boolean>;
+  /** Optional frame id pinned at create time; overrides the default but is itself overridden by an explicit --frame at run time. */
+  frameId?: string;
   lastUsedAt?: string;
   relatedRunIds?: string[];
   relatedNodeIds?: string[];
@@ -89,6 +91,7 @@ export async function createIdeasSeedFromArtifacts(input: {
   notes?: string;
   strategy?: string;
   strategyParams?: Record<string, string | number | boolean>;
+  frameId?: string;
   createdBy?: 'user' | 'model' | 'system';
 }): Promise<IdeasSeed> {
   const artifactIds = [...new Set(input.artifactIds.map((id) => String(id)).filter(Boolean))];
@@ -109,6 +112,7 @@ export async function createIdeasSeedFromArtifacts(input: {
     notes: input.notes?.trim() || undefined,
     strategy: input.strategy,
     strategyParams: input.strategyParams,
+    frameId: input.frameId?.trim() || undefined,
   };
 
   persistSeedInStore(seed);
@@ -123,6 +127,7 @@ export async function createIdeasSeedFromText(input: {
   notes?: string;
   strategy?: string;
   strategyParams?: Record<string, string | number | boolean>;
+  frameId?: string;
   createdBy?: 'user' | 'model' | 'system';
 }): Promise<IdeasSeed> {
   const text = input.text.trim();
@@ -150,6 +155,7 @@ export async function createIdeasSeedFromText(input: {
     notes: input.notes,
     strategy: input.strategy,
     strategyParams: input.strategyParams,
+    frameId: input.frameId,
     createdBy: input.createdBy,
   });
 }
@@ -192,6 +198,7 @@ export function formatIdeasSeed(seed: IdeasSeed): string {
     `  created by: ${seed.createdBy}`,
     `  artifacts: ${seed.artifactIds.join(', ')}`,
   ];
+  if (seed.frameId) lines.push(`  frame: ${seed.frameId}`);
   if (seed.lastUsedAt) lines.push(`  last used: ${seed.lastUsedAt}`);
   if (seed.notes) lines.push(`  notes: ${seed.notes}`);
   if (seed.relatedRunIds && seed.relatedRunIds.length > 0) lines.push(`  related runs: ${seed.relatedRunIds.join(', ')}`);

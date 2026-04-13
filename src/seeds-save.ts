@@ -7,6 +7,7 @@ export interface SaveSeedFromCandidatesInput {
   notes?: string;
   strategy?: string;
   strategyParams?: Record<string, string | number | boolean>;
+  frameId?: string;
   createdBy?: 'user' | 'model' | 'system';
 }
 
@@ -17,6 +18,7 @@ export async function saveSeedFromCandidates(input: SaveSeedFromCandidatesInput)
     notes: input.notes,
     strategy: input.strategy,
     strategyParams: input.strategyParams,
+    frameId: input.frameId,
     createdBy: input.createdBy,
   });
 }

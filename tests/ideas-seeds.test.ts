@@ -41,6 +41,62 @@ test('createIdeasSeedFromText persists strategy metadata and markdown', async ()
   });
 });
 
+test('createIdeasSeedFromText persists a pinned frameId and emits it in the md frontmatter', async () => {
+  await withIdeasStore(async (dir) => {
+    const seeds = await getIdeasSeeds();
+    const seed = await seeds.createIdeasSeedFromText({
+      text: 'seed with a pinned frame',
+      title: 'Frame Seed',
+      frameId: 'novelty-feasibility',
+    });
+
+    assert.equal(seed.frameId, 'novelty-feasibility');
+
+    // The store round-trips the frame across a reload.
+    const reloaded = seeds.readIdeasSeed(seed.id);
+    assert.ok(reloaded);
+    assert.equal(reloaded!.frameId, 'novelty-feasibility');
+
+    // The md frontmatter and summary both mention the frame.
+    const mdPath = path.join(dir, 'automation', 'ideas', 'seeds', seed.createdAt.slice(0, 10), `${seed.id}.md`);
+    const raw = await readFile(mdPath, 'utf8');
+    assert.ok(raw.includes('frame_id: novelty-feasibility'));
+    assert.ok(raw.includes('- Frame: novelty-feasibility'));
+  });
+});
+
+test('createIdeasSeedFromText leaves frameId undefined when not supplied', async () => {
+  await withIdeasStore(async (dir) => {
+    const seeds = await getIdeasSeeds();
+    const seed = await seeds.createIdeasSeedFromText({ text: 'no frame here', title: 'Bare Seed' });
+    assert.equal(seed.frameId, undefined);
+
+    const mdPath = path.join(dir, 'automation', 'ideas', 'seeds', seed.createdAt.slice(0, 10), `${seed.id}.md`);
+    const raw = await readFile(mdPath, 'utf8');
+    assert.ok(!raw.includes('frame_id:'));
+    assert.ok(!raw.includes('- Frame:'));
+  });
+});
+
+test('resolveFrameIdForRun: explicit beats seed pinned beats default', async () => {
+  const { resolveFrameIdForRun } = await import('../src/ideas.js');
+  // Explicit beats everything.
+  assert.equal(resolveFrameIdForRun('impact-effort', 'novelty-feasibility'), 'impact-effort');
+  // Seed frame used when explicit is absent.
+  assert.equal(resolveFrameIdForRun(undefined, 'novelty-feasibility'), 'novelty-feasibility');
+  // Default used when neither is given.
+  assert.equal(resolveFrameIdForRun(undefined, undefined), 'leverage-specificity');
+});
+
+test('resolveFrameIdForRun: empty-string explicit falls through to seed frame, not past it', async () => {
+  const { resolveFrameIdForRun } = await import('../src/ideas.js');
+  // Empty string on the explicit side is treated as "not provided" so a
+  // stringly-typed caller cannot accidentally bypass a seed-pinned frame.
+  assert.equal(resolveFrameIdForRun('', 'novelty-feasibility'), 'novelty-feasibility');
+  // And when both are empty, we land on the default.
+  assert.equal(resolveFrameIdForRun('', ''), 'leverage-specificity');
+});
+
 test('linkIdeasSeedToRun deduplicates and updates markdown', async () => {
   await withIdeasStore(async (dir) => {
     const seeds = await getIdeasSeeds();

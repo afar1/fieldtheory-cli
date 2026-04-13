@@ -198,28 +198,48 @@ function generateBatchId(): string {
   return `batch-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
 }
 
+/**
+ * Frame precedence for a run: explicit --frame wins over a seed-pinned frame,
+ * which in turn wins over the built-in default. Empty strings are treated as
+ * "not provided" so callers that round-trip through stringly-typed layers do
+ * not accidentally bypass a seed-pinned frame with a blank explicit value.
+ * Exported so tests can pin the rule without having to drive the pipeline.
+ */
+export function resolveFrameIdForRun(
+  explicit: string | undefined,
+  seedFrameId: string | undefined,
+): string {
+  if (explicit && explicit.length > 0) return explicit;
+  if (seedFrameId && seedFrameId.length > 0) return seedFrameId;
+  return 'leverage-specificity';
+}
+
 export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummary> {
   const engine = await resolveEngine();
-  const frame = getFrame(options.frameId ?? 'leverage-specificity');
-  if (!frame) {
-    throw new Error(`Unknown frame: ${options.frameId}`);
-  }
 
   if (!Array.isArray(options.repos) || options.repos.length === 0) {
     throw new Error('Provide at least one repo via repos: [...]');
   }
 
   let seedArtifactIds = options.seedArtifactIds;
+  let seedFrameId: string | undefined;
   if ((!seedArtifactIds || seedArtifactIds.length === 0) && options.seedId) {
     const seed = readIdeasSeed(options.seedId);
     if (!seed) throw new Error(`Seed not found: ${options.seedId}`);
     if (seed.artifactIds.length === 0) throw new Error(`Seed has no artifacts: ${options.seedId}`);
     seedArtifactIds = seed.artifactIds;
+    seedFrameId = seed.frameId;
     await touchIdeasSeed(seed.id);
   }
 
   if (!seedArtifactIds || seedArtifactIds.length === 0) {
     throw new Error('Provide either --seed-artifact <id...> or --seed <seed-id>.');
+  }
+
+  const resolvedFrameId = resolveFrameIdForRun(options.frameId, seedFrameId);
+  const frame = getFrame(resolvedFrameId);
+  if (!frame) {
+    throw new Error(`Unknown frame: ${resolvedFrameId}`);
   }
 
   const depth = options.depth ?? 'standard';

@@ -60,6 +60,7 @@ import {
   removeRepoFromRegistry,
   resolveRepoList,
 } from './ideas-repos.js';
+import { DEFAULT_FRAMES, getFrame } from './adjacent/frames.js';
 import {
   SEED_STRATEGIES,
   buildSeedStrategySpec,
@@ -422,6 +423,22 @@ export function resolveFolder(folders: BookmarkFolder[], query: string): Bookmar
   }
   const available = folders.map((f) => f.name).join(', ') || '(none)';
   throw new Error(`No folder matches "${query}". Available: ${available}`);
+}
+
+/**
+ * Validate a user-supplied frame id. Returns the trimmed id if the frame
+ * exists, undefined if the user did not pass one, and throws with a helpful
+ * message if the id is non-empty but unknown.
+ */
+function resolveOptionalFrameId(opt: unknown): string | undefined {
+  if (opt === undefined || opt === null) return undefined;
+  const id = String(opt).trim();
+  if (!id) return undefined;
+  if (!getFrame(id)) {
+    const known = DEFAULT_FRAMES.map((f) => f.id).join(', ');
+    throw new Error(`Unknown frame: "${id}". Available: ${known}.`);
+  }
+  return id;
 }
 
 /**
@@ -1408,7 +1425,7 @@ export function buildCli() {
     .option('--seed <id>', 'Saved seed id to start from')
     .option('--repo <path>', 'Single repo path to explore against (shorthand for --repos with one path)')
     .option('--repos <path...>', 'Multiple repo paths; produces one consideration per repo plus a batch summary')
-    .option('--frame <id>', 'Frame id', 'leverage-specificity')
+    .option('--frame <id>', 'Frame id (overrides any frame pinned on the seed)')
     .option('--depth <depth>', 'Depth: quick | standard | deep', 'standard')
     .option('--steering <text>', 'Optional steering nudge')
     .action(safe(async (options) => {
@@ -1447,7 +1464,7 @@ export function buildCli() {
         seedArtifactIds,
         seedId: options.seed ? String(options.seed) : undefined,
         repos,
-        frameId: String(options.frame),
+        frameId: options.frame ? String(options.frame) : undefined,
         depth: options.depth,
         steering: options.steering ? String(options.steering) : undefined,
         onProgress: (message) => {
@@ -1545,15 +1562,19 @@ export function buildCli() {
     .requiredOption('--artifact <id...>', 'One or more artifact ids')
     .option('--title <text>', 'Seed title')
     .option('--notes <text>', 'Optional notes')
+    .option('--frame <id>', 'Pin a 2x2 frame on the saved seed')
     .action(safe(async (options) => {
+      const frameId = resolveOptionalFrameId(options.frame);
       const seed = await createIdeasSeedFromArtifacts({
         artifactIds: (options.artifact as string[]).map(String),
         title: options.title ? String(options.title) : undefined,
         notes: options.notes ? String(options.notes) : undefined,
+        frameId,
       });
       console.log(`  ✓ Created seed: ${seed.id}`);
       console.log(`  Title: ${seed.title}`);
       console.log(`  Artifacts: ${seed.artifactIds.join(', ')}`);
+      if (frameId) console.log(`  Frame: ${frameId}`);
       console.log(`\n  Next:`);
       console.log(`    ft ideas run --seed ${seed.id} --repo .`);
     }));
@@ -1564,14 +1585,18 @@ export function buildCli() {
     .argument('<text>', 'Seed text')
     .option('--title <text>', 'Seed title')
     .option('--notes <text>', 'Optional notes')
+    .option('--frame <id>', 'Pin a 2x2 frame on the saved seed')
     .action(safe(async (text: string, options) => {
+      const frameId = resolveOptionalFrameId(options.frame);
       const seed = await createIdeasSeedFromText({
         text: String(text),
         title: options.title ? String(options.title) : undefined,
         notes: options.notes ? String(options.notes) : undefined,
+        frameId,
       });
       console.log(`  ✓ Created seed: ${seed.id}`);
       console.log(`  Title: ${seed.title}`);
+      if (frameId) console.log(`  Frame: ${frameId}`);
       console.log(`\n  Next:`);
       console.log(`    ft ideas run --seed ${seed.id} --repo .`);
     }));
@@ -1631,7 +1656,9 @@ export function buildCli() {
     .option('--limit <n>', 'Max bookmarks to use', (v: string) => Number(v), 8)
     .option('--create', 'Save the result as a seed', false)
     .option('--title <text>', 'Seed title override')
+    .option('--frame <id>', 'Pin a 2x2 frame on the saved seed')
     .action(safe(async (query: string, options) => {
+      const frameId = resolveOptionalFrameId(options.frame);
       const spec = buildSeedStrategySpec({
         strategy: 'search',
         filters: {
@@ -1653,8 +1680,9 @@ export function buildCli() {
           notes: `strategy=${spec.strategy}`,
           strategy: spec.strategy,
           strategyParams: spec.strategyParams,
+          frameId,
         });
-        console.log(`\n  ✓ Created seed: ${seed.id}`);
+        console.log(`\n  ✓ Created seed: ${seed.id}${frameId ? `  (frame: ${frameId})` : ''}`);
       }
     }));
 
@@ -1669,7 +1697,9 @@ export function buildCli() {
     .option('--limit <n>', 'Max bookmarks to use', (v: string) => Number(v), 8)
     .option('--create', 'Save the result as a seed', false)
     .option('--title <text>', 'Seed title override')
+    .option('--frame <id>', 'Pin a 2x2 frame on the saved seed')
     .action(safe(async (options) => {
+      const frameId = resolveOptionalFrameId(options.frame);
       const spec = buildSeedStrategySpec({
         strategy: 'recent',
         filters: {
@@ -1690,8 +1720,9 @@ export function buildCli() {
           notes: `strategy=${spec.strategy}`,
           strategy: spec.strategy,
           strategyParams: spec.strategyParams,
+          frameId,
         });
-        console.log(`\n  ✓ Created seed: ${seed.id}`);
+        console.log(`\n  ✓ Created seed: ${seed.id}${frameId ? `  (frame: ${frameId})` : ''}`);
       }
     }));
 
@@ -1710,7 +1741,9 @@ export function buildCli() {
     .option('--suggest <n>', 'Number of model suggestions', (v: string) => Number(v), 3)
     .option('--create', 'Save the result as a seed', false)
     .option('--title <text>', 'Seed title override')
+    .option('--frame <id>', 'Pin a 2x2 frame on the saved seed')
     .action(safe(async (options) => {
+      const frameId = resolveOptionalFrameId(options.frame);
       const prompts = generateRandomSeedPrompts(Number(options.prompts) || 6);
       console.log('Mini-game prompts');
       console.log('');
@@ -1777,9 +1810,10 @@ export function buildCli() {
                 pick: String(options.pick),
                 suggest: Number(options.suggest) || 3,
               },
+              frameId,
               createdBy: 'model',
             });
-            console.log(`- ${seed.id}  ${seed.title}`);
+            console.log(`- ${seed.id}  ${seed.title}${frameId ? `  (frame: ${frameId})` : ''}`);
           }
           console.log('');
         }
@@ -1801,8 +1835,9 @@ export function buildCli() {
           notes: `strategy=${spec.strategy}${options.pick ? ` pick=${String(options.pick)}` : ''}`,
           strategy: spec.strategy,
           strategyParams: spec.strategyParams,
+          frameId,
         });
-        console.log(`\n  ✓ Created seed: ${seed.id}`);
+        console.log(`\n  ✓ Created seed: ${seed.id}${frameId ? `  (frame: ${frameId})` : ''}`);
       }
     }));
 
@@ -1818,7 +1853,9 @@ export function buildCli() {
     .option('--limit <n>', 'Max bookmarks to use', (v: string) => Number(v), 5)
     .option('--create', 'Save the result as a seed', false)
     .option('--title <text>', 'Seed title override')
+    .option('--frame <id>', 'Pin a 2x2 frame on the saved seed')
     .action(safe(async (options) => {
+      const frameId = resolveOptionalFrameId(options.frame);
       const spec = buildSeedStrategySpec({
         strategy: 'lucky',
         filters: {
@@ -1841,8 +1878,9 @@ export function buildCli() {
           notes: `strategy=${spec.strategy}`,
           strategy: spec.strategy,
           strategyParams: spec.strategyParams,
+          frameId,
         });
-        console.log(`\n  ✓ Created seed: ${seed.id}`);
+        console.log(`\n  ✓ Created seed: ${seed.id}${frameId ? `  (frame: ${frameId})` : ''}`);
       }
     }));
 
@@ -1860,7 +1898,9 @@ export function buildCli() {
     .option('--author <handle>', 'Filter by author handle')
     .option('--days <n>', 'Limit to the last N days', (v: string) => Number(v))
     .option('--limit <n>', 'Max bookmarks to scan', (v: string) => Number(v), 60)
+    .option('--frame <id>', 'Pin a 2x2 frame on the saved seeds')
     .action(safe(async (options) => {
+      const frameId = resolveOptionalFrameId(options.frame);
       const filters = {
         query: options.query ? String(options.query) : undefined,
         category: options.category ? String(options.category) : undefined,
@@ -1910,9 +1950,10 @@ export function buildCli() {
               strategyParams: {
                 suggest: Number(options.suggest) || 3,
               },
+              frameId,
               createdBy: 'model',
             });
-            console.log(`- ${seed.id}  ${seed.title}`);
+            console.log(`- ${seed.id}  ${seed.title}${frameId ? `  (frame: ${frameId})` : ''}`);
           }
           console.log('');
         }
