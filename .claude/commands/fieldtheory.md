@@ -1,6 +1,6 @@
 ---
 name: fieldtheory
-description: Explain and drive the Field Theory CLI — bookmark-sourced seeds, repo-aware ideas runs that score ideas onto a 2x2 grid, and the interconnected .md files they leave behind. Trigger when the user asks about `ft`, bookmarks, seeds, ideas, grids, dots/nodes, or how to turn saved tweets into code suggestions against a repo.
+description: Explain and drive the Field Theory CLI — bookmark-sourced seeds, repo-aware possibility runs that score ideas onto a 2x2 grid, and the interconnected .md files they leave behind. Trigger when the user asks about `ft`, bookmarks, seeds, `ft possible` (or the older name `ft ideas`), grids, dots/nodes, or how to turn saved tweets into code suggestions against a repo.
 ---
 
 # Field Theory CLI
@@ -8,11 +8,13 @@ description: Explain and drive the Field Theory CLI — bookmark-sourced seeds, 
 The Field Theory CLI (`ft`) is a self-custody bookmark tool that does two related things:
 
 1. **Local X/Twitter bookmark archive** — sync, full-text search, classify, visualize.
-2. **Ideas runs** — take a group of bookmarks, apply them to a set of repos, and score candidate directions onto a 2x2 grid. Each scored idea is a "node" (also called a "dot") with a paragraph summary, a copiable prompt, and per-axis justifications. Seeds, runs, nodes, and batches are all saved as interconnected markdown files.
+2. **Possibility runs** (`ft possible`) — take a group of bookmarks, apply them to a set of repos, and score candidate directions onto a 2x2 grid. Each scored idea is a "node" (also called a "dot") with a paragraph summary, a copiable prompt, and per-axis justifications. Seeds, runs, nodes, and batches are all saved as interconnected markdown files.
+
+> The feature was previously named `ft ideas` and the old name still works as an alias. `ft possible` is the primary vocabulary — use it in new walkthroughs, scripts, and explanations.
 
 Everything runs locally. Bookmark storage lives at `~/.ft-bookmarks/`; ideas data lives at `~/.fieldtheory/ideas/`. Nothing leaves the machine.
 
-## Mental model — the ideas flow
+## Mental model — the possibility flow
 
 A **seed** is not raw text. A seed is:
 
@@ -61,11 +63,36 @@ Seeds should always be grounded in the user's actual bookmarks, not made up. Thr
 
 Filters: `--category`, `--domain`, `--folder`, `--author`, `--days`, `--limit`. Omit `--create` to preview the bookmark pool without saving.
 
-**Pin a frame at seed-create time** with `--frame <id>`: the seed remembers its preferred axes, and `ft ideas run` can use it without requiring `--frame` again. Explicit `--frame` on `ideas run` still wins over the seed-pinned frame.
+**Pin a frame at seed-create time** with `--frame <id>`: the seed remembers its preferred axes, and `ft possible run` can use it without requiring `--frame` again. Explicit `--frame` on `ideas run` still wins over the seed-pinned frame.
 
 **Do not** use `ft seeds text "..."` for demos or walkthroughs — it creates a text-only seed with no bookmark grounding, which defeats the purpose of the tool.
 
-## Driving a run end-to-end
+## Two ways to drive a run
+
+### `ft possible` — interactive wizard
+
+Bare `ft possible` (no subcommand) walks a TTY user through the whole flow:
+
+1. **Pick a seed** — numbered list of saved seeds. If no seeds exist, the wizard prints the three seed strategies (search / recent / random) as numbered hints, the user picks one, and the wizard exits pointing at the exact `ft seeds ...` command they should run.
+2. **Pick repos** — if a saved registry exists, offer to use it with one key (`Enter` or `y`); otherwise let them type space-separated paths. Any non-`Y/n` answer is treated as paths directly.
+3. **Pick a frame** — numbered list of every frame (built-in + user). If the picked seed has `frameId` pinned, it's marked `(seed default)` and `Enter` accepts it.
+4. **Pick a depth** — `quick ~3-5 min / ~3-5 ideas per repo`, `standard ~8-12 min / ~6-8`, `deep ~20+ min / ~10+`. `Enter` defaults to quick.
+5. **Confirm and launch** — prints the full plan (seed + title, repos, frame, depth) and asks `Y/n`.
+
+Pressing `q` at any prompt quits without launching. When stdin is not a TTY (pipes, CI, test harness), `ft possible` prints the intro instead of starting the wizard.
+
+### `ft possible run --defaults` — flags-free re-run
+
+For the "I already did this once, do it again" case. `--defaults` fills in:
+
+- **Seed:** most-recently-*used* saved seed, falling back to most-recently-*created* if no seed has ever been used. Explicit `--seed`/`--seed-artifact` still wins.
+- **Repos:** whatever's in the saved registry (`ft repos` manages it). Explicit `--repo`/`--repos` still wins.
+- **Frame:** the seed's pinned frame (via the existing precedence chain).
+- **Depth:** quick, unless the user passed `--depth` explicitly.
+
+If no seeds exist, `--defaults` prints a hint pointing at `ft seeds search "..." --create` and exits without touching anything.
+
+## Driving a run end-to-end (explicit flags)
 
 ### Single repo
 
@@ -77,31 +104,31 @@ ft seeds search "agents" --days 90 --limit 8
 ft seeds search "agents" --days 90 --limit 8 --frame leverage-specificity --create
 
 # 3. Run ideas: apply the bookmark group to this repo
-ft ideas run --seed <seed-id> --repo . --depth quick
+ft possible run --seed <seed-id> --repo . --depth quick
 
 # 4. View the grid and the full scored node list
-ft ideas grid latest
-ft ideas dots latest
+ft possible grid latest
+ft possible dots latest
 
 # 5. Export a specific node as a prompt to paste into an AI agent
-ft ideas prompt <dot-id>
+ft possible prompt <dot-id>
 ```
 
 ### Multiple repos (batched run)
 
 ```bash
 # Option A: pass them inline
-ft ideas run --seed <seed-id> --repos ~/dev/repo-a ~/dev/repo-b ~/dev/repo-c
+ft possible run --seed <seed-id> --repos ~/dev/repo-a ~/dev/repo-b ~/dev/repo-c
 
 # Option B: save a default repo set once, then omit --repos on subsequent runs
 ft repos add ~/dev/repo-a
 ft repos add ~/dev/repo-b
 ft repos add ~/dev/repo-c
-ft ideas run --seed <seed-id>          # uses the saved set
+ft possible run --seed <seed-id>          # uses the saved set
 
 # Inspect the batch after it completes
-ft ideas list                          # shows each per-repo run
-ft ideas grid <run-id>                 # one grid per repo
+ft possible list                          # shows each per-repo run
+ft possible grid <run-id>                 # one grid per repo
 ```
 
 A batched run prints a batch id, lists the top ideas across all repos (tagged by repo), and writes a `batch_summary` markdown file at `~/.fieldtheory/ideas/batches/<YYYY-MM-DD>/<batch-id>.md` that links every per-repo consideration and includes a re-run command.
@@ -116,7 +143,7 @@ ft repos remove <path>
 ft repos clear
 ```
 
-Precedence when `ft ideas run` resolves which repos to target: `--repos` > `--repo` > saved registry. Passing both `--repo` and `--repos` is an error.
+Precedence when `ft possible run` resolves which repos to target: `--repos` > `--repo` > saved registry. Passing both `--repo` and `--repos` is an error.
 
 Depth controls the LLM budget (candidate target, survey file limit, timeout): `quick | standard | deep`.
 
@@ -143,7 +170,7 @@ ft frames add <file.json>    # add or update a user frame (validated on disk bef
 ft frames remove <id>        # remove a user frame; built-ins cannot be removed
 ```
 
-Precedence when `ft ideas run` resolves which frame to use: explicit `--frame <id>` > seed-pinned `seed.frameId` > default (`leverage-specificity`).
+Precedence when `ft possible run` resolves which frame to use: explicit `--frame <id>` > seed-pinned `seed.frameId` > default (`leverage-specificity`).
 
 ## Bookmark-search commands (pre-ideas)
 
@@ -196,7 +223,7 @@ Do not describe these as working. If a user asks for any of them, explain that i
 - Ground every seed in actual bookmarks — never `seeds text` for real work
 - When previewing a pool, show the user the candidates before `--create`ing
 - When a seed has a pinned frame, honor it — don't add a redundant `--frame` unless you want to override
-- When running across multiple repos, use `--repos` or the saved registry, not N separate `ft ideas run` invocations
-- When reporting results, lead with the grid (`ft ideas grid <run-id>`) and let the user drill into `ft ideas dots <run-id>` or `ft ideas prompt <dot-id>` for detail
+- When running across multiple repos, use `--repos` or the saved registry, not N separate `ft possible run` invocations
+- When reporting results, lead with the grid (`ft possible grid <run-id>`) and let the user drill into `ft possible dots <run-id>` or `ft possible prompt <dot-id>` for detail
 - For batched runs, point at the batch summary file alongside the per-repo grids so the user can see top ideas across all repos in one place
 - If a user asks for something in "Known gaps" above, say so explicitly rather than faking it
