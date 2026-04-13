@@ -1593,6 +1593,8 @@ export function buildCli() {
           artifactIds: candidates.map((item) => item.id),
           title: options.title ? String(options.title) : summarizeSeedIntent('Search seed', spec.filters),
           notes: `strategy=${spec.strategy}`,
+          strategy: spec.strategy,
+          strategyParams: spec.strategyParams,
         });
         console.log(`\n  ✓ Created seed: ${seed.id}`);
       }
@@ -1628,6 +1630,8 @@ export function buildCli() {
           artifactIds: candidates.map((item) => item.id),
           title: options.title ? String(options.title) : summarizeSeedIntent('Recent seed', spec.filters),
           notes: `strategy=${spec.strategy}`,
+          strategy: spec.strategy,
+          strategyParams: spec.strategyParams,
         });
         console.log(`\n  ✓ Created seed: ${seed.id}`);
       }
@@ -1635,7 +1639,7 @@ export function buildCli() {
 
   seeds
     .command('random')
-    .description('Generate random prompts or preview a random seed candidate set')
+    .description('Play a random prompt mini-game and shape a seed from it')
     .option('--category <name>', 'Filter by category')
     .option('--domain <name>', 'Filter by domain')
     .option('--folder <name>', 'Filter by folder')
@@ -1648,8 +1652,12 @@ export function buildCli() {
     .option('--title <text>', 'Seed title override')
     .action(safe(async (options) => {
       const prompts = generateRandomSeedPrompts(Number(options.prompts) || 6);
-      console.log('Random prompts:');
-      for (const prompt of prompts) console.log(`  - ${prompt}`);
+      console.log('Mini-game prompts');
+      console.log('');
+      for (const [idx, prompt] of prompts.entries()) console.log(`${idx + 1}. ${prompt}`);
+      console.log('');
+      console.log('Choose one with:');
+      console.log('  ft seeds random --pick "<phrase>" --create');
       console.log('');
 
       const spec = buildSeedStrategySpec({
@@ -1665,12 +1673,20 @@ export function buildCli() {
         strategyParams: options.pick ? { pick: String(options.pick) } : undefined,
       });
       const candidates = await queryRandomSeedCandidates(spec.filters);
+      if (options.pick) {
+        console.log(`Picked prompt: ${String(options.pick)}`);
+        console.log('');
+        console.log('The model/app can use this phrase to interpret the resulting seed grouping later.');
+        console.log('');
+      }
       console.log(formatSeedCandidates(candidates));
       if (options.create && candidates.length > 0) {
         const seed = createIdeasSeedFromArtifacts({
           artifactIds: candidates.map((item) => item.id),
           title: options.title ? String(options.title) : (options.pick ? `Random seed — ${String(options.pick)}` : summarizeSeedIntent('Random seed', spec.filters)),
           notes: `strategy=${spec.strategy}${options.pick ? ` pick=${String(options.pick)}` : ''}`,
+          strategy: spec.strategy,
+          strategyParams: spec.strategyParams,
         });
         console.log(`\n  ✓ Created seed: ${seed.id}`);
       }
@@ -1709,6 +1725,8 @@ export function buildCli() {
           artifactIds: picked.map((item) => item.id),
           title: options.title ? String(options.title) : summarizeSeedIntent('Lucky seed', spec.filters),
           notes: `strategy=${spec.strategy}`,
+          strategy: spec.strategy,
+          strategyParams: spec.strategyParams,
         });
         console.log(`\n  ✓ Created seed: ${seed.id}`);
       }
@@ -1720,6 +1738,7 @@ export function buildCli() {
     .option('--by <mode>', 'Grouping mode: category | domain | folder | time')
     .option('--mode <kind>', 'Organize mode: deterministic | model', 'deterministic')
     .option('--suggest <n>', 'Number of model suggestions', (v: string) => Number(v), 3)
+    .option('--save', 'Save model suggestions as seeds', false)
     .option('--query <text>', 'Optional query filter')
     .option('--category <name>', 'Filter by category')
     .option('--domain <name>', 'Filter by domain')
@@ -1762,6 +1781,25 @@ export function buildCli() {
           console.log(`${idx + 1}. ${suggestion.title}  (${suggestion.itemIds.length})`);
           console.log(`   ${suggestion.rationale}`);
           console.log(`   ids: ${suggestion.itemIds.join(', ')}`);
+          console.log('');
+        }
+
+        if (options.save && result.suggestions.length > 0) {
+          console.log('Saved seeds');
+          console.log('');
+          for (const suggestion of result.suggestions) {
+            const seed = createIdeasSeedFromArtifacts({
+              artifactIds: suggestion.itemIds,
+              title: suggestion.title,
+              notes: suggestion.rationale,
+              strategy: 'model-organize',
+              strategyParams: {
+                suggest: Number(options.suggest) || 3,
+              },
+              createdBy: 'model',
+            });
+            console.log(`- ${seed.id}  ${seed.title}`);
+          }
           console.log('');
         }
         return;

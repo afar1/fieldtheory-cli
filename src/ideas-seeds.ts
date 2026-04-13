@@ -16,6 +16,8 @@ export interface IdeasSeed {
   createdAt: string;
   createdBy: 'user' | 'model' | 'system';
   notes?: string;
+  strategy?: string;
+  strategyParams?: Record<string, string | number | boolean>;
   lastUsedAt?: string;
   relatedRunIds?: string[];
   relatedNodeIds?: string[];
@@ -76,6 +78,8 @@ export function createIdeasSeedFromArtifacts(input: {
   artifactIds: string[];
   title?: string;
   notes?: string;
+  strategy?: string;
+  strategyParams?: Record<string, string | number | boolean>;
   createdBy?: 'user' | 'model' | 'system';
 }): IdeasSeed {
   const artifactIds = [...new Set(input.artifactIds.map((id) => String(id)).filter(Boolean))];
@@ -94,6 +98,8 @@ export function createIdeasSeedFromArtifacts(input: {
     createdAt: new Date().toISOString(),
     createdBy: input.createdBy ?? 'user',
     notes: input.notes?.trim() || undefined,
+    strategy: input.strategy,
+    strategyParams: input.strategyParams,
   };
 
   const store = loadStore();
@@ -107,6 +113,8 @@ export function createIdeasSeedFromText(input: {
   text: string;
   title?: string;
   notes?: string;
+  strategy?: string;
+  strategyParams?: Record<string, string | number | boolean>;
   createdBy?: 'user' | 'model' | 'system';
 }): IdeasSeed {
   const text = input.text.trim();
@@ -132,6 +140,8 @@ export function createIdeasSeedFromText(input: {
     artifactIds: [artifact.id],
     title: input.title?.trim() || 'Seed from text',
     notes: input.notes,
+    strategy: input.strategy,
+    strategyParams: input.strategyParams,
     createdBy: input.createdBy,
   });
 }
