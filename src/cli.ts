@@ -60,6 +60,7 @@ import {
   removeRepoFromRegistry,
   resolveRepoList,
 } from './ideas-repos.js';
+import { runPossibleWizard } from './possible-wizard.js';
 import { DEFAULT_FRAMES } from './adjacent/frames.js';
 import {
   addUserFrameFromFile,
@@ -1420,10 +1421,57 @@ export function buildCli() {
     .alias('ideas')
     .description('Apply a bookmark group to one or more repos — produces scored ideas on a 2x2 grid');
 
+  // Bare `ft possible` runs the interactive wizard when stdin is a TTY, and
+  // falls back to the help intro when it is not (pipes, CI, test harness).
   possible
-    .action(() => {
-      console.log(formatIdeasIntro());
-    });
+    .action(safe(async () => {
+      if (!process.stdin.isTTY) {
+        console.log(formatIdeasIntro());
+        return;
+      }
+      const wizardResult = await runPossibleWizard(
+        {
+          ask: async (question) => {
+            const result = await promptText(question);
+            if (result.kind === 'interrupt') {
+              throw new PromptCancelledError('Cancelled.', 130);
+            }
+            if (result.kind === 'close') {
+              throw new PromptCancelledError('No answer.', 0);
+            }
+            return result.value;
+          },
+          write: (line) => process.stderr.write(`${line}\n`),
+        },
+        {
+          listSeeds: () => listIdeasSeeds(),
+          listRepos: () => listSavedRepos(),
+          listFrames: () => listAllFrames(),
+        },
+      );
+
+      if (wizardResult.kind === 'cancelled') {
+        process.stderr.write(`\n  Wizard cancelled (${wizardResult.reason}).\n`);
+        return;
+      }
+      if (wizardResult.kind === 'no-seeds') {
+        // stepPickSeed already printed the command hint.
+        return;
+      }
+
+      const { plan } = wizardResult;
+      process.stderr.write('\n  Launching...\n');
+      const summary = await runIdeas({
+        seedId: plan.seedId,
+        repos: plan.repos,
+        frameId: plan.frameId,
+        depth: plan.depth,
+        onProgress: (message) => {
+          process.stderr.write(`  ${message}\n`);
+        },
+      });
+      printIdeasRunReport(summary);
+    }));
 
   possible
     .command('explain')
