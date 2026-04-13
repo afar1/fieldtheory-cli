@@ -175,6 +175,17 @@ test('resolveEngine: override rejects unknown engine', async () => {
   );
 });
 
+test('resolveEngine: override rejects prototype keys like __proto__', async () => {
+  const { resolveEngine } = await import('../src/engine.js');
+  for (const name of ['__proto__', 'constructor', 'toString']) {
+    await assert.rejects(
+      () => resolveEngine({ override: name }),
+      /Unknown engine/,
+      `override "${name}" should be rejected as unknown`,
+    );
+  }
+});
+
 test('resolveEngine: override fails fast when binary not on PATH', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-override-'));
   const origPath = process.env.PATH;
