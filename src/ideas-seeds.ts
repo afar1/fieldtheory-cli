@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { dataDir } from './paths.js';
+import { ideasMdDir } from './paths.js';
 import { readArtifact, writeArtifact } from './adjacent/librarian.js';
 import type { Artifact } from './adjacent/types.js';
 import { writeIdeasSeedMd } from './ideas-files.js';
@@ -31,16 +31,12 @@ interface SeedStore {
   seeds: IdeasSeed[];
 }
 
-function ideasDir(): string {
-  return path.join(dataDir(), 'automation', 'ideas');
-}
-
 function seedsPath(): string {
-  return path.join(ideasDir(), 'seeds.json');
+  return path.join(ideasMdDir(), 'seeds.json');
 }
 
 function ensureIdeasDir(): void {
-  fs.mkdirSync(ideasDir(), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(ideasMdDir(), { recursive: true, mode: 0o700 });
 }
 
 function generateSeedId(): string {

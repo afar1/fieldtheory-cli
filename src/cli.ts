@@ -30,7 +30,7 @@ import { lintMd, fixLintIssues } from './md-lint.js';
 import { exportBookmarks } from './md-export.js';
 import { renderViz } from './bookmarks-viz.js';
 import { listBrowserIds } from './browsers.js';
-import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir } from './paths.js';
+import { dataDir, ensureDataDir, isFirstRun, migrateLegacyIdeasData, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir } from './paths.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import {
@@ -489,6 +489,20 @@ function safe(fn: (...args: any[]) => Promise<void>): (...args: any[]) => Promis
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
 export function buildCli() {
+  // One-time migration of ideas data from ~/.ft-bookmarks/automation/{ideas,adjacent}/
+  // to ~/.fieldtheory/ideas/. Idempotent and cheap on hot paths — two fs.existsSync
+  // calls after the first run. Runs before any command so every subcommand sees
+  // the new layout.
+  try {
+    const migration = migrateLegacyIdeasData();
+    if (migration.migrated) {
+      process.stderr.write(`  Migrated ideas data → ${migration.newRoot}\n`);
+      process.stderr.write(`  Legacy copies left intact at ${migration.legacyIdeasRoot} and ${migration.legacyAdjacentRoot}.\n`);
+    }
+  } catch (err) {
+    process.stderr.write(`  Warning: ideas data migration failed — ${(err as Error).message}\n`);
+  }
+
   const program = new Command();
 
   async function rebuildIndex(): Promise<number> {

@@ -119,7 +119,7 @@ test('getFrame: built-in wins over a user frame with the same id (defense-in-dep
   // addUserFrame refuses shadowing, but getFrame should also behave correctly
   // if the registry file is hand-edited to include a built-in id.
   await withFramesStore(async (dir) => {
-    const framesPath = path.join(dir, 'automation', 'ideas', 'frames.json');
+    const framesPath = path.join(dir, 'ideas', 'frames.json');
     const framesDir = path.dirname(framesPath);
     await (await import('node:fs/promises')).mkdir(framesDir, { recursive: true });
     await writeFile(

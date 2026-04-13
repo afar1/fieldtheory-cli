@@ -351,7 +351,7 @@ test('getStoreStats returns zeros for empty store', async () => {
     assert.equal(stats.totalArtifacts, 0);
     assert.equal(stats.totalConsiderations, 0);
     assert.equal(stats.customFrames, 0);
-    assert.ok(stats.storePath.includes('automation/adjacent'));
+    assert.ok(stats.storePath.includes(path.join('ideas', 'adjacent')));
   });
 });
 

@@ -37,7 +37,7 @@ test('createIdeasTheory persists json and markdown', async () => {
     assert.equal(theory.runId, 'run-1');
     assert.deepEqual(theory.nodeIds, ['dot-1', 'dot-2']);
 
-    const mdPath = path.join(dir, 'automation', 'ideas', 'theories', theory.createdAt.slice(0, 10), `${theory.id}.md`);
+    const mdPath = path.join(dir, 'ideas', 'theories', theory.createdAt.slice(0, 10), `${theory.id}.md`);
     const raw = await readFile(mdPath, 'utf8');
     assert.ok(raw.includes('# Prompt panel theory'));
     assert.ok(raw.includes('## Prompt'));

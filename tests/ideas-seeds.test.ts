@@ -34,7 +34,7 @@ test('createIdeasSeedFromText persists strategy metadata and markdown', async ()
     assert.equal(seed.strategy, 'random');
     assert.deepEqual(seed.strategyParams, { pick: 'quiet leverage' });
 
-    const mdPath = path.join(dir, 'automation', 'ideas', 'seeds', seed.createdAt.slice(0, 10), `${seed.id}.md`);
+    const mdPath = path.join(dir, 'ideas', 'seeds', seed.createdAt.slice(0, 10), `${seed.id}.md`);
     const raw = await readFile(mdPath, 'utf8');
     assert.ok(raw.includes('strategy: random'));
     assert.ok(raw.includes('quiet leverage'));
@@ -58,7 +58,7 @@ test('createIdeasSeedFromText persists a pinned frameId and emits it in the md f
     assert.equal(reloaded!.frameId, 'novelty-feasibility');
 
     // The md frontmatter and summary both mention the frame.
-    const mdPath = path.join(dir, 'automation', 'ideas', 'seeds', seed.createdAt.slice(0, 10), `${seed.id}.md`);
+    const mdPath = path.join(dir, 'ideas', 'seeds', seed.createdAt.slice(0, 10), `${seed.id}.md`);
     const raw = await readFile(mdPath, 'utf8');
     assert.ok(raw.includes('frame_id: novelty-feasibility'));
     assert.ok(raw.includes('- Frame: novelty-feasibility'));
@@ -71,7 +71,7 @@ test('createIdeasSeedFromText leaves frameId undefined when not supplied', async
     const seed = await seeds.createIdeasSeedFromText({ text: 'no frame here', title: 'Bare Seed' });
     assert.equal(seed.frameId, undefined);
 
-    const mdPath = path.join(dir, 'automation', 'ideas', 'seeds', seed.createdAt.slice(0, 10), `${seed.id}.md`);
+    const mdPath = path.join(dir, 'ideas', 'seeds', seed.createdAt.slice(0, 10), `${seed.id}.md`);
     const raw = await readFile(mdPath, 'utf8');
     assert.ok(!raw.includes('frame_id:'));
     assert.ok(!raw.includes('- Frame:'));
@@ -112,7 +112,7 @@ test('linkIdeasSeedToRun deduplicates and updates markdown', async () => {
     assert.deepEqual(refreshed.relatedRunIds, ['run-1']);
     assert.deepEqual(refreshed.relatedNodeIds, ['dot-1', 'dot-2']);
 
-    const mdPath = path.join(dir, 'automation', 'ideas', 'seeds', seed.createdAt.slice(0, 10), `${seed.id}.md`);
+    const mdPath = path.join(dir, 'ideas', 'seeds', seed.createdAt.slice(0, 10), `${seed.id}.md`);
     const raw = await readFile(mdPath, 'utf8');
     assert.ok(raw.includes('## Related runs'));
     assert.ok(raw.includes('run-1'));

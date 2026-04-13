@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { dataDir } from './paths.js';
+import { ideasMdDir } from './paths.js';
 import { writeMd } from './fs.js';
 import { refreshIdeasDerivedState } from './ideas-derived.js';
 
@@ -21,21 +21,17 @@ interface TheoryStore {
   theories: IdeasTheory[];
 }
 
-function ideasDir(): string {
-  return path.join(dataDir(), 'automation', 'ideas');
-}
-
 function theoriesPath(): string {
-  return path.join(ideasDir(), 'theories.json');
+  return path.join(ideasMdDir(), 'theories.json');
 }
 
 function theoriesMdDir(date?: string): string {
-  const base = path.join(ideasDir(), 'theories');
+  const base = path.join(ideasMdDir(), 'theories');
   return date ? path.join(base, date) : base;
 }
 
 function ensureIdeasDir(): void {
-  fs.mkdirSync(ideasDir(), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(ideasMdDir(), { recursive: true, mode: 0o700 });
 }
 
 function theoryId(): string {
