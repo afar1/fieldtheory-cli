@@ -3,8 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { dataDir } from './paths.js';
 import { writeMd } from './fs.js';
-import { writeIdeasIndex } from './ideas-index.js';
-import { writeIdeasLatestPointers } from './ideas-latest.js';
+import { refreshIdeasDerivedState } from './ideas-derived.js';
 
 export interface IdeasTheory {
   id: string;
@@ -122,7 +121,6 @@ export async function createIdeasTheory(input: {
   store.theories.unshift(theory);
   saveStore(store);
   await writeMd(theoryMdPath(theory), renderTheoryMd(theory));
-  await writeIdeasIndex();
-  await writeIdeasLatestPointers();
+  await refreshIdeasDerivedState();
   return theory;
 }
