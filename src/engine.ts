@@ -93,6 +93,11 @@ function resolve(name: string): ResolvedEngine {
 /**
  * Resolve which engine to use for classification.
  *
+ * If `options.override` is set, require that specific engine: fails fast
+ * if it's unknown or not on PATH. Saved preferences and prompting are
+ * bypassed — this is meant for per-invocation overrides like `--engine`.
+ *
+ * Otherwise:
  * 1. If a saved default exists and is available, use it silently.
  * 2. If only one engine is available, use it silently.
  * 3. If multiple are available and stdin is a TTY, prompt y/n through
@@ -101,7 +106,26 @@ function resolve(name: string): ResolvedEngine {
  *
  * Throws if no engine is found.
  */
-export async function resolveEngine(): Promise<ResolvedEngine> {
+export async function resolveEngine(options: { override?: string } = {}): Promise<ResolvedEngine> {
+  if (options.override) {
+    const name = options.override;
+    if (!KNOWN_ENGINES[name]) {
+      const known = Object.keys(KNOWN_ENGINES).join(', ');
+      throw new Error(`Unknown engine "${name}". Known engines: ${known}.`);
+    }
+    if (!hasCommandOnPath(KNOWN_ENGINES[name].bin)) {
+      const available = detectAvailableEngines();
+      const hint = available.length > 0
+        ? ` Available on PATH: ${available.join(', ')}.`
+        : '';
+      throw new Error(
+        `Engine "${name}" is not on PATH.${hint}\n` +
+        `Install it and log in, or pick a different engine.`
+      );
+    }
+    return resolve(name);
+  }
+
   const available = detectAvailableEngines();
 
   if (available.length === 0) {

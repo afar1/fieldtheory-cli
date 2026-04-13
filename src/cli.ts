@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
 import { runTwitterOAuthFlow } from './xauth.js';
@@ -386,6 +386,11 @@ export function resolveFolder(folders: BookmarkFolder[], query: string): Bookmar
   throw new Error(`No folder matches "${query}". Available: ${available}`);
 }
 
+/** Per-invocation LLM engine override (bypasses saved default, fails fast). */
+export function engineOption(): Option {
+  return new Option('--engine <name>', 'Override the LLM engine for this run (e.g. claude, codex)');
+}
+
 /** Wrap an async action with graceful error handling. */
 function safe(fn: (...args: any[]) => Promise<void>): (...args: any[]) => Promise<void> {
   return async (...args: any[]) => {
@@ -416,8 +421,8 @@ export function buildCli() {
     return idx.newRecords;
   }
 
-  async function classifyNew(): Promise<void> {
-    const engine = await resolveEngine();
+  async function classifyNew(override?: string): Promise<void> {
+    const engine = await resolveEngine({ override });
 
     const start = Date.now();
     process.stderr.write('  Classifying new bookmarks (categories)...\n');
@@ -481,12 +486,18 @@ export function buildCli() {
     .option('--firefox-profile-dir <path>', 'Firefox profile directory')
     .option('--folders', 'Also sync bookmark folder tags (mirrors X\u2019s current folder state)', false)
     .option('--folder <name>', 'Sync only this folder (case-insensitive, supports unambiguous prefix)')
+    .addOption(engineOption())
     .action(async (options) => {
       const firstRun = isFirstRun();
       if (firstRun) showSyncWelcome();
       ensureDataDir();
 
       try {
+        const engineOverride = options.engine ? String(options.engine) : undefined;
+        if (options.classify && engineOverride) {
+          await resolveEngine({ override: engineOverride });
+        }
+
         const mutuallyExclusive = [options.rebuild, options.continue, options.gaps].filter(Boolean).length;
         if (mutuallyExclusive > 1) {
           console.error('  Error: --rebuild, --continue, and --gaps cannot be used together.');
@@ -607,7 +618,7 @@ export function buildCli() {
           warnIfEmpty(result.totalBookmarks);
           const newCount = await rebuildIndex();
           if (options.classify && newCount > 0) {
-            await classifyNew();
+            await classifyNew(engineOverride);
           }
         } else {
           const startTime = Date.now();
@@ -737,7 +748,7 @@ export function buildCli() {
 
           const newCount = await rebuildIndex();
           if (options.classify && newCount > 0) {
-            await classifyNew();
+            await classifyNew(engineOverride);
           }
         }
 
@@ -917,6 +928,7 @@ export function buildCli() {
     .command('classify')
     .description('Classify bookmarks by category and domain using LLM (requires claude or codex CLI)')
     .option('--regex', 'Use simple regex classification instead of LLM')
+    .addOption(engineOption())
     .action(safe(async (options) => {
       if (!requireData()) return;
       if (options.regex) {
@@ -925,7 +937,7 @@ export function buildCli() {
         console.log(`Indexed ${result.recordCount} bookmarks \u2192 ${result.dbPath}`);
         console.log(formatClassificationSummary(result.summary));
       } else {
-        const engine = await resolveEngine();
+        const engine = await resolveEngine({ override: options.engine ? String(options.engine) : undefined });
 
         let catStart = Date.now();
         process.stderr.write('Classifying categories with LLM (batches of 50, ~2 min per batch)...\n');
@@ -961,9 +973,10 @@ export function buildCli() {
     .command('classify-domains')
     .description('Classify bookmarks by subject domain using LLM (ai, finance, etc.)')
     .option('--all', 'Re-classify all bookmarks, not just missing')
+    .addOption(engineOption())
     .action(safe(async (options) => {
       if (!requireData()) return;
-      const engine = await resolveEngine();
+      const engine = await resolveEngine({ override: options.engine ? String(options.engine) : undefined });
       const start = Date.now();
       process.stderr.write('Classifying bookmark domains with LLM (batches of 50, ~2 min per batch)...\n');
       const result = await classifyDomainsWithLlm({

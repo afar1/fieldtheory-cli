@@ -165,6 +165,55 @@ test('resolveEngine: single available engine is used without prompting', async (
   }
 });
 
+// ── resolveEngine with override ────────────────────────────────────────
+
+test('resolveEngine: override rejects unknown engine', async () => {
+  const { resolveEngine } = await import('../src/engine.js');
+  await assert.rejects(
+    () => resolveEngine({ override: 'bogus' }),
+    /Unknown engine "bogus"/,
+  );
+});
+
+test('resolveEngine: override fails fast when binary not on PATH', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-override-'));
+  const origPath = process.env.PATH;
+  process.env.PATH = tmpDir;
+
+  try {
+    const { resolveEngine } = await import('../src/engine.js');
+    await assert.rejects(
+      () => resolveEngine({ override: 'claude' }),
+      /Engine "claude" is not on PATH/,
+    );
+  } finally {
+    process.env.PATH = origPath;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('resolveEngine: override returns named engine when binary is on PATH', async () => {
+  if (process.platform === 'win32') return;
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-override-ok-'));
+  const fakeBin = path.join(tmpDir, 'claude');
+  const origPath = process.env.PATH;
+  process.env.PATH = tmpDir;
+
+  try {
+    fs.writeFileSync(fakeBin, '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(fakeBin, 0o755);
+
+    const { resolveEngine } = await import('../src/engine.js');
+    const resolved = await resolveEngine({ override: 'claude' });
+    assert.equal(resolved.name, 'claude');
+    assert.equal(resolved.config.bin, 'claude');
+  } finally {
+    process.env.PATH = origPath;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 // ── ft model CLI parsing ───────────────────────────────────────────────
 
 test('ft model: command is registered and shows help', async () => {

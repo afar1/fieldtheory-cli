@@ -67,6 +67,7 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | `ft classify` | Classify by category and domain using LLM |
 | `ft classify --regex` | Classify by category using simple regex |
 | `ft classify-domains` | Classify by subject domain only (LLM) |
+| `ft classify --engine <name>` | Override the LLM engine for one run (also works on `ft sync --classify` and `ft classify-domains`) |
 | `ft model` | View or change the default LLM engine |
 
 ### Knowledge base
