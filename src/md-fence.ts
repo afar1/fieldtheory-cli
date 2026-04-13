@@ -18,8 +18,11 @@ import { mdDir, mdCategoriesDir, mdDomainsDir, mdEntitiesDir } from './paths.js'
  *
  * Handles three observed shapes in the wild:
  *   A. Full wrap:       ```markdown\n---\n...\n```
- *   B. Partial strip:   markdown\n---\n...\n```   (leading backticks eaten, language token left)
- *   C. Trailing only:   ---\n...\n```              (somehow just the closing fence survived)
+ *   B. Partial strip:   markdown\n---\n...\n```   (backticks eaten, language token + trailing fence remain)
+ *   C. Trailing only:   ---\n...\n```              (orphan trailing fence on its own)
+ *
+ * Cases B and C compose: for shape B we first drop the orphan leading token,
+ * then drop the trailing fence in a second pass.
  *
  * Idempotent: running it twice on the same input yields the same output.
  */

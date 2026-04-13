@@ -1,7 +1,38 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 
-import { stripLlmMarkdownFence } from '../src/md-fence.js';
+import { stripLlmMarkdownFence, cleanWikiFences } from '../src/md-fence.js';
+
+// ── Test fixture helpers ───────────────────────────────────────────────
+
+const BROKEN_FULL = '```markdown\n---\ntags: [ft/category]\nsource_count: 5\n---\n\n# Title\n\nBody.\n```';
+const BROKEN_PARTIAL = 'markdown\n---\ntags: [ft/category]\nsource_count: 5\n---\n\nBody.\n```';
+const CLEAN = '---\ntags: [ft/category]\nsource_count: 5\n---\n\n# Title\n\nBody.';
+
+function withTempDataDir<T>(fn: (tmpDir: string) => Promise<T>): Promise<T> {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-fence-test-'));
+  const origEnv = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = tmpDir;
+  return (async () => {
+    try {
+      return await fn(tmpDir);
+    } finally {
+      process.env.FT_DATA_DIR = origEnv;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  })();
+}
+
+function seedWiki(tmpDir: string, files: Record<string, string>): void {
+  for (const [rel, content] of Object.entries(files)) {
+    const full = path.join(tmpDir, 'md', rel);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, content, 'utf8');
+  }
+}
 
 // ── Case A: full fence wrap ────────────────────────────────────────────
 
@@ -91,4 +122,101 @@ test('stripLlmMarkdownFence: empty string returns empty string', () => {
 
 test('stripLlmMarkdownFence: whitespace-only returns empty string', () => {
   assert.equal(stripLlmMarkdownFence('   \n\n  '), '');
+});
+
+// ── cleanWikiFences: integration tests with tmp data dir ────────────────
+
+test('cleanWikiFences: fixes broken files across all three subdirs', async () => {
+  await withTempDataDir(async (tmpDir) => {
+    seedWiki(tmpDir, {
+      'categories/broken-full.md':    BROKEN_FULL,
+      'categories/broken-partial.md': BROKEN_PARTIAL,
+      'categories/clean.md':          CLEAN,
+      'domains/broken-full.md':       BROKEN_FULL,
+      'entities/clean.md':            CLEAN,
+    });
+
+    const result = await cleanWikiFences();
+
+    assert.equal(result.scanned, 5);
+    assert.equal(result.fixed, 3);
+    assert.equal(result.backupDir, null);
+    assert.ok(result.fixedFiles.some((f) => f.includes('broken-full')));
+    assert.ok(result.fixedFiles.some((f) => f.includes('broken-partial')));
+
+    // Fixed files no longer have fence artifacts.
+    const brokenFull = fs.readFileSync(path.join(tmpDir, 'md/categories/broken-full.md'), 'utf8');
+    assert.ok(brokenFull.startsWith('---'));
+    assert.ok(!brokenFull.includes('```'));
+
+    const brokenPartial = fs.readFileSync(path.join(tmpDir, 'md/categories/broken-partial.md'), 'utf8');
+    assert.ok(brokenPartial.startsWith('---'));
+    assert.ok(!brokenPartial.includes('```'));
+
+    // Clean file is untouched byte-for-byte.
+    assert.equal(fs.readFileSync(path.join(tmpDir, 'md/categories/clean.md'), 'utf8'), CLEAN);
+  });
+});
+
+test('cleanWikiFences: idempotent — second run is a no-op', async () => {
+  await withTempDataDir(async (tmpDir) => {
+    seedWiki(tmpDir, { 'categories/broken.md': BROKEN_FULL });
+
+    const first = await cleanWikiFences();
+    const second = await cleanWikiFences();
+
+    assert.equal(first.fixed, 1);
+    assert.equal(second.fixed, 0);
+    assert.equal(second.scanned, 1);
+  });
+});
+
+test('cleanWikiFences: backup option preserves originals in timestamped dir', async () => {
+  await withTempDataDir(async (tmpDir) => {
+    seedWiki(tmpDir, { 'categories/broken.md': BROKEN_FULL });
+
+    const result = await cleanWikiFences({ backup: true });
+
+    assert.equal(result.fixed, 1);
+    assert.ok(result.backupDir);
+    assert.ok(result.backupDir!.includes('.fence-backup-'));
+
+    const backedUp = fs.readFileSync(path.join(result.backupDir!, 'categories/broken.md'), 'utf8');
+    assert.equal(backedUp, BROKEN_FULL);
+  });
+});
+
+test('cleanWikiFences: backup dir is null when nothing needed fixing', async () => {
+  await withTempDataDir(async (tmpDir) => {
+    seedWiki(tmpDir, { 'categories/clean.md': CLEAN });
+
+    const result = await cleanWikiFences({ backup: true });
+
+    assert.equal(result.scanned, 1);
+    assert.equal(result.fixed, 0);
+    assert.equal(result.backupDir, null);
+  });
+});
+
+test('cleanWikiFences: skips entirely when .lock file is present', async () => {
+  await withTempDataDir(async (tmpDir) => {
+    seedWiki(tmpDir, { 'categories/broken.md': BROKEN_FULL });
+    fs.writeFileSync(path.join(tmpDir, 'md/.lock'), String(process.pid));
+
+    const result = await cleanWikiFences();
+
+    assert.equal(result.scanned, 0);
+    assert.equal(result.fixed, 0);
+    // Broken file remains untouched — compile owns the dir, not us.
+    assert.equal(fs.readFileSync(path.join(tmpDir, 'md/categories/broken.md'), 'utf8'), BROKEN_FULL);
+  });
+});
+
+test('cleanWikiFences: returns empty result when wiki dir does not exist', async () => {
+  await withTempDataDir(async () => {
+    const result = await cleanWikiFences();
+    assert.equal(result.scanned, 0);
+    assert.equal(result.fixed, 0);
+    assert.equal(result.fixedFiles.length, 0);
+  });
 });
