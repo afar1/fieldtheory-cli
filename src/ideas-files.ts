@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { writeMd } from './fs.js';
-import { ideasRunsDir, ideasSeedsDir } from './paths.js';
+import { ideasNodesDir, ideasRunsDir, ideasSeedsDir } from './paths.js';
 import type { IdeasSeed } from './ideas-seeds.js';
 import type { Consideration, Dot } from './adjacent/types.js';
 import { dotsFromRun } from './ideas.js';
@@ -19,6 +19,10 @@ export function ideasSeedMdPath(seed: IdeasSeed): string {
 
 export function ideasRunMdPath(run: Consideration): string {
   return path.join(ideasRunsDir(dayStamp(run.createdAt)), `${run.id}.md`);
+}
+
+export function ideasNodeMdPath(run: Consideration, artifactId: string): string {
+  return path.join(ideasNodesDir(dayStamp(run.createdAt)), `${artifactId}.md`);
 }
 
 export function renderIdeasSeedMd(seed: IdeasSeed): string {
@@ -148,8 +152,65 @@ export async function writeIdeasSeedMd(seed: IdeasSeed): Promise<string> {
   return filePath;
 }
 
+export function renderIdeasNodeMd(input: {
+  run: Consideration;
+  artifactId: string;
+  dot: Dot;
+}): string {
+  const { run, artifactId, dot } = input;
+  return [
+    '---',
+    'type: ideas-node',
+    `id: ${artifactId}`,
+    `run_id: ${run.id}`,
+    `created_at: ${run.createdAt}`,
+    `frame_id: ${run.frame.id}`,
+    `repo: "${escapeYaml(run.repo)}"`,
+    `title: "${escapeYaml(dot.title)}"`,
+    '---',
+    '',
+    `# ${dot.title}`,
+    '',
+    '## Summary',
+    '',
+    dot.summary,
+    '',
+    '## Context',
+    '',
+    `- Run: ${run.id}`,
+    `- Repo surface: ${dot.repoSurface}`,
+    `- Effort: ${dot.effortEstimate}`,
+    `- Axis A: ${dot.axisAScore} — ${dot.axisAJustification}`,
+    `- Axis B: ${dot.axisBScore} — ${dot.axisBJustification}`,
+    '',
+    '## Why this node',
+    '',
+    dot.rationale,
+    '',
+    '## Prompt',
+    '',
+    '```md',
+    dot.exportablePrompt.trim(),
+    '```',
+    '',
+  ].join('\n');
+}
+
 export async function writeIdeasRunMd(run: Consideration): Promise<string> {
   const filePath = ideasRunMdPath(run);
   await writeMd(filePath, renderIdeasRunMd(run));
   return filePath;
+}
+
+export async function writeIdeasNodeMds(run: Consideration): Promise<string[]> {
+  const dots = dotsFromRun(run)
+    .map(({ artifact, dot }) => ({ artifactId: artifact.id, dot }));
+
+  const paths: string[] = [];
+  for (const entry of dots) {
+    const filePath = ideasNodeMdPath(run, entry.artifactId);
+    await writeMd(filePath, renderIdeasNodeMd({ run, artifactId: entry.artifactId, dot: entry.dot }));
+    paths.push(filePath);
+  }
+  return paths;
 }

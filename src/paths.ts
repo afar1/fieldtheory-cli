@@ -144,3 +144,8 @@ export function ideasRunsDir(date?: string): string {
   const base = path.join(ideasMdDir(), 'runs');
   return date ? path.join(base, date) : base;
 }
+
+export function ideasNodesDir(date?: string): string {
+  const base = path.join(ideasMdDir(), 'nodes');
+  return date ? path.join(base, date) : base;
+}
