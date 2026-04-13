@@ -62,6 +62,7 @@ import {
 } from './seeds-strategies.js';
 import { formatSeedCandidates, queryRandomSeedCandidates, querySeedCandidates } from './seeds-query.js';
 import { formatSeedOrganization, organizeSeedCandidatesBy } from './seeds-organize.js';
+import { modelOrganizeSeeds } from './seeds-model.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -1716,7 +1717,9 @@ export function buildCli() {
   seeds
     .command('organize')
     .description('Group bookmark candidates into reusable seed organizations')
-    .requiredOption('--by <mode>', 'Grouping mode: category | domain | folder | time')
+    .option('--by <mode>', 'Grouping mode: category | domain | folder | time')
+    .option('--mode <kind>', 'Organize mode: deterministic | model', 'deterministic')
+    .option('--suggest <n>', 'Number of model suggestions', (v: string) => Number(v), 3)
     .option('--query <text>', 'Optional query filter')
     .option('--category <name>', 'Filter by category')
     .option('--domain <name>', 'Filter by domain')
@@ -1725,14 +1728,7 @@ export function buildCli() {
     .option('--days <n>', 'Limit to the last N days', (v: string) => Number(v))
     .option('--limit <n>', 'Max bookmarks to scan', (v: string) => Number(v), 60)
     .action(safe(async (options) => {
-      const mode = String(options.by) as 'category' | 'domain' | 'folder' | 'time';
-      if (!['category', 'domain', 'folder', 'time'].includes(mode)) {
-        console.log(`  Unsupported organize mode: ${mode}`);
-        process.exitCode = 1;
-        return;
-      }
-
-      const result = await organizeSeedCandidatesBy(mode, {
+      const filters = {
         query: options.query ? String(options.query) : undefined,
         category: options.category ? String(options.category) : undefined,
         domain: options.domain ? String(options.domain) : undefined,
@@ -1740,8 +1736,45 @@ export function buildCli() {
         author: options.author ? String(options.author) : undefined,
         days: typeof options.days === 'number' ? options.days : undefined,
         limit: Number(options.limit) || 60,
-      });
+      };
 
+      if (String(options.mode) === 'model') {
+        const candidates = await querySeedCandidates(filters);
+        if (candidates.length === 0) {
+          console.log('No candidate bookmarks found.');
+          return;
+        }
+
+        const result = await modelOrganizeSeeds({
+          filters,
+          candidates,
+          suggestCount: Number(options.suggest) || 3,
+          onProgress: (message) => process.stderr.write(`  ${message}\n`),
+        });
+
+        console.log('Plan');
+        console.log('');
+        console.log(result.explanation);
+        console.log('');
+        console.log('Suggestions');
+        console.log('');
+        for (const [idx, suggestion] of result.suggestions.entries()) {
+          console.log(`${idx + 1}. ${suggestion.title}  (${suggestion.itemIds.length})`);
+          console.log(`   ${suggestion.rationale}`);
+          console.log(`   ids: ${suggestion.itemIds.join(', ')}`);
+          console.log('');
+        }
+        return;
+      }
+
+      const mode = String(options.by || '') as 'category' | 'domain' | 'folder' | 'time';
+      if (!['category', 'domain', 'folder', 'time'].includes(mode)) {
+        console.log('  Deterministic organize mode requires --by category|domain|folder|time');
+        process.exitCode = 1;
+        return;
+      }
+
+      const result = await organizeSeedCandidatesBy(mode, filters);
       console.log(formatSeedOrganization(result));
     }));
 
