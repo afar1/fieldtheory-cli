@@ -51,6 +51,7 @@ import {
   formatIdeasSeed,
   formatIdeasSeedList,
   listIdeasSeeds,
+  pickMostRecentlyUsedSeed,
   readIdeasSeed,
 } from './ideas-seeds.js';
 import {
@@ -1490,12 +1491,35 @@ export function buildCli() {
     .option('--frame <id>', 'Frame id (overrides any frame pinned on the seed)')
     .option('--depth <depth>', 'Depth: quick | standard | deep', 'standard')
     .option('--steering <text>', 'Optional steering nudge')
+    .option('--defaults', 'Re-run with sensible defaults: most-recently-used seed, saved repo registry, seed-pinned frame, quick depth', false)
     .action(safe(async (options) => {
-      const seedArtifactIds = Array.isArray(options.seedArtifact)
+      // ── --defaults: fill in the blanks from the store ────────────────
+      let seedArtifactIds = Array.isArray(options.seedArtifact)
         ? (options.seedArtifact as string[]).map(String)
         : options.seedArtifact ? [String(options.seedArtifact)] : undefined;
-      if ((!seedArtifactIds || seedArtifactIds.length === 0) && !options.seed) {
-        console.log('  Provide either --seed-artifact <id...> or --seed <seed-id>.');
+      let seedId = options.seed ? String(options.seed) : undefined;
+      let depth = options.depth;
+
+      if (options.defaults) {
+        if (!seedId && (!seedArtifactIds || seedArtifactIds.length === 0)) {
+          const mostRecent = pickMostRecentlyUsedSeed(listIdeasSeeds());
+          if (!mostRecent) {
+            console.log('  No saved seeds to default to. Create one with `ft seeds search "..." --create`.');
+            process.exitCode = 1;
+            return;
+          }
+          seedId = mostRecent.id;
+          console.log(`  Using most recently used seed: ${mostRecent.id}  ${mostRecent.title}`);
+        }
+        if (!options.depth || options.depth === 'standard') {
+          // Commander defaults options.depth to 'standard'. Under --defaults
+          // we prefer 'quick' unless the user explicitly passed a depth flag.
+          depth = 'quick';
+        }
+      }
+
+      if ((!seedArtifactIds || seedArtifactIds.length === 0) && !seedId) {
+        console.log('  Provide either --seed-artifact <id...> or --seed <seed-id>. (Or --defaults to auto-pick.)');
         process.exitCode = 1;
         return;
       }
@@ -1524,10 +1548,10 @@ export function buildCli() {
 
       const summary = await runIdeas({
         seedArtifactIds,
-        seedId: options.seed ? String(options.seed) : undefined,
+        seedId,
         repos,
         frameId: options.frame ? String(options.frame) : undefined,
-        depth: options.depth,
+        depth,
         steering: options.steering ? String(options.steering) : undefined,
         onProgress: (message) => {
           process.stderr.write(`  ${message}\n`);

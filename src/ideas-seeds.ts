@@ -68,6 +68,22 @@ export function listIdeasSeeds(): IdeasSeed[] {
   return loadStore().seeds.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+/**
+ * Return the most recently *used* seed, falling back to most recently
+ * *created* when no seed has a lastUsedAt yet. Pure function — takes a
+ * list, doesn't touch the store — so tests can pin the ordering rule
+ * with fixtures.
+ */
+export function pickMostRecentlyUsedSeed(seeds: IdeasSeed[]): IdeasSeed | null {
+  if (seeds.length === 0) return null;
+  const sorted = [...seeds].sort((a, b) => {
+    const aKey = a.lastUsedAt ?? a.createdAt;
+    const bKey = b.lastUsedAt ?? b.createdAt;
+    return bKey.localeCompare(aKey);
+  });
+  return sorted[0] ?? null;
+}
+
 export function readIdeasSeed(id: string): IdeasSeed | null {
   return loadStore().seeds.find((seed) => seed.id === id) ?? null;
 }

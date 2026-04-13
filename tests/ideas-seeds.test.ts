@@ -88,6 +88,57 @@ test('resolveFrameIdForRun: explicit beats seed pinned beats default', async () 
   assert.equal(resolveFrameIdForRun(undefined, undefined), 'leverage-specificity');
 });
 
+test('pickMostRecentlyUsedSeed: returns null for an empty list', async () => {
+  const seeds = await getIdeasSeeds();
+  assert.equal(seeds.pickMostRecentlyUsedSeed([]), null);
+});
+
+test('pickMostRecentlyUsedSeed: picks the seed with the newest lastUsedAt', async () => {
+  const seeds = await getIdeasSeeds();
+  const list = [
+    { id: 'seed-old-used',    title: 'old', sourceType: 'text' as const, artifactIds: ['a'], createdAt: '2026-01-01T00:00:00.000Z', createdBy: 'user' as const, lastUsedAt: '2026-02-01T00:00:00.000Z' },
+    { id: 'seed-new-unused',  title: 'new', sourceType: 'text' as const, artifactIds: ['a'], createdAt: '2026-03-01T00:00:00.000Z', createdBy: 'user' as const },
+    { id: 'seed-recent-used', title: 'mid', sourceType: 'text' as const, artifactIds: ['a'], createdAt: '2026-02-15T00:00:00.000Z', createdBy: 'user' as const, lastUsedAt: '2026-04-10T00:00:00.000Z' },
+  ];
+  const pick = seeds.pickMostRecentlyUsedSeed(list);
+  assert.ok(pick);
+  assert.equal(pick!.id, 'seed-recent-used', 'seed with the latest lastUsedAt should win');
+});
+
+test('pickMostRecentlyUsedSeed: falls back to createdAt when no seed has been used', async () => {
+  const seeds = await getIdeasSeeds();
+  const list = [
+    { id: 'seed-oldest', title: 'o', sourceType: 'text' as const, artifactIds: ['a'], createdAt: '2026-01-01T00:00:00.000Z', createdBy: 'user' as const },
+    { id: 'seed-newest', title: 'n', sourceType: 'text' as const, artifactIds: ['a'], createdAt: '2026-04-01T00:00:00.000Z', createdBy: 'user' as const },
+    { id: 'seed-middle', title: 'm', sourceType: 'text' as const, artifactIds: ['a'], createdAt: '2026-02-15T00:00:00.000Z', createdBy: 'user' as const },
+  ];
+  const pick = seeds.pickMostRecentlyUsedSeed(list);
+  assert.ok(pick);
+  assert.equal(pick!.id, 'seed-newest');
+});
+
+test('pickMostRecentlyUsedSeed: a freshly-used seed beats a newer-but-unused seed', async () => {
+  const seeds = await getIdeasSeeds();
+  const list = [
+    { id: 'seed-fresh-unused', title: 'u', sourceType: 'text' as const, artifactIds: ['a'], createdAt: '2026-04-01T00:00:00.000Z', createdBy: 'user' as const },
+    { id: 'seed-old-used',     title: 'o', sourceType: 'text' as const, artifactIds: ['a'], createdAt: '2026-01-01T00:00:00.000Z', createdBy: 'user' as const, lastUsedAt: '2026-04-12T00:00:00.000Z' },
+  ];
+  const pick = seeds.pickMostRecentlyUsedSeed(list);
+  assert.ok(pick);
+  assert.equal(pick!.id, 'seed-old-used', 'recency of *use* should outrank recency of *creation*');
+});
+
+test('pickMostRecentlyUsedSeed: does not mutate its input', async () => {
+  const seeds = await getIdeasSeeds();
+  const list = [
+    { id: 'a', title: '', sourceType: 'text' as const, artifactIds: ['x'], createdAt: '2026-01-01T00:00:00.000Z', createdBy: 'user' as const },
+    { id: 'b', title: '', sourceType: 'text' as const, artifactIds: ['x'], createdAt: '2026-02-01T00:00:00.000Z', createdBy: 'user' as const },
+  ];
+  const before = list.map((s) => s.id);
+  seeds.pickMostRecentlyUsedSeed(list);
+  assert.deepEqual(list.map((s) => s.id), before);
+});
+
 test('resolveFrameIdForRun: empty-string explicit falls through to seed frame, not past it', async () => {
   const { resolveFrameIdForRun } = await import('../src/ideas.js');
   // Empty string on the explicit side is treated as "not provided" so a
