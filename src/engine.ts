@@ -109,7 +109,7 @@ function resolve(name: string): ResolvedEngine {
 export async function resolveEngine(options: { override?: string } = {}): Promise<ResolvedEngine> {
   if (options.override) {
     const name = options.override;
-    if (!KNOWN_ENGINES[name]) {
+    if (!Object.hasOwn(KNOWN_ENGINES, name)) {
       const known = Object.keys(KNOWN_ENGINES).join(', ');
       throw new Error(`Unknown engine "${name}". Known engines: ${known}.`);
     }
