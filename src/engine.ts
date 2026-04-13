@@ -5,7 +5,7 @@
  * Remembers the user's choice in ~/.ft-bookmarks/.preferences.
  */
 
-import { execFileSync, execFile } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadPreferences, savePreferences } from './preferences.js';
@@ -156,24 +156,77 @@ export function invokeEngine(engine: ResolvedEngine, prompt: string, opts: Invok
     encoding: 'utf-8',
     timeout: opts.timeout ?? 120_000,
     maxBuffer: opts.maxBuffer ?? 1024 * 1024,
-    stdio: ['pipe', 'pipe', 'ignore'],
+    // stdin = 'ignore' so the child sees EOF immediately. If we leave it as
+    // 'pipe', the `claude` CLI waits 3s for stdin input, prints a warning,
+    // and then exits non-zero on some calls even though it has a valid -p
+    // prompt on argv. Capturing stderr lets us surface the real error on
+    // failure instead of the generic "Command failed".
+    stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
 }
 
 /**
  * Async variant — does not block the event loop, so spinners and
- * setInterval callbacks continue to fire while the LLM runs.
+ * setInterval callbacks continue to fire while the LLM runs. Uses `spawn`
+ * (not `execFile`) so stdin can be explicitly set to 'ignore' — without
+ * that, the `claude` CLI waits 3s for stdin input, prints a warning, and
+ * then exits non-zero on some calls even when argv already carries a
+ * valid -p prompt.
  */
 export function invokeEngineAsync(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): Promise<string> {
   const { bin, args } = engine.config;
+  const timeoutMs = opts.timeout ?? 120_000;
+  const maxBuffer = opts.maxBuffer ?? 1024 * 1024;
+
   return new Promise((resolve, reject) => {
-    execFile(bin, args(prompt), {
-      encoding: 'utf-8',
-      timeout: opts.timeout ?? 120_000,
-      maxBuffer: opts.maxBuffer ?? 1024 * 1024,
-    }, (err, stdout) => {
-      if (err) return reject(err);
-      resolve(stdout.trim());
+    const child = spawn(bin, args(prompt), {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let stdoutSize = 0;
+    let stderrSize = 0;
+    let settled = false;
+
+    const settle = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      settle(() => reject(new Error(`Command timed out after ${timeoutMs}ms: ${bin}`)));
+    }, timeoutMs);
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdoutSize += chunk.length;
+      if (stdoutSize > maxBuffer) {
+        child.kill('SIGKILL');
+        return settle(() => reject(new Error(`Command stdout exceeded ${maxBuffer} bytes: ${bin}`)));
+      }
+      stdout += chunk.toString('utf-8');
+    });
+
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderrSize += chunk.length;
+      if (stderrSize <= maxBuffer) {
+        stderr += chunk.toString('utf-8');
+      }
+    });
+
+    child.on('error', (err) => settle(() => reject(err)));
+
+    child.on('close', (code, signal) => {
+      settle(() => {
+        if (code === 0) return resolve(stdout.trim());
+        const reason = signal ? `signal ${signal}` : `exit ${code}`;
+        const trimmedStderr = stderr.trim();
+        const detail = trimmedStderr ? `\n  stderr: ${trimmedStderr}` : '';
+        reject(new Error(`Command failed (${reason}): ${bin}${detail}`));
+      });
     });
   });
 }
