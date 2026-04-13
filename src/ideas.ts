@@ -53,10 +53,10 @@ export function formatIdeasIntro(): string {
     '',
     'Useful commands:',
     '  ft ideas explain',
-    '  ft ideas run --seed-artifact <id> --repo .',
+    '  ft ideas run --seed <seed-id> --repo .',
     '  ft ideas grid latest',
     '  ft ideas dots latest',
-    '  ft ideas prompt <dot-id>',
+    '  ft ideas prompt <node-id>',
     '',
     `Available frames: ${frameNames}`,
   ].join('\n');
@@ -108,7 +108,7 @@ export function formatRunSummary(run: Consideration): string {
 
 export function formatRunList(runs: Consideration[]): string {
   if (runs.length === 0) {
-    return 'No ideas runs yet. Start with: ft ideas run --seed-artifact <id> --repo .';
+    return 'No ideas runs yet. Start with: ft seeds list, then ft ideas run --seed <seed-id> --repo .';
   }
 
   return runs

@@ -116,7 +116,7 @@ export function renderIdeasRunMd(run: Consideration): string {
     '',
     'Re-run this exploration shape later with:',
     '',
-    `\`ft ideas run --seed-artifact ${run.inputIds[0] ?? '<seed-artifact>'} --repo "${run.repo}" --frame ${run.frame.id} --depth ${run.depth}${run.steering ? ` --steering "${escapeYaml(run.steering)}"` : ''}\``,
+    `\`ft ideas run --seed <seed-id> --repo "${run.repo}" --frame ${run.frame.id} --depth ${run.depth}${run.steering ? ` --steering "${escapeYaml(run.steering)}"` : ''}\``,
     '',
   ].join('\n');
 }
@@ -183,7 +183,7 @@ export function renderIdeasNodeMd(input: {
     `- Axis A: ${dot.axisAScore} — ${dot.axisAJustification}`,
     `- Axis B: ${dot.axisBScore} — ${dot.axisBJustification}`,
     '',
-    '## Why this node',
+    '## Why it surfaced',
     '',
     dot.rationale,
     '',
