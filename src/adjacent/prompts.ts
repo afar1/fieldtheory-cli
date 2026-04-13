@@ -40,9 +40,14 @@ export interface DepthBudget {
 }
 
 export const DEPTH_BUDGETS: Record<Depth, DepthBudget> = {
-  quick:    { candidateTarget: 6,  surveyFileLimit: 30,  critiqueMinSurvivors: 4, timeoutMs: 60_000  },
-  standard: { candidateTarget: 10, surveyFileLimit: 80,  critiqueMinSurvivors: 6, timeoutMs: 120_000 },
-  deep:     { candidateTarget: 14, surveyFileLimit: 200, critiqueMinSurvivors: 8, timeoutMs: 240_000 },
+  // Per-call timeouts are a floor, not a target — real Claude/Codex calls
+  // vary 10–90s even on small prompts, so the old 60s `quick` budget timed
+  // out non-deterministically on the critique/score stages. The tiers now
+  // differ by *amount of work* (candidate count, surface limit, survivor
+  // count) rather than by deadline.
+  quick:    { candidateTarget: 6,  surveyFileLimit: 30,  critiqueMinSurvivors: 4, timeoutMs: 120_000 },
+  standard: { candidateTarget: 10, surveyFileLimit: 80,  critiqueMinSurvivors: 6, timeoutMs: 180_000 },
+  deep:     { candidateTarget: 14, surveyFileLimit: 200, critiqueMinSurvivors: 8, timeoutMs: 300_000 },
 };
 
 // ── Stage 1: Read — seed_brief ────────────────────────────────────────────────
