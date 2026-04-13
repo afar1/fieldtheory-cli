@@ -324,13 +324,25 @@ async function doCompile(
 
     pagesSkipped = skipCount;
 
+    // Per-event line: echo to the terminal and append to log.md so the
+    // user can `tail -f` the log from another shell while a compile runs.
+    const logLine = async (msg: string): Promise<void> => {
+      progress(msg);
+      try { await appendLine(mdLogPath(), logEntry('compile', msg)); } catch { /* best effort */ }
+    };
+
     if (toGenerate.length === 0) {
       progress('Nothing to compile — all pages up to date.');
     } else {
       const est = toGenerate.length > 3 ? ` (~${toGenerate.length}–${toGenerate.length * 2} min)` : '';
       progress(`\nGenerating ${toGenerate.length} pages with ${engine.name}${est}`);
       if (skipCount > 0) progress(`  ${skipCount} pages unchanged, skipping`);
+      progress(`  Follow live: tail -f ${mdLogPath()}`);
       progress('');
+      await appendLine(
+        mdLogPath(),
+        logEntry('compile', `start — ${toGenerate.length} pages, engine=${engine.name}`),
+      );
     }
 
     // ── Generate each page ───────────────────────────────────────────────
@@ -352,7 +364,7 @@ async function doCompile(
       }
 
       const opts = llmOpts(samples.length);
-      progress(`${tag} ${item.key} (${samples.length} sampled, ${Math.round(opts.timeout / 1000)}s timeout)...`);
+      await logLine(`${tag} ${item.key} (${samples.length} sampled, ${Math.round(opts.timeout / 1000)}s timeout)...`);
 
       let content: string;
       try {
@@ -360,7 +372,7 @@ async function doCompile(
       } catch (err) {
         const msg = (err as Error).message ?? String(err);
         const isTimeout = msg.includes('ETIMEDOUT') || msg.includes('timed out');
-        progress(`${tag} ${item.key} — ${isTimeout ? 'TIMEOUT' : 'ERROR'}: ${msg.slice(0, 120)}`);
+        await logLine(`${tag} ${item.key} — ${isTimeout ? 'TIMEOUT' : 'ERROR'}: ${msg.slice(0, 120)}`);
         pagesFailed++;
         continue;
       }
@@ -379,7 +391,7 @@ async function doCompile(
       // Save state after each page so Ctrl-C resumes where we left off
       await writeJson(mdStatePath(), state);
 
-      progress(`${tag} ${item.key} → ${outcome}`);
+      await logLine(`${tag} ${item.key} → ${outcome}`);
     }
   } finally {
     db.close();

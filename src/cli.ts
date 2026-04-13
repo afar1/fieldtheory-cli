@@ -1231,23 +1231,27 @@ export function buildCli() {
     .action(safe(async (options) => {
       if (!requireIndex()) return;
       const start = Date.now();
-      let lastLine = '';
-      const spinner = createSpinner(() => lastLine);
-      const result = await compileMd({
-        full: options.full,
-        onProgress: (s) => {
-          lastLine = s;
-          spinner.update();
-        },
-      });
-      spinner.stop();
-      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-      const failed = result.pagesFailed > 0 ? ` failed=${result.pagesFailed}` : '';
-      console.log(`Done (${elapsed}s) — engine=${result.engine} created=${result.pagesCreated} updated=${result.pagesUpdated} skipped=${result.pagesSkipped}${failed} total=${result.totalPages}`);
-      if (result.pagesFailed > 0) {
-        console.log(`\n  ${result.pagesFailed} page(s) failed — re-run ft wiki to retry them.`);
+      const onSigint = () => {
+        console.log('\n  Interrupted. Your data is safe — progress has been saved.');
+        console.log('  Run the same command again to pick up where you left off.\n');
+        process.exit(0);
+      };
+      process.once('SIGINT', onSigint);
+      try {
+        const result = await compileMd({
+          full: options.full,
+          onProgress: (s) => process.stderr.write(s + '\n'),
+        });
+        const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+        const failed = result.pagesFailed > 0 ? ` failed=${result.pagesFailed}` : '';
+        console.log(`Done (${elapsed}s) — engine=${result.engine} created=${result.pagesCreated} updated=${result.pagesUpdated} skipped=${result.pagesSkipped}${failed} total=${result.totalPages}`);
+        if (result.pagesFailed > 0) {
+          console.log(`\n  ${result.pagesFailed} page(s) failed — re-run ft wiki to retry them.`);
+        }
+        console.log(`\n  Open in your markdown viewer:\n  ${mdDir()}`);
+      } finally {
+        process.removeListener('SIGINT', onSigint);
       }
-      console.log(`\n  Open in your markdown viewer:\n  ${mdDir()}`);
     }));
 
   // ── ft ask ── Q&A against the knowledge base ──────────────────────────
