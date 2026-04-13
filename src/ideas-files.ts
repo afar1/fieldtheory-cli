@@ -1,9 +1,9 @@
 import path from 'node:path';
 import { writeMd } from './fs.js';
-import { ideasNodesDir, ideasRunsDir, ideasSeedsDir } from './paths.js';
+import { ideasBatchesDir, ideasNodesDir, ideasRunsDir, ideasSeedsDir } from './paths.js';
 import type { IdeasSeed } from './ideas-seeds.js';
 import type { Consideration, Dot } from './adjacent/types.js';
-import { dotsFromRun } from './ideas.js';
+import { dotsFromRun, type IdeasBatchSummary } from './ideas.js';
 
 function dayStamp(iso: string): string {
   return iso.slice(0, 10);
@@ -213,4 +213,76 @@ export async function writeIdeasNodeMds(run: Consideration): Promise<string[]> {
     paths.push(filePath);
   }
   return paths;
+}
+
+export function ideasBatchMdPath(batch: IdeasBatchSummary): string {
+  return path.join(ideasBatchesDir(dayStamp(batch.createdAt)), `${batch.id}.md`);
+}
+
+export function renderIdeasBatchMd(batch: IdeasBatchSummary): string {
+  return [
+    '---',
+    'type: ideas-batch-summary',
+    `id: ${batch.id}`,
+    `created_at: ${batch.createdAt}`,
+    ...(batch.seedId ? [`seed_id: ${batch.seedId}`] : []),
+    `seed_artifact_ids: [${batch.seedArtifactIds.map((id) => `"${escapeYaml(id)}"`).join(', ')}]`,
+    `frame_id: ${batch.frameId}`,
+    `frame_name: "${escapeYaml(batch.frameName)}"`,
+    `depth: ${batch.depth}`,
+    ...(batch.steering ? [`steering: "${escapeYaml(batch.steering)}"`] : []),
+    `consideration_ids: [${batch.considerationIds.map((id) => `"${escapeYaml(id)}"`).join(', ')}]`,
+    `repos: [${batch.repos.map((r) => `"${escapeYaml(r)}"`).join(', ')}]`,
+    `total_dot_count: ${batch.totalDotCount}`,
+    '---',
+    '',
+    `# Ideas batch ${batch.id}`,
+    '',
+    '## Summary',
+    '',
+    ...(batch.seedId ? [`- Seed: ${batch.seedId}`] : []),
+    `- Frame: ${batch.frameName} (${batch.frameId})`,
+    `- Depth: ${batch.depth}`,
+    `- Repos: ${batch.repos.length}`,
+    `- Considerations: ${batch.considerationIds.length}`,
+    `- Total scored ideas: ${batch.totalDotCount}`,
+    `- Created: ${batch.createdAt}`,
+    '',
+    '## Per-repo runs',
+    '',
+    ...batch.considerationIds.flatMap((runId, idx) => [
+      `- ${batch.repos[idx] ?? '(unknown repo)'} → ${runId}`,
+    ]),
+    '',
+    ...(batch.topDots.length > 0 ? renderTopDotsSection(batch) : []),
+    '## Re-run',
+    '',
+    'Re-run this batch shape later with:',
+    '',
+    `\`ft ideas run --seed <seed-id> --repos ${batch.repos.map((r) => `"${escapeYaml(r)}"`).join(' ')} --frame ${batch.frameId} --depth ${batch.depth}${batch.steering ? ` --steering "${escapeYaml(batch.steering)}"` : ''}\``,
+    '',
+  ].join('\n');
+}
+
+function renderTopDotsSection(batch: IdeasBatchSummary): string[] {
+  const lines: string[] = ['## Top ideas across all repos', ''];
+  for (const entry of batch.topDots) {
+    lines.push(`### ${entry.dot.title}`);
+    lines.push('');
+    lines.push(`- Repo: ${entry.repo}`);
+    lines.push(`- Run: ${entry.runId}`);
+    lines.push(`- Dot id: ${entry.dotArtifactId}`);
+    lines.push(`- Axis A: ${entry.dot.axisAScore}/100`);
+    lines.push(`- Axis B: ${entry.dot.axisBScore}/100`);
+    lines.push('');
+    lines.push(entry.dot.summary);
+    lines.push('');
+  }
+  return lines;
+}
+
+export async function writeIdeasBatchMd(batch: IdeasBatchSummary): Promise<string> {
+  const filePath = ideasBatchMdPath(batch);
+  await writeMd(filePath, renderIdeasBatchMd(batch));
+  return filePath;
 }

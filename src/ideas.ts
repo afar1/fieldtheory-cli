@@ -1,15 +1,17 @@
 import path from 'node:path';
+import crypto from 'node:crypto';
 import {
   listConsiderations,
   readConsideration,
   readArtifact,
+  writeArtifact,
 } from './adjacent/librarian.js';
 import { linkIdeasSeedToRun, readIdeasSeed, touchIdeasSeed } from './ideas-seeds.js';
-import { writeIdeasNodeMds, writeIdeasRunMd } from './ideas-files.js';
+import { writeIdeasBatchMd, writeIdeasNodeMds, writeIdeasRunMd } from './ideas-files.js';
 import { refreshIdeasDerivedState } from './ideas-derived.js';
 import { DEFAULT_FRAMES, getFrame } from './adjacent/frames.js';
 import { runPipeline, renderTwoByTwo, renderDotList } from './adjacent/pipeline.js';
-import type { Consideration, Dot, Artifact } from './adjacent/types.js';
+import type { Consideration, Dot, Artifact, Frame } from './adjacent/types.js';
 import { resolveEngine } from './engine.js';
 
 export interface IdeasRunOptions {
@@ -17,7 +19,8 @@ export interface IdeasRunOptions {
   seedArtifactIds?: string[];
   /** Run against a saved seed by id; the seed's artifact group is passed through to the pipeline. */
   seedId?: string;
-  repo: string;
+  /** One or more repo paths. Each repo gets its own consideration; runs >1 produce a batch summary. */
+  repos: string[];
   frameId?: string;
   depth?: 'quick' | 'standard' | 'deep';
   steering?: string;
@@ -25,11 +28,31 @@ export interface IdeasRunOptions {
 }
 
 export interface IdeasRunSummary {
-  runId: string;
+  /** All consideration ids produced by this invocation, in repo order. */
+  runIds: string[];
+  /** Set only when runIds.length > 1. */
+  batchId?: string;
   frameId: string;
   frameName: string;
+  /** Total scored dots across every run in this invocation. */
   dotCount: number;
-  topDots: Dot[];
+  /** Top dots across every run, with the repo each came from. */
+  topDots: Array<Dot & { repo: string }>;
+}
+
+export interface IdeasBatchSummary {
+  id: string;
+  createdAt: string;
+  seedId?: string;
+  seedArtifactIds: string[];
+  frameId: string;
+  frameName: string;
+  depth: 'quick' | 'standard' | 'deep';
+  steering?: string;
+  considerationIds: string[];
+  repos: string[];
+  totalDotCount: number;
+  topDots: Array<{ runId: string; repo: string; dotArtifactId: string; dot: Dot }>;
 }
 
 function ideasRoot(repo?: string): string {
@@ -147,11 +170,19 @@ export function getIdeaPrompt(dotId: string): string {
   return dot.exportablePrompt || artifact.content;
 }
 
+function generateBatchId(): string {
+  return `batch-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
+}
+
 export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummary> {
   const engine = await resolveEngine();
   const frame = getFrame(options.frameId ?? 'leverage-specificity');
   if (!frame) {
     throw new Error(`Unknown frame: ${options.frameId}`);
+  }
+
+  if (!Array.isArray(options.repos) || options.repos.length === 0) {
+    throw new Error('Provide at least one repo via repos: [...]');
   }
 
   let seedArtifactIds = options.seedArtifactIds;
@@ -167,37 +198,124 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
     throw new Error('Provide either --seed-artifact <id...> or --seed <seed-id>.');
   }
 
-  const result = await runPipeline({
-    seedArtifactIds,
-    frame,
-    repo: ideasRoot(options.repo),
-    depth: options.depth ?? 'standard',
-    steering: options.steering,
-    engine,
-    onProgress: (_stage, message) => options.onProgress?.(message),
-  });
+  const depth = options.depth ?? 'standard';
+  const considerationIds: string[] = [];
+  const allDotEntries: Array<{ runId: string; repo: string; dotArtifactId: string; dot: Dot }> = [];
+  let totalDotCount = 0;
 
-  const topDots = [...result.dots]
-    .sort((a, b) => (b.axisAScore + b.axisBScore) - (a.axisAScore + a.axisBScore))
-    .slice(0, 3);
+  for (const [idx, repo] of options.repos.entries()) {
+    const resolvedRepo = ideasRoot(repo);
+    if (options.repos.length > 1) {
+      options.onProgress?.(`[repo ${idx + 1}/${options.repos.length}] ${resolvedRepo}`);
+    }
 
-  await writeIdeasRunMd(result.consideration);
-  await writeIdeasNodeMds(result.consideration);
-  await refreshIdeasDerivedState();
+    const result = await runPipeline({
+      seedArtifactIds,
+      frame,
+      repo: resolvedRepo,
+      depth,
+      steering: options.steering,
+      engine,
+      onProgress: (_stage, message) => options.onProgress?.(message),
+    });
 
-  if (options.seedId) {
-    await linkIdeasSeedToRun({
+    await writeIdeasRunMd(result.consideration);
+    await writeIdeasNodeMds(result.consideration);
+
+    considerationIds.push(result.consideration.id);
+    totalDotCount += result.dots.length;
+
+    for (let i = 0; i < result.dots.length; i++) {
+      allDotEntries.push({
+        runId: result.consideration.id,
+        repo: resolvedRepo,
+        dotArtifactId: result.dotArtifacts[i]!.id,
+        dot: result.dots[i]!,
+      });
+    }
+
+    if (options.seedId) {
+      await linkIdeasSeedToRun({
+        seedId: options.seedId,
+        runId: result.consideration.id,
+        nodeIds: result.dotArtifacts.map((artifact) => artifact.id),
+      });
+    }
+  }
+
+  const topDotsAggregated = [...allDotEntries]
+    .sort((a, b) => (b.dot.axisAScore + b.dot.axisBScore) - (a.dot.axisAScore + a.dot.axisBScore))
+    .slice(0, 5);
+
+  let batchId: string | undefined;
+  if (considerationIds.length > 1) {
+    batchId = await persistBatchSummary({
+      considerationIds,
       seedId: options.seedId,
-      runId: result.consideration.id,
-      nodeIds: result.dotArtifacts.map((artifact) => artifact.id),
+      seedArtifactIds,
+      frame,
+      depth,
+      steering: options.steering,
+      repos: options.repos.map((r) => ideasRoot(r)),
+      totalDotCount,
+      topDots: topDotsAggregated,
     });
   }
 
+  await refreshIdeasDerivedState();
+
   return {
-    runId: result.consideration.id,
+    runIds: considerationIds,
+    batchId,
     frameId: frame.id,
     frameName: frame.name,
-    dotCount: result.dots.length,
-    topDots,
+    dotCount: totalDotCount,
+    topDots: topDotsAggregated.map((entry) => ({ ...entry.dot, repo: entry.repo })),
   };
+}
+
+async function persistBatchSummary(input: {
+  considerationIds: string[];
+  seedId?: string;
+  seedArtifactIds: string[];
+  frame: Frame;
+  depth: 'quick' | 'standard' | 'deep';
+  steering?: string;
+  repos: string[];
+  totalDotCount: number;
+  topDots: Array<{ runId: string; repo: string; dotArtifactId: string; dot: Dot }>;
+}): Promise<string> {
+  const id = generateBatchId();
+  const createdAt = new Date().toISOString();
+
+  const summary: IdeasBatchSummary = {
+    id,
+    createdAt,
+    seedId: input.seedId,
+    seedArtifactIds: input.seedArtifactIds,
+    frameId: input.frame.id,
+    frameName: input.frame.name,
+    depth: input.depth,
+    steering: input.steering,
+    considerationIds: input.considerationIds,
+    repos: input.repos,
+    totalDotCount: input.totalDotCount,
+    topDots: input.topDots,
+  };
+
+  writeArtifact({
+    type: 'batch_summary',
+    source: 'adjacent',
+    provenance: {
+      createdAt,
+      producer: 'system',
+      inputIds: input.considerationIds,
+      promptVersion: 'ideas-batch-summary-v1',
+    },
+    content: JSON.stringify(summary, null, 2),
+    metadata: summary as unknown as Record<string, unknown>,
+  });
+
+  await writeIdeasBatchMd(summary);
+  return id;
 }

@@ -7,7 +7,8 @@ export type ArtifactType =
   | 'candidate_list'
   | 'critique'
   | 'dot'
-  | 'consideration_manifest';
+  | 'consideration_manifest'
+  | 'batch_summary';
 
 export type ArtifactSource = 'field_theory' | 'adjacent';
 

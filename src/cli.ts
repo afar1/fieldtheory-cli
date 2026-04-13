@@ -54,6 +54,13 @@ import {
   readIdeasSeed,
 } from './ideas-seeds.js';
 import {
+  addRepoToRegistry,
+  clearReposRegistry,
+  listSavedRepos,
+  removeRepoFromRegistry,
+  resolveRepoList,
+} from './ideas-repos.js';
+import {
   SEED_STRATEGIES,
   buildSeedStrategySpec,
   generateRandomSeedPrompts,
@@ -1361,10 +1368,11 @@ export function buildCli() {
 
   ideas
     .command('run')
-    .description('Run an ideas exploration from a seed or seed artifact group')
+    .description('Run an ideas exploration from a seed or seed artifact group, against one or more repos')
     .option('--seed-artifact <id...>', 'One or more seed artifact ids to start from')
     .option('--seed <id>', 'Saved seed id to start from')
-    .requiredOption('--repo <path>', 'Repo path to explore against')
+    .option('--repo <path>', 'Single repo path to explore against (shorthand for --repos with one path)')
+    .option('--repos <path...>', 'Multiple repo paths; produces one consideration per repo plus a batch summary')
     .option('--frame <id>', 'Frame id', 'leverage-specificity')
     .option('--depth <depth>', 'Depth: quick | standard | deep', 'standard')
     .option('--steering <text>', 'Optional steering nudge')
@@ -1377,11 +1385,33 @@ export function buildCli() {
         process.exitCode = 1;
         return;
       }
+
+      const resolution = resolveRepoList({
+        singleRepo: options.repo ? String(options.repo) : undefined,
+        multiRepos: Array.isArray(options.repos) ? (options.repos as string[]).map(String) : undefined,
+        savedRepos: listSavedRepos(),
+      });
+      if (resolution.kind === 'error') {
+        if (resolution.reason === 'both-flags') {
+          console.log('  Use either --repo or --repos, not both.');
+        } else {
+          console.log('  No repo specified and no saved repos found.');
+          console.log('  Pass --repo <path> or --repos <path...>, or save defaults with `ft repos add <path>`.');
+        }
+        process.exitCode = 1;
+        return;
+      }
+      const repos = resolution.repos;
+
       console.log('  Ideas runs on your local machine. Keep your laptop awake for longer debates.');
+      if (repos.length > 1) {
+        console.log(`  Batched run across ${repos.length} repos. The seed brief is computed once and reused.`);
+      }
+
       const summary = await runIdeas({
         seedArtifactIds,
         seedId: options.seed ? String(options.seed) : undefined,
-        repo: String(options.repo),
+        repos,
         frameId: String(options.frame),
         depth: options.depth,
         steering: options.steering ? String(options.steering) : undefined,
@@ -1390,18 +1420,31 @@ export function buildCli() {
         },
       });
 
-      console.log(`\n  ✓ Ideas run complete: ${summary.runId}`);
+      const isBatch = summary.runIds.length > 1;
+      if (isBatch) {
+        console.log(`\n  ✓ Ideas batch complete: ${summary.batchId}`);
+        console.log(`  Runs: ${summary.runIds.length} (one per repo)`);
+      } else {
+        console.log(`\n  ✓ Ideas run complete: ${summary.runIds[0]}`);
+      }
       console.log(`  Frame: ${summary.frameName}`);
       console.log(`  Ideas generated: ${summary.dotCount}`);
       if (summary.topDots.length > 0) {
-        console.log('\n  Top ideas:');
+        console.log(`\n  Top ideas${isBatch ? ' across all repos' : ''}:`);
         for (const dot of summary.topDots) {
-          console.log(`    - ${dot.title}  [A:${dot.axisAScore} B:${dot.axisBScore}]`);
+          const repoTag = isBatch ? `  (${path.basename(dot.repo)})` : '';
+          console.log(`    - ${dot.title}  [A:${dot.axisAScore} B:${dot.axisBScore}]${repoTag}`);
         }
       }
       console.log(`\n  Next:`);
-      console.log(`    ft ideas grid ${summary.runId}`);
-      console.log(`    ft ideas dots ${summary.runId}`);
+      if (isBatch) {
+        for (const runId of summary.runIds) {
+          console.log(`    ft ideas grid ${runId}`);
+        }
+      } else {
+        console.log(`    ft ideas grid ${summary.runIds[0]}`);
+        console.log(`    ft ideas dots ${summary.runIds[0]}`);
+      }
     }));
 
   ideas
@@ -1887,6 +1930,69 @@ export function buildCli() {
         await program.parseAsync(args);
       });
   }
+
+  // ── repos ──────────────────────────────────────────────────────────────
+
+  const repos = program
+    .command('repos')
+    .description('Save and manage the default repo set used by `ft ideas run`');
+
+  repos.action(() => {
+    const saved = listSavedRepos();
+    if (saved.length === 0) {
+      console.log('No saved repos. Add one with: ft repos add <path>');
+    } else {
+      console.log(`Saved repos (${saved.length}):`);
+      for (const r of saved) console.log(`  ${r}`);
+    }
+  });
+
+  repos
+    .command('list')
+    .description('List saved repo paths')
+    .action(safe(async () => {
+      const saved = listSavedRepos();
+      if (saved.length === 0) {
+        console.log('No saved repos. Add one with: ft repos add <path>');
+        return;
+      }
+      for (const r of saved) console.log(r);
+    }));
+
+  repos
+    .command('add')
+    .description('Add a repo path to the default set')
+    .argument('<path>', 'Repo path (absolute, ~, or relative)')
+    .action(safe(async (repoPath: string) => {
+      const result = addRepoToRegistry(String(repoPath));
+      if (result.added) {
+        console.log(`  ✓ Added: ${result.canonical}`);
+      } else {
+        console.log(`  Already saved: ${result.canonical}`);
+      }
+    }));
+
+  repos
+    .command('remove')
+    .description('Remove a repo path from the default set')
+    .argument('<path>', 'Repo path to remove')
+    .action(safe(async (repoPath: string) => {
+      const result = removeRepoFromRegistry(String(repoPath));
+      if (result.removed) {
+        console.log(`  ✓ Removed: ${result.canonical}`);
+      } else {
+        console.log(`  Not in registry: ${result.canonical}`);
+        process.exitCode = 1;
+      }
+    }));
+
+  repos
+    .command('clear')
+    .description('Remove all saved repo paths')
+    .action(safe(async () => {
+      const count = clearReposRegistry();
+      console.log(`  ✓ Cleared ${count} saved repo${count === 1 ? '' : 's'}.`);
+    }));
 
   // ── skill ──────────────────────────────────────────────────────────────
 
