@@ -1406,27 +1406,35 @@ export function buildCli() {
       }
     }));
 
-  // ── ideas ──────────────────────────────────────────────────────────────
+  // ── possible ───────────────────────────────────────────────────────────
+  //
+  // User-facing surface for the "apply a bookmark group to a repo → scored
+  // ideas on a 2x2 grid" feature. Previously named `ft ideas`; the old name
+  // still works as an alias. Internal module names, types, and on-disk md
+  // frontmatter types remain `ideas*` on purpose — renaming them would
+  // require a second migration and the mac app will eventually consume
+  // those shapes.
 
-  const ideas = program
-    .command('ideas')
-    .description('Turn seeds into structured repo-aware idea explorations');
+  const possible = program
+    .command('possible')
+    .alias('ideas')
+    .description('Apply a bookmark group to one or more repos — produces scored ideas on a 2x2 grid');
 
-  ideas
+  possible
     .action(() => {
       console.log(formatIdeasIntro());
     });
 
-  ideas
+  possible
     .command('explain')
-    .description('Explain what Ideas does and what to expect during a run')
+    .description('Explain what `ft possible` does and what to expect during a run')
     .action(() => {
       console.log(formatIdeasIntro());
     });
 
-  ideas
+  possible
     .command('run')
-    .description('Run an ideas exploration from a seed or seed artifact group, against one or more repos')
+    .description('Run a possibility exploration from a seed or seed artifact group, against one or more repos')
     .option('--seed-artifact <id...>', 'One or more seed artifact ids to start from')
     .option('--seed <id>', 'Saved seed id to start from')
     .option('--repo <path>', 'Single repo path to explore against (shorthand for --repos with one path)')
@@ -1461,7 +1469,7 @@ export function buildCli() {
       }
       const repos = resolution.repos;
 
-      console.log('  Ideas runs on your local machine. Keep your laptop awake for longer debates.');
+      console.log('  Runs on your local machine. Keep your laptop awake for longer debates.');
       if (repos.length > 1) {
         console.log(`  Batched run across ${repos.length} repos. The seed brief is computed once and reused.`);
       }
@@ -1481,36 +1489,36 @@ export function buildCli() {
       printIdeasRunReport(summary);
     }));
 
-  ideas
+  possible
     .command('list')
-    .description('List recent ideas runs')
+    .description('List recent possibility runs')
     .action(safe(async () => {
       console.log(formatRunList(listIdeaRuns()));
     }));
 
-  ideas
+  possible
     .command('show')
-    .description('Show one ideas run in detail')
+    .description('Show one possibility run in detail')
     .argument('[runId]', 'Run id, or omit for latest', 'latest')
     .action(safe(async (runId?: string) => {
       const run = resolveIdeaRun(runId);
       if (!run) {
-        console.log('  No ideas run found.');
+        console.log('  No possibility run found.');
         process.exitCode = 1;
         return;
       }
       console.log(formatRunSummary(run));
     }));
 
-  ideas
+  possible
     .command('grid')
-    .description('Render the 2x2 grid for an ideas run')
+    .description('Render the 2x2 grid for a possibility run')
     .argument('[runId]', 'Run id, or omit for latest', 'latest')
     .action(safe(async (runId?: string) => {
       console.log(renderRunGrid(runId));
     }));
 
-  ideas
+  possible
     .command('dots')
     .description('Render all scored ideas for a run')
     .argument('[runId]', 'Run id, or omit for latest', 'latest')
@@ -1518,7 +1526,7 @@ export function buildCli() {
       console.log(renderRunDots(runId));
     }));
 
-  ideas
+  possible
     .command('prompt')
     .description('Print the exportable prompt for a scored idea')
     .argument('<dotId>', 'Dot artifact id')
@@ -1532,13 +1540,13 @@ export function buildCli() {
 
   seeds
     .action(() => {
-      console.log('Seeds shape context. Use them to gather, save, and reuse source material before running ft ideas.');
+      console.log('Seeds shape context. Use them to gather, save, and reuse source material before running ft possible.');
       console.log('');
       console.log('Useful commands:');
       console.log('  ft seeds list');
       console.log('  ft seeds create --artifact <id...>');
       console.log('  ft seeds text "..."');
-      console.log('  ft ideas run --seed <seed-id> --repo .');
+      console.log('  ft possible run --seed <seed-id> --repo .');
     });
 
   seeds
@@ -1977,12 +1985,12 @@ export function buildCli() {
       console.log(formatSeedOrganization(result));
     }));
 
-  const ideasSeed = ideas
+  const possibleSeed = possible
     .command('seed')
-    .description('(alias) Seed commands live under ft seeds');
+    .description('(alias) Seed commands live under `ft seeds`');
 
   for (const cmd of ['list', 'show', 'create', 'text', 'delete']) {
-    ideasSeed.command(cmd).description(`Alias for: ft seeds ${cmd}`).allowUnknownOption(true)
+    possibleSeed.command(cmd).description(`Alias for: ft seeds ${cmd}`).allowUnknownOption(true)
       .action(async () => {
         const args = ['node', 'ft', 'seeds', cmd, ...process.argv.slice(4)];
         await program.parseAsync(args);

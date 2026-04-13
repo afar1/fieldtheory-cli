@@ -87,7 +87,7 @@ function ideasRoot(repo?: string): string {
 export function formatIdeasIntro(): string {
   const frameNames = DEFAULT_FRAMES.map((f) => f.id).join(', ');
   return [
-    'Ideas turns a seed into a structured exploration against a repo.',
+    '`ft possible` turns a seed (a bookmark group) into a structured exploration against one or more repos.',
     '',
     'What happens in a run:',
     '  1. read the seed and extract the core idea',
@@ -102,11 +102,12 @@ export function formatIdeasIntro(): string {
     '  - results are saved locally so you can reopen them later',
     '',
     'Useful commands:',
-    '  ft ideas explain',
-    '  ft ideas run --seed <seed-id> --repo .',
-    '  ft ideas grid latest',
-    '  ft ideas dots latest',
-    '  ft ideas prompt <node-id>',
+    '  ft possible explain',
+    '  ft possible run --seed <seed-id> --repo .',
+    '  ft possible run --seed <seed-id> --repos <path...>    # batch',
+    '  ft possible grid latest',
+    '  ft possible dots latest',
+    '  ft possible prompt <node-id>',
     '',
     `Available frames: ${frameNames}`,
   ].join('\n');
