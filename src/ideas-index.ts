@@ -3,6 +3,7 @@ import { writeJson } from './fs.js';
 import { ideasMdDir } from './paths.js';
 import { listIdeasSeeds, type IdeasSeed } from './ideas-seeds.js';
 import { listIdeaRuns, dotsFromRun } from './ideas.js';
+import { listIdeasTheories, type IdeasTheory } from './ideas-theories.js';
 import type { Consideration } from './adjacent/types.js';
 
 export interface IdeasIndexSeedEntry {
@@ -32,11 +33,20 @@ export interface IdeasIndexNodeEntry {
   createdAt: string;
 }
 
+export interface IdeasIndexTheoryEntry {
+  id: string;
+  title: string;
+  runId: string;
+  nodeIds: string[];
+  createdAt: string;
+}
+
 export interface IdeasIndex {
   generatedAt: string;
   seeds: IdeasIndexSeedEntry[];
   runs: IdeasIndexRunEntry[];
   nodes: IdeasIndexNodeEntry[];
+  theories: IdeasIndexTheoryEntry[];
 }
 
 export function ideasIndexPath(): string {
@@ -76,6 +86,16 @@ function mapNodes(run: Consideration): IdeasIndexNodeEntry[] {
   }));
 }
 
+function mapTheory(theory: IdeasTheory): IdeasIndexTheoryEntry {
+  return {
+    id: theory.id,
+    title: theory.title,
+    runId: theory.runId,
+    nodeIds: theory.nodeIds,
+    createdAt: theory.createdAt,
+  };
+}
+
 export function buildIdeasIndex(): IdeasIndex {
   const seeds = listIdeasSeeds().slice(0, 200).map(mapSeed);
   const runs = listIdeaRuns().slice(0, 200);
@@ -85,6 +105,7 @@ export function buildIdeasIndex(): IdeasIndex {
     seeds,
     runs: runs.map(mapRun),
     nodes: runs.flatMap(mapNodes).slice(0, 500),
+    theories: listIdeasTheories().slice(0, 200).map(mapTheory),
   };
 }
 
