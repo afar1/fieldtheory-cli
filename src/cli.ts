@@ -1489,16 +1489,21 @@ export function buildCli() {
     .option('--repo <path>', 'Single repo path to explore against (shorthand for --repos with one path)')
     .option('--repos <path...>', 'Multiple repo paths; produces one consideration per repo plus a batch summary')
     .option('--frame <id>', 'Frame id (overrides any frame pinned on the seed)')
-    .option('--depth <depth>', 'Depth: quick | standard | deep', 'standard')
+    .option('--depth <depth>', 'Depth: quick | standard | deep (default: standard, or quick under --defaults)')
     .option('--steering <text>', 'Optional steering nudge')
     .option('--defaults', 'Re-run with sensible defaults: most-recently-used seed, saved repo registry, seed-pinned frame, quick depth', false)
     .action(safe(async (options) => {
       // ── --defaults: fill in the blanks from the store ────────────────
+      // Commander no longer sets a default on --depth, so options.depth is
+      // undefined when the user did not pass --depth. That lets the
+      // --defaults branch distinguish "user asked for standard" from
+      // "user asked for nothing" and only rewrite the latter.
       let seedArtifactIds = Array.isArray(options.seedArtifact)
         ? (options.seedArtifact as string[]).map(String)
         : options.seedArtifact ? [String(options.seedArtifact)] : undefined;
       let seedId = options.seed ? String(options.seed) : undefined;
-      let depth = options.depth;
+      const depthExplicit = options.depth !== undefined;
+      let depth: 'quick' | 'standard' | 'deep' = (options.depth as 'quick' | 'standard' | 'deep' | undefined) ?? 'standard';
 
       if (options.defaults) {
         if (!seedId && (!seedArtifactIds || seedArtifactIds.length === 0)) {
@@ -1511,9 +1516,10 @@ export function buildCli() {
           seedId = mostRecent.id;
           console.log(`  Using most recently used seed: ${mostRecent.id}  ${mostRecent.title}`);
         }
-        if (!options.depth || options.depth === 'standard') {
-          // Commander defaults options.depth to 'standard'. Under --defaults
-          // we prefer 'quick' unless the user explicitly passed a depth flag.
+        if (!depthExplicit) {
+          // Only override when the user did NOT pass --depth. This way
+          // `ft possible run --defaults --depth standard` stays standard
+          // instead of being silently rewritten to quick.
           depth = 'quick';
         }
       }

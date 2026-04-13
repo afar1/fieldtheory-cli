@@ -284,3 +284,80 @@ test('runPossibleWizard: user cancels at confirm → returns cancelled, no plan'
   assert.equal(result.kind, 'cancelled');
   if (result.kind === 'cancelled') assert.equal(result.reason, 'user-cancelled-at-confirm');
 });
+
+test('runPossibleWizard: quit at seed pick (non-empty store) short-circuits', async () => {
+  const deps: WizardDeps = {
+    listSeeds: () => [fakeSeed()],
+    listRepos: () => ['/r1'],
+    listFrames: () => [fakeFrame()],
+  };
+  const prompter = mockPrompter(['q']);
+  const result = await runPossibleWizard(prompter, deps);
+  assert.equal(result.kind, 'cancelled');
+  if (result.kind === 'cancelled') assert.equal(result.reason, 'quit-at-seed-pick');
+  assert.equal(prompter.remaining(), 0);
+});
+
+test('runPossibleWizard: quit at repos picker short-circuits', async () => {
+  const deps: WizardDeps = {
+    listSeeds: () => [fakeSeed()],
+    listRepos: () => [], // no saved → wizard asks for paths
+    listFrames: () => [fakeFrame()],
+  };
+  // Answers: seed 1, then quit at repos.
+  const prompter = mockPrompter(['1', 'q']);
+  const result = await runPossibleWizard(prompter, deps);
+  assert.equal(result.kind, 'cancelled');
+  if (result.kind === 'cancelled') assert.equal(result.reason, 'quit-at-repos-empty');
+});
+
+test('runPossibleWizard: quit at frame picker short-circuits', async () => {
+  const deps: WizardDeps = {
+    listSeeds: () => [fakeSeed()],
+    listRepos: () => ['/r1'],
+    listFrames: () => [fakeFrame()],
+  };
+  // Answers: seed 1, accept repos, quit at frame.
+  const prompter = mockPrompter(['1', '', 'q']);
+  const result = await runPossibleWizard(prompter, deps);
+  assert.equal(result.kind, 'cancelled');
+  if (result.kind === 'cancelled') assert.equal(result.reason, 'quit-at-frame');
+});
+
+test('runPossibleWizard: quit at depth picker short-circuits', async () => {
+  const deps: WizardDeps = {
+    listSeeds: () => [fakeSeed()],
+    listRepos: () => ['/r1'],
+    listFrames: () => [fakeFrame()],
+  };
+  // Answers: seed 1, accept repos, accept frame, quit at depth.
+  const prompter = mockPrompter(['1', '', '', 'q']);
+  const result = await runPossibleWizard(prompter, deps);
+  assert.equal(result.kind, 'cancelled');
+  if (result.kind === 'cancelled') assert.equal(result.reason, 'quit-at-depth');
+});
+
+test('runPossibleWizard: invalid seed pick (out of range) short-circuits', async () => {
+  const deps: WizardDeps = {
+    listSeeds: () => [fakeSeed(), fakeSeed({ id: 'seed-b' })],
+    listRepos: () => ['/r1'],
+    listFrames: () => [fakeFrame()],
+  };
+  const prompter = mockPrompter(['99']);
+  const result = await runPossibleWizard(prompter, deps);
+  assert.equal(result.kind, 'cancelled');
+  if (result.kind === 'cancelled') assert.equal(result.reason, 'invalid-seed-pick');
+});
+
+test('runPossibleWizard: invalid frame pick short-circuits', async () => {
+  const deps: WizardDeps = {
+    listSeeds: () => [fakeSeed()],
+    listRepos: () => ['/r1'],
+    listFrames: () => [fakeFrame()],
+  };
+  // Answers: seed 1, accept repos, out-of-range frame pick.
+  const prompter = mockPrompter(['1', '', '99']);
+  const result = await runPossibleWizard(prompter, deps);
+  assert.equal(result.kind, 'cancelled');
+  if (result.kind === 'cancelled') assert.equal(result.reason, 'invalid-frame-pick');
+});
