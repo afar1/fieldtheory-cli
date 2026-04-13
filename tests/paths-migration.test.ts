@@ -133,3 +133,76 @@ test('migrateLegacyIdeasData: skips when new root already has content, even with
     assert.deepEqual(after.seeds, ['new']);
   });
 });
+
+test('migrateLegacyIdeasData: recovers from a partial copy left by a previous interrupted run', async () => {
+  // Regression guard for the real-machine bug where the first run's copy
+  // got interrupted partway, leaving 18/54 repo-indices in the new root,
+  // no complete marker, and the next run short-circuiting as
+  // "already-migrated". With the two-marker guard (begin + complete), a
+  // begin-marker-only new root is treated as a partial and retried cleanly.
+  await withTmpRoot(async (dir) => {
+    // Full legacy layout with 3 repo-indices we want to see at the end.
+    await seedLegacyLayout(dir, { withAdjacent: true });
+    const legacyRepoIndices = path.join(dir, 'automation', 'adjacent', 'repo-indices');
+    await mkdir(legacyRepoIndices, { recursive: true });
+    await writeFile(path.join(legacyRepoIndices, 'repo-a.json'), '{"repo":"a"}', 'utf-8');
+    await writeFile(path.join(legacyRepoIndices, 'repo-b.json'), '{"repo":"b"}', 'utf-8');
+    await writeFile(path.join(legacyRepoIndices, 'repo-c.json'), '{"repo":"c"}', 'utf-8');
+
+    // Simulate a prior interrupted run: new root exists with a begin marker
+    // plus a subset of the legacy content (only repo-a was copied before
+    // the process died). No complete marker.
+    const newRoot = path.join(dir, 'ideas');
+    const partialRepoIndices = path.join(newRoot, 'adjacent', 'repo-indices');
+    await mkdir(partialRepoIndices, { recursive: true });
+    await writeFile(path.join(partialRepoIndices, 'repo-a.json'), '{"repo":"a"}', 'utf-8');
+    await writeFile(
+      path.join(newRoot, '.migration-in-progress'),
+      JSON.stringify({ startedAt: '2026-04-13T00:00:00.000Z' }),
+      'utf-8',
+    );
+
+    const paths = await getPaths();
+    const result = paths.migrateLegacyIdeasData();
+
+    assert.equal(result.migrated, true);
+    assert.equal(result.reason, 'recovered-partial');
+
+    // The new root now has all three repo-indices from the legacy set.
+    const finalEntries = (await (await import('node:fs/promises')).readdir(partialRepoIndices)).sort();
+    assert.deepEqual(finalEntries, ['repo-a.json', 'repo-b.json', 'repo-c.json']);
+
+    // Complete marker is written; begin marker is gone.
+    assert.ok(fs.existsSync(path.join(newRoot, '.migrated-from-ft-bookmarks')));
+    assert.ok(!fs.existsSync(path.join(newRoot, '.migration-in-progress')));
+  });
+});
+
+test('migrateLegacyIdeasData: respects the complete marker even when content looks partial', async () => {
+  // The complete marker is the authoritative "done" signal. If it is
+  // present, we must never touch the new root — even if content looks
+  // lighter than the legacy set (e.g. the user pruned files after the
+  // migration, or the legacy tree has grown since).
+  await withTmpRoot(async (dir) => {
+    const newRoot = path.join(dir, 'ideas');
+    const newRepoIndices = path.join(newRoot, 'adjacent', 'repo-indices');
+    await mkdir(newRepoIndices, { recursive: true });
+    await writeFile(path.join(newRepoIndices, 'only-this.json'), '{"repo":"x"}', 'utf-8');
+    await writeFile(
+      path.join(newRoot, '.migrated-from-ft-bookmarks'),
+      JSON.stringify({ migratedAt: '2026-04-13T00:00:00.000Z' }),
+      'utf-8',
+    );
+    // Legacy has a lot more.
+    await seedLegacyLayout(dir, { withAdjacent: true });
+
+    const paths = await getPaths();
+    const result = paths.migrateLegacyIdeasData();
+    assert.equal(result.migrated, false);
+    assert.equal(result.reason, 'already-migrated');
+
+    // New root still has the exact one entry the user kept.
+    const entries = (await (await import('node:fs/promises')).readdir(newRepoIndices)).sort();
+    assert.deepEqual(entries, ['only-this.json']);
+  });
+});
