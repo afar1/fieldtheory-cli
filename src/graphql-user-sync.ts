@@ -482,7 +482,9 @@ export async function syncUserTimeline(
 
   return {
     added: totalAdded,
+    bookmarkedAtRepaired: 0,
     totalBookmarks: existing.length,
+    bookmarkedAtMissing: 0,
     pages: page,
     stopReason,
     cachePath: config.cachePath,

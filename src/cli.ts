@@ -900,7 +900,7 @@ export function buildCli() {
       console.log(`\n  \u2713 ${result.added} new ${cfg.label} synced (${result.totalBookmarks} total)`);
       console.log(`  ${friendlyStopReason(result.stopReason)}`);
       console.log(`  \u2713 Data: ${dataDir()}\n`);
-      await rebuildIndex(result.added);
+      await rebuildIndex();
     }));
   }
 
