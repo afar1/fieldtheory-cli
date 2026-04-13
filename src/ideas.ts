@@ -40,6 +40,18 @@ export interface IdeasRunSummary {
   topDots: Array<Dot & { repo: string }>;
 }
 
+export interface RepoRun {
+  repo: string;
+  runId: string;
+}
+
+export interface DotEntry {
+  runId: string;
+  repo: string;
+  dotArtifactId: string;
+  dot: Dot;
+}
+
 export interface IdeasBatchSummary {
   id: string;
   createdAt: string;
@@ -49,10 +61,22 @@ export interface IdeasBatchSummary {
   frameName: string;
   depth: 'quick' | 'standard' | 'deep';
   steering?: string;
-  considerationIds: string[];
-  repos: string[];
+  /** Single source of truth for the repo→run pairing. The md renderer derives the parallel YAML arrays from this. */
+  repoRuns: RepoRun[];
   totalDotCount: number;
-  topDots: Array<{ runId: string; repo: string; dotArtifactId: string; dot: Dot }>;
+  topDots: DotEntry[];
+}
+
+/**
+ * Sort scored dots from any number of runs by combined axis A + B score and
+ * return the top `limit`. Pure helper so the aggregation can be tested in
+ * isolation from the LLM pipeline.
+ */
+export function aggregateTopDots(entries: DotEntry[], limit: number): DotEntry[] {
+  if (limit <= 0) return [];
+  return [...entries]
+    .sort((a, b) => (b.dot.axisAScore + b.dot.axisBScore) - (a.dot.axisAScore + a.dot.axisBScore))
+    .slice(0, limit);
 }
 
 function ideasRoot(repo?: string): string {
@@ -199,8 +223,8 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
   }
 
   const depth = options.depth ?? 'standard';
-  const considerationIds: string[] = [];
-  const allDotEntries: Array<{ runId: string; repo: string; dotArtifactId: string; dot: Dot }> = [];
+  const repoRuns: RepoRun[] = [];
+  const allDotEntries: DotEntry[] = [];
   let totalDotCount = 0;
 
   for (const [idx, repo] of options.repos.entries()) {
@@ -222,7 +246,7 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
     await writeIdeasRunMd(result.consideration);
     await writeIdeasNodeMds(result.consideration);
 
-    considerationIds.push(result.consideration.id);
+    repoRuns.push({ repo: resolvedRepo, runId: result.consideration.id });
     totalDotCount += result.dots.length;
 
     for (let i = 0; i < result.dots.length; i++) {
@@ -243,20 +267,17 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
     }
   }
 
-  const topDotsAggregated = [...allDotEntries]
-    .sort((a, b) => (b.dot.axisAScore + b.dot.axisBScore) - (a.dot.axisAScore + a.dot.axisBScore))
-    .slice(0, 5);
+  const topDotsAggregated = aggregateTopDots(allDotEntries, 5);
 
   let batchId: string | undefined;
-  if (considerationIds.length > 1) {
+  if (repoRuns.length > 1) {
     batchId = await persistBatchSummary({
-      considerationIds,
+      repoRuns,
       seedId: options.seedId,
       seedArtifactIds,
       frame,
       depth,
       steering: options.steering,
-      repos: options.repos.map((r) => ideasRoot(r)),
       totalDotCount,
       topDots: topDotsAggregated,
     });
@@ -265,7 +286,7 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
   await refreshIdeasDerivedState();
 
   return {
-    runIds: considerationIds,
+    runIds: repoRuns.map((r) => r.runId),
     batchId,
     frameId: frame.id,
     frameName: frame.name,
@@ -275,15 +296,14 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
 }
 
 async function persistBatchSummary(input: {
-  considerationIds: string[];
+  repoRuns: RepoRun[];
   seedId?: string;
   seedArtifactIds: string[];
   frame: Frame;
   depth: 'quick' | 'standard' | 'deep';
   steering?: string;
-  repos: string[];
   totalDotCount: number;
-  topDots: Array<{ runId: string; repo: string; dotArtifactId: string; dot: Dot }>;
+  topDots: DotEntry[];
 }): Promise<string> {
   const id = generateBatchId();
   const createdAt = new Date().toISOString();
@@ -297,8 +317,7 @@ async function persistBatchSummary(input: {
     frameName: input.frame.name,
     depth: input.depth,
     steering: input.steering,
-    considerationIds: input.considerationIds,
-    repos: input.repos,
+    repoRuns: input.repoRuns,
     totalDotCount: input.totalDotCount,
     topDots: input.topDots,
   };
@@ -309,7 +328,7 @@ async function persistBatchSummary(input: {
     provenance: {
       createdAt,
       producer: 'system',
-      inputIds: input.considerationIds,
+      inputIds: input.repoRuns.map((r) => r.runId),
       promptVersion: 'ideas-batch-summary-v1',
     },
     content: JSON.stringify(summary, null, 2),

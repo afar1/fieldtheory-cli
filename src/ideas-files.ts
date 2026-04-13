@@ -220,6 +220,11 @@ export function ideasBatchMdPath(batch: IdeasBatchSummary): string {
 }
 
 export function renderIdeasBatchMd(batch: IdeasBatchSummary): string {
+  // Derive the parallel YAML arrays from the single source of truth so they
+  // cannot drift out of lockstep.
+  const repos = batch.repoRuns.map((r) => r.repo);
+  const considerationIds = batch.repoRuns.map((r) => r.runId);
+
   return [
     '---',
     'type: ideas-batch-summary',
@@ -231,8 +236,8 @@ export function renderIdeasBatchMd(batch: IdeasBatchSummary): string {
     `frame_name: "${escapeYaml(batch.frameName)}"`,
     `depth: ${batch.depth}`,
     ...(batch.steering ? [`steering: "${escapeYaml(batch.steering)}"`] : []),
-    `consideration_ids: [${batch.considerationIds.map((id) => `"${escapeYaml(id)}"`).join(', ')}]`,
-    `repos: [${batch.repos.map((r) => `"${escapeYaml(r)}"`).join(', ')}]`,
+    `consideration_ids: [${considerationIds.map((id) => `"${escapeYaml(id)}"`).join(', ')}]`,
+    `repos: [${repos.map((r) => `"${escapeYaml(r)}"`).join(', ')}]`,
     `total_dot_count: ${batch.totalDotCount}`,
     '---',
     '',
@@ -243,23 +248,21 @@ export function renderIdeasBatchMd(batch: IdeasBatchSummary): string {
     ...(batch.seedId ? [`- Seed: ${batch.seedId}`] : []),
     `- Frame: ${batch.frameName} (${batch.frameId})`,
     `- Depth: ${batch.depth}`,
-    `- Repos: ${batch.repos.length}`,
-    `- Considerations: ${batch.considerationIds.length}`,
+    `- Repos: ${batch.repoRuns.length}`,
+    `- Considerations: ${batch.repoRuns.length}`,
     `- Total scored ideas: ${batch.totalDotCount}`,
     `- Created: ${batch.createdAt}`,
     '',
     '## Per-repo runs',
     '',
-    ...batch.considerationIds.flatMap((runId, idx) => [
-      `- ${batch.repos[idx] ?? '(unknown repo)'} → ${runId}`,
-    ]),
+    ...batch.repoRuns.map(({ repo, runId }) => `- ${repo} → ${runId}`),
     '',
     ...(batch.topDots.length > 0 ? renderTopDotsSection(batch) : []),
     '## Re-run',
     '',
     'Re-run this batch shape later with:',
     '',
-    `\`ft ideas run --seed <seed-id> --repos ${batch.repos.map((r) => `"${escapeYaml(r)}"`).join(' ')} --frame ${batch.frameId} --depth ${batch.depth}${batch.steering ? ` --steering "${escapeYaml(batch.steering)}"` : ''}\``,
+    `\`ft ideas run --seed <seed-id> --repos ${repos.map((r) => `"${escapeYaml(r)}"`).join(' ')} --frame ${batch.frameId} --depth ${batch.depth}${batch.steering ? ` --steering "${escapeYaml(batch.steering)}"` : ''}\``,
     '',
   ].join('\n');
 }

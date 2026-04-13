@@ -424,6 +424,41 @@ export function resolveFolder(folders: BookmarkFolder[], query: string): Bookmar
   throw new Error(`No folder matches "${query}". Available: ${available}`);
 }
 
+/**
+ * Format and print the human-facing summary of an `ft ideas run` invocation.
+ * Single-repo and multi-repo runs share most of the output but diverge on the
+ * "complete" header, the per-line repo tag, and the "next steps" suggestions.
+ */
+function printIdeasRunReport(summary: import('./ideas.js').IdeasRunSummary): void {
+  const isBatch = summary.runIds.length > 1;
+  if (isBatch) {
+    console.log(`\n  ✓ Ideas batch complete: ${summary.batchId}`);
+    console.log(`  Runs: ${summary.runIds.length} (one per repo)`);
+  } else {
+    console.log(`\n  ✓ Ideas run complete: ${summary.runIds[0]}`);
+  }
+  console.log(`  Frame: ${summary.frameName}`);
+  console.log(`  Ideas generated: ${summary.dotCount}`);
+
+  if (summary.topDots.length > 0) {
+    console.log(`\n  Top ideas${isBatch ? ' across all repos' : ''}:`);
+    for (const dot of summary.topDots) {
+      const repoTag = isBatch ? `  (${path.basename(dot.repo)})` : '';
+      console.log(`    - ${dot.title}  [A:${dot.axisAScore} B:${dot.axisBScore}]${repoTag}`);
+    }
+  }
+
+  console.log(`\n  Next:`);
+  if (isBatch) {
+    for (const runId of summary.runIds) {
+      console.log(`    ft ideas grid ${runId}`);
+    }
+  } else {
+    console.log(`    ft ideas grid ${summary.runIds[0]}`);
+    console.log(`    ft ideas dots ${summary.runIds[0]}`);
+  }
+}
+
 /** Wrap an async action with graceful error handling. */
 function safe(fn: (...args: any[]) => Promise<void>): (...args: any[]) => Promise<void> {
   return async (...args: any[]) => {
@@ -1420,31 +1455,7 @@ export function buildCli() {
         },
       });
 
-      const isBatch = summary.runIds.length > 1;
-      if (isBatch) {
-        console.log(`\n  ✓ Ideas batch complete: ${summary.batchId}`);
-        console.log(`  Runs: ${summary.runIds.length} (one per repo)`);
-      } else {
-        console.log(`\n  ✓ Ideas run complete: ${summary.runIds[0]}`);
-      }
-      console.log(`  Frame: ${summary.frameName}`);
-      console.log(`  Ideas generated: ${summary.dotCount}`);
-      if (summary.topDots.length > 0) {
-        console.log(`\n  Top ideas${isBatch ? ' across all repos' : ''}:`);
-        for (const dot of summary.topDots) {
-          const repoTag = isBatch ? `  (${path.basename(dot.repo)})` : '';
-          console.log(`    - ${dot.title}  [A:${dot.axisAScore} B:${dot.axisBScore}]${repoTag}`);
-        }
-      }
-      console.log(`\n  Next:`);
-      if (isBatch) {
-        for (const runId of summary.runIds) {
-          console.log(`    ft ideas grid ${runId}`);
-        }
-      } else {
-        console.log(`    ft ideas grid ${summary.runIds[0]}`);
-        console.log(`    ft ideas dots ${summary.runIds[0]}`);
-      }
+      printIdeasRunReport(summary);
     }));
 
   ideas

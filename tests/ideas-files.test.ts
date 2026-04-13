@@ -59,8 +59,10 @@ test('renderIdeasBatchMd: includes per-repo runs, top dots, and a re-run command
     frameName: 'Leverage × Specificity',
     depth: 'quick',
     steering: 'focus on auth',
-    considerationIds: ['adj-1', 'adj-2'],
-    repos: ['/tmp/repo-a', '/tmp/repo-b'],
+    repoRuns: [
+      { repo: '/tmp/repo-a', runId: 'adj-1' },
+      { repo: '/tmp/repo-b', runId: 'adj-2' },
+    ],
     totalDotCount: 6,
     topDots: [
       {
@@ -107,12 +109,44 @@ test('renderIdeasBatchMd: omits the top-dots section when no dots produced', asy
     frameId: 'impact-effort',
     frameName: 'Impact × Effort',
     depth: 'standard',
-    considerationIds: ['adj-1', 'adj-2'],
-    repos: ['/tmp/x', '/tmp/y'],
+    repoRuns: [
+      { repo: '/tmp/x', runId: 'adj-1' },
+      { repo: '/tmp/y', runId: 'adj-2' },
+    ],
     totalDotCount: 0,
     topDots: [],
   });
 
   assert.ok(!md.includes('## Top ideas across all repos'));
   assert.ok(md.includes('total_dot_count: 0'));
+});
+
+test('renderIdeasBatchMd: parallel YAML arrays stay in lockstep with repoRuns order', async () => {
+  // Regression guard for the repo↔runId pairing. The renderer derives the two
+  // YAML arrays (consideration_ids, repos) from a single source so they cannot
+  // drift out of order even if a future refactor reorders one.
+  const { renderIdeasBatchMd } = await getIdeasFiles();
+  const md = renderIdeasBatchMd({
+    id: 'batch-order',
+    createdAt: '2026-04-12T12:00:00.000Z',
+    seedArtifactIds: ['art-1'],
+    frameId: 'impact-effort',
+    frameName: 'Impact × Effort',
+    depth: 'standard',
+    repoRuns: [
+      { repo: '/tmp/zeta',  runId: 'adj-zeta' },
+      { repo: '/tmp/alpha', runId: 'adj-alpha' },
+      { repo: '/tmp/mid',   runId: 'adj-mid' },
+    ],
+    totalDotCount: 0,
+    topDots: [],
+  });
+
+  // Per-repo body section: each line zips the right pair.
+  assert.ok(md.includes('/tmp/zeta → adj-zeta'));
+  assert.ok(md.includes('/tmp/alpha → adj-alpha'));
+  assert.ok(md.includes('/tmp/mid → adj-mid'));
+  // Frontmatter parallel arrays: same order, same length.
+  assert.ok(md.includes('consideration_ids: ["adj-zeta", "adj-alpha", "adj-mid"]'));
+  assert.ok(md.includes('repos: ["/tmp/zeta", "/tmp/alpha", "/tmp/mid"]'));
 });
