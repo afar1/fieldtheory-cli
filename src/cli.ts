@@ -25,6 +25,7 @@ import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm
 import { resolveEngine, detectAvailableEngines } from './engine.js';
 import { loadPreferences, savePreferences } from './preferences.js';
 import { compileMd } from './md.js';
+import { cleanWikiFences } from './md-fence.js';
 import { askMd } from './md-ask.js';
 import { lintMd, fixLintIssues } from './md-lint.js';
 import { exportBookmarks } from './md-export.js';
@@ -752,6 +753,16 @@ export function buildCli() {
           }
         }
 
+        // Opportunistic wiki hygiene: if previous `ft wiki` runs left fenced
+        // pages on disk, quietly fix them. Silent when clean; one-line summary
+        // when it repaired something.
+        try {
+          const fence = await cleanWikiFences();
+          if (fence.fixed > 0) {
+            console.log(`  ✓ Tidied ${fence.fixed} wiki page${fence.fixed === 1 ? '' : 's'} with leftover code fences`);
+          }
+        } catch { /* best effort — never fail sync on hygiene */ }
+
         if (firstRun) {
           console.log(`\n  Next steps:`);
           console.log(`        ft classify              Classify by category and domain (LLM)`);
@@ -1228,8 +1239,25 @@ export function buildCli() {
     .command('wiki')
     .description('Compile Karpathy-style markdown wiki from bookmarks')
     .option('--full', 'Recompile all pages (ignore incremental cache)')
+    .option('--clean', 'Strip leftover LLM code fences from existing wiki pages (no compile)')
     .action(safe(async (options) => {
       if (!requireIndex()) return;
+
+      if (options.clean) {
+        const fence = await cleanWikiFences({ backup: true });
+        if (fence.fixed === 0) {
+          console.log(`  ✓ All ${fence.scanned} wiki pages are clean. Nothing to fix.`);
+          return;
+        }
+        console.log(`  ✓ Tidied ${fence.fixed} of ${fence.scanned} wiki pages`);
+        if (fence.backupDir) {
+          console.log(`  Backups: ${fence.backupDir}`);
+        }
+        console.log('  Fixed files:');
+        for (const f of fence.fixedFiles) console.log(`    ${f}`);
+        return;
+      }
+
       const start = Date.now();
       const onSigint = () => {
         console.log('\n  Interrupted. Your data is safe — progress has been saved.');

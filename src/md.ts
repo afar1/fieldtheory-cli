@@ -28,6 +28,7 @@ import {
   buildCategoryPagePrompt, buildDomainPagePrompt, buildEntityPagePrompt,
   type MdBookmark,
 } from './md-prompts.js';
+import { stripLlmMarkdownFence } from './md-fence.js';
 
 const MIN_CATEGORY_COUNT = 5;
 const MIN_DOMAIN_COUNT   = 5;
@@ -368,7 +369,8 @@ async function doCompile(
 
       let content: string;
       try {
-        content = await invokeEngineAsync(engine, prompt, opts);
+        const raw = await invokeEngineAsync(engine, prompt, opts);
+        content = stripLlmMarkdownFence(raw);
       } catch (err) {
         const msg = (err as Error).message ?? String(err);
         const isTimeout = msg.includes('ETIMEDOUT') || msg.includes('timed out');
