@@ -78,3 +78,71 @@ test('fetchBookmarkMediaBatch downloads post media from GraphQL mediaObjects sha
     globalThis.fetch = originalFetch;
   }
 });
+
+test('fetchBookmarkMediaBatch downloads shared profile images only once across bookmarks', async () => {
+  const profileUrl = 'https://pbs.twimg.com/profile_images/123/avatar_normal.jpg';
+  const fullProfileUrl = profileUrl.replace('_normal.', '_400x400.');
+  const records = [
+    {
+      id: '1',
+      tweetId: '1',
+      url: 'https://x.com/alice/status/1',
+      text: 'first bookmark',
+      authorHandle: 'alice',
+      authorName: 'Alice',
+      authorProfileImageUrl: profileUrl,
+      syncedAt: '2026-04-09T00:00:00.000Z',
+      mediaObjects: [],
+      links: [],
+      tags: [],
+      ingestedVia: 'graphql',
+    },
+    {
+      id: '2',
+      tweetId: '2',
+      url: 'https://x.com/alice/status/2',
+      text: 'second bookmark',
+      authorHandle: 'alice',
+      authorName: 'Alice',
+      authorProfileImageUrl: profileUrl,
+      syncedAt: '2026-04-09T00:00:00.000Z',
+      mediaObjects: [],
+      links: [],
+      tags: [],
+      ingestedVia: 'graphql',
+    },
+  ];
+
+  let profileGetRequests = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = String(input instanceof Request ? input.url : input);
+    const method = init?.method ?? 'GET';
+    if (method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': '4', 'content-type': 'image/jpeg' },
+      });
+    }
+    if (url === fullProfileUrl) profileGetRequests += 1;
+    return new Response(Uint8Array.from([1, 2, 3, 4]), {
+      status: 200,
+      headers: { 'content-type': 'image/jpeg' },
+    });
+  };
+
+  try {
+    await withMediaDataDir(records, async () => {
+      const manifest = await fetchBookmarkMediaBatch({ limit: 10, maxBytes: 1024 });
+      const downloadedProfileEntries = manifest.entries.filter(
+        (entry) => entry.status === 'downloaded' && entry.sourceUrl === fullProfileUrl,
+      );
+
+      assert.equal(profileGetRequests, 1);
+      assert.equal(downloadedProfileEntries.length, 1);
+      assert.match(path.basename(downloadedProfileEntries[0].localPath ?? ''), /^[a-f0-9]{16}\.jpg$/);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

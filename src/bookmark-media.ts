@@ -66,6 +66,11 @@ export async function fetchBookmarkMediaBatch(
     .slice(0, limit);
   const previous = await loadManifest();
   const priorKeys = new Set((previous?.entries ?? []).map((e) => `${e.bookmarkId}::${e.sourceUrl}`));
+  const knownProfileImageUrls = new Set(
+    (previous?.entries ?? [])
+      .filter((entry) => entry.sourceUrl.includes('/profile_images/'))
+      .map((entry) => entry.sourceUrl),
+  );
   const entries: MediaFetchEntry[] = previous?.entries ? [...previous.entries] : [];
 
   let downloaded = 0;
@@ -75,31 +80,34 @@ export async function fetchBookmarkMediaBatch(
 
   for (const bookmark of candidates) {
     // Resolve media URLs: prefer mediaObjects (richer, includes video variants), fall back to media[]
-    const mediaUrls: string[] = [];
+    const mediaUrls: { sourceUrl: string; isProfileImage: boolean }[] = [];
     if (bookmark.mediaObjects?.length) {
       for (const mo of bookmark.mediaObjects) {
         if (mo.type === 'video' || mo.type === 'animated_gif') {
           const mp4s = (mo.videoVariants ?? mo.variants ?? [])
             .filter((v) => v.url && (!v.contentType || v.contentType === 'video/mp4'))
             .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
-          if (mp4s.length > 0 && mp4s[0].url) { mediaUrls.push(mp4s[0].url); continue; }
+          if (mp4s.length > 0 && mp4s[0].url) { mediaUrls.push({ sourceUrl: mp4s[0].url, isProfileImage: false }); continue; }
         }
         const mediaUrl = mo.url ?? mo.mediaUrl;
-        if (mediaUrl) mediaUrls.push(mediaUrl);
+        if (mediaUrl) mediaUrls.push({ sourceUrl: mediaUrl, isProfileImage: false });
       }
     } else {
-      mediaUrls.push(...(bookmark.media ?? []));
+      mediaUrls.push(...(bookmark.media ?? []).map((sourceUrl) => ({ sourceUrl, isProfileImage: false })));
     }
 
     // Also include author profile image (upgraded to 400x400)
     if (bookmark.authorProfileImageUrl) {
       const fullUrl = bookmark.authorProfileImageUrl.replace('_normal.', '_400x400.');
-      if (!priorKeys.has(`${bookmark.id}::${fullUrl}`)) mediaUrls.push(fullUrl);
+      if (!knownProfileImageUrls.has(fullUrl)) {
+        mediaUrls.push({ sourceUrl: fullUrl, isProfileImage: true });
+        knownProfileImageUrls.add(fullUrl);
+      }
     }
 
-    for (const sourceUrl of mediaUrls) {
+    for (const { sourceUrl, isProfileImage } of mediaUrls) {
       const key = `${bookmark.id}::${sourceUrl}`;
-      if (priorKeys.has(key)) continue;
+      if (!isProfileImage && priorKeys.has(key)) continue;
       processed += 1;
 
       const fetchedAt = new Date().toISOString();
@@ -166,7 +174,9 @@ export async function fetchBookmarkMediaBatch(
 
         const digest = createHash('sha256').update(buffer).digest('hex').slice(0, 16);
         const ext = sanitizeExtFromContentType(response.headers.get('content-type') ?? contentType ?? undefined, sourceUrl);
-        const filename = `${bookmark.tweetId}-${digest}${ext}`;
+        const filename = isProfileImage
+          ? `${digest}${ext}`
+          : `${bookmark.tweetId}-${digest}${ext}`;
         const localPath = path.join(mediaDir, filename);
         await writeFile(localPath, buffer);
 

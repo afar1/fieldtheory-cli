@@ -225,6 +225,30 @@ test('resolveEngine: override returns named engine when binary is on PATH', asyn
   }
 });
 
+test('resolveEngine: codex args include skip-git-repo-check', async () => {
+  if (process.platform === 'win32') return;
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-codex-args-'));
+  const fakeBin = path.join(tmpDir, 'codex');
+  const origPath = process.env.PATH;
+  process.env.PATH = tmpDir;
+
+  try {
+    fs.writeFileSync(fakeBin, '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(fakeBin, 0o755);
+
+    const { resolveEngine } = await import('../src/engine.js');
+    const resolved = await resolveEngine({ override: 'codex' });
+    assert.deepEqual(
+      resolved.config.args('hello'),
+      ['exec', '--skip-git-repo-check', 'hello'],
+    );
+  } finally {
+    process.env.PATH = origPath;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 // ── ft model CLI parsing ───────────────────────────────────────────────
 
 test('ft model: command is registered and shows help', async () => {
