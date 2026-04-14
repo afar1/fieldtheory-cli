@@ -29,8 +29,8 @@ test('showDashboard: prints update notice when cache is newer than local', async
 
   const joined = logs.join('\n');
   assert.ok(
-    joined.includes('Update available'),
-    `expected update notice in dashboard output; got:\n${joined}`,
+    joined.includes('Update available') && joined.includes('99.99.99'),
+    `expected update notice mentioning the cached 99.99.99 version; got:\n${joined}`,
   );
 });
 
