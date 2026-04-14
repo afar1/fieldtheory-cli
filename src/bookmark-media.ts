@@ -66,9 +66,9 @@ export async function fetchBookmarkMediaBatch(
     .slice(0, limit);
   const previous = await loadManifest();
   const priorKeys = new Set((previous?.entries ?? []).map((e) => `${e.bookmarkId}::${e.sourceUrl}`));
-  const knownProfileImageUrls = new Set(
+  const downloadedProfileImageUrls = new Set(
     (previous?.entries ?? [])
-      .filter((entry) => entry.sourceUrl.includes('/profile_images/'))
+      .filter((entry) => entry.status === 'downloaded' && entry.sourceUrl.includes('/profile_images/'))
       .map((entry) => entry.sourceUrl),
   );
   const entries: MediaFetchEntry[] = previous?.entries ? [...previous.entries] : [];
@@ -99,9 +99,8 @@ export async function fetchBookmarkMediaBatch(
     // Also include author profile image (upgraded to 400x400)
     if (bookmark.authorProfileImageUrl) {
       const fullUrl = bookmark.authorProfileImageUrl.replace('_normal.', '_400x400.');
-      if (!knownProfileImageUrls.has(fullUrl)) {
+      if (!downloadedProfileImageUrls.has(fullUrl)) {
         mediaUrls.push({ sourceUrl: fullUrl, isProfileImage: true });
-        knownProfileImageUrls.add(fullUrl);
       }
     }
 
@@ -179,6 +178,7 @@ export async function fetchBookmarkMediaBatch(
           : `${bookmark.tweetId}-${digest}${ext}`;
         const localPath = path.join(mediaDir, filename);
         await writeFile(localPath, buffer);
+        if (isProfileImage) downloadedProfileImageUrls.add(sourceUrl);
 
         entries.push({
           bookmarkId: bookmark.id,
