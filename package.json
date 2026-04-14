@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "test": "tsx --test tests/**/*.test.ts",
     "dev": "tsx src/cli.ts",
+    "ig:saved-probe": "tsx src/instagram-saved-probe.ts",
     "start": "node dist/cli.js",
     "prepublishOnly": "npm run build"
   },
@@ -42,6 +43,7 @@
   "dependencies": {
     "commander": "^14.0.3",
     "dotenv": "^17.3.1",
+    "instagram-private-api": "^1.46.1",
     "sql.js": "^1.14.1",
     "sql.js-fts5": "^1.4.0"
   },

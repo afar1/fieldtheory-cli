@@ -509,3 +509,62 @@ export function extractChromeXCookies(
 
   return { csrfToken: cleanCt0, cookieHeader };
 }
+
+export function extractChromeNamedCookies(
+  chromeUserDataDir: string,
+  profileDirectory = 'Default',
+  domain: string,
+  names: string[],
+  browser: BrowserDef | undefined = undefined
+): Record<string, string> {
+  const os = platform();
+
+  const br = browser ?? { id: 'chrome', displayName: 'Google Chrome', cookieBackend: 'chromium' as const, keychainEntries: [] };
+  const dbPath = resolveCookieDbPath(chromeUserDataDir, profileDirectory);
+
+  let key: Buffer;
+  let v11Key: Buffer | null | undefined;
+  let isWindows = false;
+
+  try {
+    if (os === 'darwin') {
+      key = getMacOSKey(br);
+    } else if (os === 'linux') {
+      const linuxKeys = getLinuxKeys(br);
+      key = linuxKeys.v10;
+      v11Key = linuxKeys.v11;
+    } else if (os === 'win32') {
+      key = getWindowsKey(chromeUserDataDir, br);
+      isWindows = true;
+    } else {
+      throw new Error(
+        `Automatic cookie extraction is not supported on ${os}.\n` +
+        'Pass cookies manually instead.'
+      );
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Could not unlock ${br.displayName} cookies for ${domain}.\n` +
+      `${detail}`
+    );
+  }
+
+  const result = queryCookies(dbPath, domain, names, br);
+  const decrypted = new Map<string, string>();
+
+  for (const cookie of result.cookies) {
+    const hexVal = cookie.encrypted_value_hex;
+    if (hexVal && hexVal.length > 0) {
+      const buf = Buffer.from(hexVal, 'hex');
+      const decryptedValue = isWindows
+        ? decryptWindowsCookie(buf, key)
+        : decryptCookieValue(buf, key, result.dbVersion, v11Key);
+      decrypted.set(cookie.name, sanitizeCookieValue(cookie.name, decryptedValue, br));
+    } else if (cookie.value) {
+      decrypted.set(cookie.name, sanitizeCookieValue(cookie.name, cookie.value, br));
+    }
+  }
+
+  return Object.fromEntries(decrypted);
+}
