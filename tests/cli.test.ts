@@ -1,6 +1,38 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import { compareVersions, runWithSpinner, buildCli } from '../src/cli.js';
+
+test('showDashboard: prints update notice when cache is newer than local', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-dashboard-'));
+  const origEnv = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = tmpDir;
+
+  // Fresh cache file with an absurdly high version — exercises the cache-hit
+  // path (no network), and guarantees the notice regardless of local version.
+  fs.writeFileSync(path.join(tmpDir, '.update-check'), '99.99.99');
+
+  const logs: string[] = [];
+  const origLog = console.log;
+  console.log = (...args: any[]) => { logs.push(args.map(String).join(' ')); };
+
+  try {
+    const { showDashboard } = await import('../src/cli.js');
+    await showDashboard();
+  } finally {
+    console.log = origLog;
+    process.env.FT_DATA_DIR = origEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+
+  const joined = logs.join('\n');
+  assert.ok(
+    joined.includes('Update available'),
+    `expected update notice in dashboard output; got:\n${joined}`,
+  );
+});
 
 test('ft wiki: --engine option is registered', () => {
   const program = buildCli();

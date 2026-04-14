@@ -287,6 +287,12 @@ export async function showDashboard(): Promise<void> {
   Run: ft sync
 `);
   }
+
+  // The no-args path bypasses Commander, so the postAction update-check
+  // hook never fires here. Call it directly — same 5s network timeout,
+  // 24h cache debounce, and outer try/catch that the subcommand path
+  // already tolerates, so brittleness is bounded to existing behavior.
+  await checkForUpdate();
 }
 
 function timeAgo(dateStr: string): string {
