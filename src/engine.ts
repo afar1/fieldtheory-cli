@@ -5,7 +5,7 @@
  * Remembers the user's choice in ~/.ft-bookmarks/.preferences.
  */
 
-import { execFileSync, execFile } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadPreferences, savePreferences } from './preferences.js';
@@ -180,30 +180,254 @@ export interface InvokeOptions {
   maxBuffer?: number;
 }
 
+/**
+ * Structured failure from an engine invocation.
+ *
+ * Carries the pieces a caller needs to build a useful error message:
+ * - `stderr`: whatever the child wrote before it died (may be empty)
+ * - `killed`: true when we killed it ourselves (timeout / maxBuffer cap)
+ * - `code`/`signal`: standard exit info
+ *
+ * We avoid stuffing the prompt into `.message` — the prompt can be tens of
+ * kilobytes, and `execFile`'s built-in "Command failed: <cmd + args>" format
+ * blew up the `log.md` entries for `ft wiki` by consuming the entire
+ * truncation budget with prompt bytes, leaving no room for the actual
+ * failure signal. Callers should prefer `.stderr` / `.killed` over
+ * `.message` for user-facing output.
+ */
+export class EngineInvocationError extends Error {
+  readonly engine: string;
+  readonly bin: string;
+  readonly stderr: string;
+  readonly killed: boolean;
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly reason: 'timeout' | 'maxbuffer' | 'exit' | 'spawn';
+
+  constructor(params: {
+    engine: string;
+    bin: string;
+    stderr: string;
+    killed: boolean;
+    code: number | null;
+    signal: NodeJS.Signals | null;
+    reason: 'timeout' | 'maxbuffer' | 'exit' | 'spawn';
+    message: string;
+  }) {
+    super(params.message);
+    this.name = 'EngineInvocationError';
+    this.engine = params.engine;
+    this.bin = params.bin;
+    this.stderr = params.stderr;
+    this.killed = params.killed;
+    this.code = params.code;
+    this.signal = params.signal;
+    this.reason = params.reason;
+  }
+}
+
+const DEFAULT_TIMEOUT   = 120_000;
+const DEFAULT_MAXBUF    = 1024 * 1024;
+const STDERR_TAIL_BYTES = 4096; // enough for a claude auth/rate-limit blurb
+
+/** Clip the tail of a buffer to a byte budget — engines put the "what went
+ *  wrong" line at the end of stderr. */
+function tailString(buf: Buffer, bytes: number): string {
+  if (buf.length <= bytes) return buf.toString('utf-8');
+  return '\u2026' + buf.subarray(buf.length - bytes).toString('utf-8');
+}
+
+/** Build a user-facing failure message. Deliberately does NOT inline the
+ *  prompt — see EngineInvocationError for why. */
+function buildMessage(
+  engineName: string,
+  reason: 'timeout' | 'maxbuffer' | 'exit' | 'spawn',
+  stderr: string,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  timeoutMs: number,
+): string {
+  const stderrSnippet = stderr.trim().slice(-500);
+  const detail = stderrSnippet ? ` \u2014 ${stderrSnippet}` : '';
+  switch (reason) {
+    case 'timeout':
+      return `${engineName} timed out after ${Math.round(timeoutMs / 1000)}s${detail}`;
+    case 'maxbuffer':
+      return `${engineName} output exceeded buffer cap${detail}`;
+    case 'spawn':
+      return `${engineName} failed to start${detail}`;
+    case 'exit':
+    default: {
+      const signalPart = signal ? ` (signal ${signal})` : '';
+      const codePart   = code !== null ? ` exit ${code}` : '';
+      return `${engineName} failed${codePart}${signalPart}${detail}`;
+    }
+  }
+}
+
+/**
+ * Synchronous engine call — uses `spawnSync` with `input: ''` so the child's
+ * stdin is closed with EOF before it starts reading.
+ *
+ * Background: claude-code's `claude -p` reads stdin when it's not a TTY and
+ * concatenates it with the `-p` argument. Leaving stdin open as an unwritten
+ * pipe makes older claude versions block forever (and newer versions eat a
+ * 3s "no stdin data received" delay per call). Passing `input: ''` sends
+ * EOF immediately so the child proceeds with just the prompt arg.
+ */
 export function invokeEngine(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): string {
   const { bin, args } = engine.config;
-  return execFileSync(bin, args(prompt), {
-    encoding: 'utf-8',
-    timeout: opts.timeout ?? 120_000,
-    maxBuffer: opts.maxBuffer ?? 1024 * 1024,
-    stdio: ['pipe', 'pipe', 'ignore'],
-  }).trim();
+  const timeout   = opts.timeout   ?? DEFAULT_TIMEOUT;
+  const maxBuffer = opts.maxBuffer ?? DEFAULT_MAXBUF;
+
+  const result = spawnSync(bin, args(prompt), {
+    input: '',              // EOF on stdin — do not inherit parent stdin
+    timeout,
+    maxBuffer,
+    encoding: 'buffer',
+  });
+
+  const stderrBuf = result.stderr ?? Buffer.alloc(0);
+  const stderr    = tailString(stderrBuf, STDERR_TAIL_BYTES);
+
+  if (result.error) {
+    const anyErr = result.error as NodeJS.ErrnoException & { code?: string };
+    if (anyErr.code === 'ETIMEDOUT') {
+      throw new EngineInvocationError({
+        engine: engine.name, bin, stderr,
+        killed: true, code: null, signal: 'SIGTERM', reason: 'timeout',
+        message: buildMessage(engine.name, 'timeout', stderr, null, 'SIGTERM', timeout),
+      });
+    }
+    if (anyErr.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      throw new EngineInvocationError({
+        engine: engine.name, bin, stderr,
+        killed: true, code: null, signal: null, reason: 'maxbuffer',
+        message: buildMessage(engine.name, 'maxbuffer', stderr, null, null, timeout),
+      });
+    }
+    throw new EngineInvocationError({
+      engine: engine.name, bin,
+      stderr: '', killed: false, code: null, signal: null, reason: 'spawn',
+      message: buildMessage(engine.name, 'spawn', anyErr.message ?? '', null, null, timeout),
+    });
+  }
+
+  if (result.signal === 'SIGTERM' && (result.status === null || result.status === 143)) {
+    // spawnSync sets .signal='SIGTERM' when the timeout kills the child.
+    throw new EngineInvocationError({
+      engine: engine.name, bin, stderr,
+      killed: true, code: result.status, signal: result.signal, reason: 'timeout',
+      message: buildMessage(engine.name, 'timeout', stderr, result.status, result.signal, timeout),
+    });
+  }
+
+  if (result.status !== 0) {
+    throw new EngineInvocationError({
+      engine: engine.name, bin, stderr,
+      killed: false, code: result.status, signal: result.signal, reason: 'exit',
+      message: buildMessage(engine.name, 'exit', stderr, result.status, result.signal, timeout),
+    });
+  }
+
+  return (result.stdout ?? Buffer.alloc(0)).toString('utf-8').trim();
 }
 
 /**
  * Async variant — does not block the event loop, so spinners and
  * setInterval callbacks continue to fire while the LLM runs.
+ *
+ * Uses `spawn` (not `execFile`) because `execFile` with a callback builds
+ * its own internal stdio pipes and silently overrides any stdio option we
+ * pass — so we can't close the child's stdin through the execFile API. With
+ * `spawn` we get direct control and can `child.stdin.end()` immediately.
  */
 export function invokeEngineAsync(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): Promise<string> {
   const { bin, args } = engine.config;
+  const timeout   = opts.timeout   ?? DEFAULT_TIMEOUT;
+  const maxBuffer = opts.maxBuffer ?? DEFAULT_MAXBUF;
+
   return new Promise((resolve, reject) => {
-    execFile(bin, args(prompt), {
-      encoding: 'utf-8',
-      timeout: opts.timeout ?? 120_000,
-      maxBuffer: opts.maxBuffer ?? 1024 * 1024,
-    }, (err, stdout) => {
-      if (err) return reject(err);
-      resolve(stdout.trim());
+    const child = spawn(bin, args(prompt), {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    // Close stdin immediately with EOF so `claude -p` doesn't wait on it.
+    // If spawn itself failed (ENOENT etc) `child.stdin` may be null — guard.
+    try { child.stdin?.end(); } catch { /* spawn error will surface below */ }
+
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let settled = false;
+
+    const fail = (err: EngineInvocationError) => {
+      if (settled) return;
+      settled = true;
+      try { child.kill('SIGTERM'); } catch { /* already dead */ }
+      reject(err);
+    };
+
+    const succeed = (out: string) => {
+      if (settled) return;
+      settled = true;
+      resolve(out);
+    };
+
+    child.stdout?.on('data', (d: Buffer) => {
+      stdoutBytes += d.length;
+      if (stdoutBytes > maxBuffer) {
+        const stderr = tailString(Buffer.concat(stderrChunks), STDERR_TAIL_BYTES);
+        fail(new EngineInvocationError({
+          engine: engine.name, bin, stderr,
+          killed: true, code: null, signal: null, reason: 'maxbuffer',
+          message: buildMessage(engine.name, 'maxbuffer', stderr, null, null, timeout),
+        }));
+        return;
+      }
+      stdoutChunks.push(d);
+    });
+
+    child.stderr?.on('data', (d: Buffer) => {
+      // Bound stderr buffering to avoid RAM blowup on a misbehaving child.
+      stderrChunks.push(d);
+      if (stderrChunks.length > 64) stderrChunks.splice(0, 32);
+    });
+
+    const timer = setTimeout(() => {
+      const stderr = tailString(Buffer.concat(stderrChunks), STDERR_TAIL_BYTES);
+      fail(new EngineInvocationError({
+        engine: engine.name, bin, stderr,
+        killed: true, code: null, signal: 'SIGTERM', reason: 'timeout',
+        message: buildMessage(engine.name, 'timeout', stderr, null, 'SIGTERM', timeout),
+      }));
+    }, timeout);
+
+    child.on('error', (err: NodeJS.ErrnoException) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      reject(new EngineInvocationError({
+        engine: engine.name, bin,
+        stderr: '', killed: false, code: null, signal: null, reason: 'spawn',
+        message: buildMessage(engine.name, 'spawn', err.message ?? '', null, null, timeout),
+      }));
+    });
+
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (settled) return;
+      const stderr = tailString(Buffer.concat(stderrChunks), STDERR_TAIL_BYTES);
+      if (code === 0) {
+        succeed(Buffer.concat(stdoutChunks).toString('utf-8').trim());
+        return;
+      }
+      settled = true;
+      reject(new EngineInvocationError({
+        engine: engine.name, bin, stderr,
+        killed: false, code, signal, reason: 'exit',
+        message: buildMessage(engine.name, 'exit', stderr, code, signal, timeout),
+      }));
     });
   });
 }

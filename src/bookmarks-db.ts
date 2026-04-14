@@ -905,9 +905,19 @@ export async function getCategoryCounts(existingDb?: Database): Promise<Record<s
   const db = existingDb ?? await openDb(twitterBookmarksIndexPath());
   if (!existingDb) ensureMigrations(db);
   try {
+    // Exclude 'unclassified' — it's the default placeholder for bookmarks
+    // that haven't been run through `ft classify` yet, NOT a real category.
+    // Including it broke `ft wiki`: the wiki scanner would see a huge
+    // "unclassified" count (often N == total bookmarks), pass the
+    // MIN_CATEGORY_COUNT gate, and queue a page generation. But
+    // `sampleByCategory('unclassified', …)` looks up the `categories` column
+    // (a list) rather than `primary_category`, and unclassified rows have
+    // `categories = NULL`, so sampling always returned zero rows. We then
+    // sent the LLM a "summarize these 0 bookmarks" prompt and wasted a
+    // timeout on every compile.
     const rows = db.exec(
       `SELECT primary_category, COUNT(*) as c FROM bookmarks
-       WHERE primary_category IS NOT NULL
+       WHERE primary_category IS NOT NULL AND primary_category != 'unclassified'
        GROUP BY primary_category ORDER BY c DESC`
     );
     const counts: Record<string, number> = {};

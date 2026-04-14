@@ -280,3 +280,165 @@ test('ft model: direct set persists preference', async () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+// ── invokeEngine / invokeEngineAsync: stdin handling + error shape ─────
+//
+// Regression tests for claude/fix-claude-auth-errors-at0Oi. These ensure:
+//   (a) the child's stdin is CLOSED (EOF immediately), not inherited from
+//       the parent — so `claude -p` never hangs waiting on an open pipe;
+//   (b) when the child exits non-zero, we throw a structured
+//       EngineInvocationError with the actual stderr, not a raw
+//       "Command failed: <whole prompt inlined>" string;
+//   (c) when the timeout fires, we classify it as reason='timeout' with
+//       killed=true — not as a generic exit failure that the md.ts log
+//       path would have to string-match on.
+
+function makeFakeEngine(tmpDir: string, script: string): { name: string; config: { bin: string; args: (p: string) => string[] } } {
+  const binPath = path.join(tmpDir, 'fake-engine');
+  fs.writeFileSync(binPath, script);
+  fs.chmodSync(binPath, 0o755);
+  return { name: 'fake', config: { bin: binPath, args: (p) => [p] } };
+}
+
+test('invokeEngineAsync: child stdin is closed with EOF (does not inherit parent)', async () => {
+  if (process.platform === 'win32') return;
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-stdin-'));
+  try {
+    // Script reads stdin; if EOF comes within 1s it prints "eof"; if nothing
+    // arrives within 2s it prints "hang". We want "eof".
+    const script = `#!/bin/sh
+# Read up to 100 bytes with a 2s timeout. dd reads until EOF or 2s.
+read_result=""
+if data=$(dd bs=100 count=1 2>/dev/null); then
+  if [ -z "$data" ]; then
+    echo "eof"
+  else
+    echo "data:$data"
+  fi
+else
+  echo "read-failed"
+fi
+`;
+    const engine = makeFakeEngine(tmpDir, script);
+    const { invokeEngineAsync } = await import('../src/engine.js');
+
+    const start = Date.now();
+    const out = await invokeEngineAsync(engine, 'ignored', { timeout: 10_000 });
+    const elapsed = Date.now() - start;
+
+    assert.equal(out, 'eof', `expected 'eof', got ${JSON.stringify(out)}`);
+    assert.ok(elapsed < 1_500, `should return promptly on EOF, took ${elapsed}ms`);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('invokeEngine (sync): child stdin is closed with EOF (does not inherit parent)', async () => {
+  if (process.platform === 'win32') return;
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-stdin-sync-'));
+  try {
+    const script = `#!/bin/sh
+if data=$(dd bs=100 count=1 2>/dev/null); then
+  if [ -z "$data" ]; then echo "eof"; else echo "data:$data"; fi
+else
+  echo "read-failed"
+fi
+`;
+    const engine = makeFakeEngine(tmpDir, script);
+    const { invokeEngine } = await import('../src/engine.js');
+
+    const start = Date.now();
+    const out = invokeEngine(engine, 'ignored', { timeout: 10_000 });
+    const elapsed = Date.now() - start;
+
+    assert.equal(out, 'eof', `expected 'eof', got ${JSON.stringify(out)}`);
+    assert.ok(elapsed < 1_500, `should return promptly on EOF, took ${elapsed}ms`);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('invokeEngineAsync: non-zero exit throws EngineInvocationError with stderr content', async () => {
+  if (process.platform === 'win32') return;
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-err-'));
+  try {
+    const script = `#!/bin/sh
+echo "authentication expired, run 'claude /login'" 1>&2
+exit 7
+`;
+    const engine = makeFakeEngine(tmpDir, script);
+    const { invokeEngineAsync, EngineInvocationError } = await import('../src/engine.js');
+
+    let caught: any = null;
+    try {
+      await invokeEngineAsync(engine, 'x'.repeat(5000), { timeout: 5_000 });
+    } catch (e) {
+      caught = e;
+    }
+
+    assert.ok(caught, 'expected invocation to throw');
+    assert.ok(caught instanceof EngineInvocationError, `expected EngineInvocationError, got ${caught?.constructor?.name}`);
+    assert.equal(caught.reason, 'exit');
+    assert.equal(caught.code, 7);
+    assert.equal(caught.killed, false);
+    assert.ok(caught.stderr.includes('authentication expired'), `stderr should contain real error, got: ${JSON.stringify(caught.stderr)}`);
+    // The real regression: error.message must NOT contain the full inlined prompt.
+    assert.ok(!caught.message.includes('xxxxxxxxxxxxxxxxxxxxxxx'), `message should not inline the prompt, got: ${JSON.stringify(caught.message.slice(0, 200))}`);
+    assert.ok(caught.message.includes('authentication expired'), `message should surface stderr tail, got: ${JSON.stringify(caught.message)}`);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('invokeEngineAsync: timeout throws EngineInvocationError with reason=timeout, killed=true', async () => {
+  if (process.platform === 'win32') return;
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-timeout-'));
+  try {
+    // Sleep longer than the timeout. The parent MUST kill it (otherwise
+    // the test itself would hang waiting for sleep 30).
+    const script = `#!/bin/sh
+sleep 30
+echo "should not reach"
+`;
+    const engine = makeFakeEngine(tmpDir, script);
+    const { invokeEngineAsync, EngineInvocationError } = await import('../src/engine.js');
+
+    let caught: any = null;
+    const t0 = Date.now();
+    try {
+      await invokeEngineAsync(engine, 'x'.repeat(5000), { timeout: 500 });
+    } catch (e) {
+      caught = e;
+    }
+    const elapsed = Date.now() - t0;
+
+    assert.ok(caught instanceof EngineInvocationError, `expected EngineInvocationError, got ${caught?.constructor?.name}`);
+    assert.equal(caught.reason, 'timeout');
+    assert.equal(caught.killed, true);
+    assert.ok(elapsed < 5_000, `should die near the timeout, not wait 30s: took ${elapsed}ms`);
+    // And again: the prompt must not be in .message.
+    assert.ok(!caught.message.includes('xxxxxxxxxxxxxxxxxxxxxxx'), `timeout message should not inline prompt, got: ${JSON.stringify(caught.message.slice(0, 200))}`);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('invokeEngineAsync: spawn failure (ENOENT) throws EngineInvocationError with reason=spawn', async () => {
+  const engine = { name: 'fake', config: { bin: '/definitely/not/a/real/binary/anywhere', args: (p: string) => [p] } };
+  const { invokeEngineAsync, EngineInvocationError } = await import('../src/engine.js');
+
+  let caught: any = null;
+  try {
+    await invokeEngineAsync(engine as any, 'hi', { timeout: 5_000 });
+  } catch (e) {
+    caught = e;
+  }
+
+  assert.ok(caught instanceof EngineInvocationError);
+  assert.equal(caught.reason, 'spawn');
+  assert.equal(caught.killed, false);
+});
