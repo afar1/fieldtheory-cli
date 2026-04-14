@@ -1274,9 +1274,15 @@ export function buildCli() {
         });
         const elapsed = ((Date.now() - start) / 1000).toFixed(1);
         const failed = result.pagesFailed > 0 ? ` failed=${result.pagesFailed}` : '';
-        console.log(`Done (${elapsed}s) — engine=${result.engine} created=${result.pagesCreated} updated=${result.pagesUpdated} skipped=${result.pagesSkipped}${failed} total=${result.totalPages}`);
-        if (result.pagesFailed > 0) {
-          console.log(`\n  ${result.pagesFailed} page(s) failed — re-run ft wiki to retry them.`);
+        if (result.aborted) {
+          console.log(`Aborted (${elapsed}s) — engine=${result.engine} created=${result.pagesCreated} updated=${result.pagesUpdated}${failed}`);
+          console.log(`\n  Too many consecutive failures. Check that \`${result.engine}\` is authenticated and not rate-limited, then rerun \`ft wiki\`.`);
+          process.exitCode = 1;
+        } else {
+          console.log(`Done (${elapsed}s) — engine=${result.engine} created=${result.pagesCreated} updated=${result.pagesUpdated} skipped=${result.pagesSkipped}${failed} total=${result.totalPages}`);
+          if (result.pagesFailed > 0) {
+            console.log(`\n  ${result.pagesFailed} page(s) failed — re-run ft wiki to retry them.`);
+          }
         }
         console.log(`\n  Open in your markdown viewer:\n  ${mdDir()}`);
       } finally {

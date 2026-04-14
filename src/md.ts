@@ -68,6 +68,7 @@ export interface CompileResult {
   pagesFailed: number;
   totalPages: number;
   elapsed: number;
+  aborted: boolean;
 }
 
 function sha256(text: string): string {
@@ -286,6 +287,7 @@ async function doCompile(
   let pagesUpdated = 0;
   let pagesSkipped = 0;
   let pagesFailed  = 0;
+  let aborted      = false;
 
   const db = await openBookmarksDb();
 
@@ -387,6 +389,7 @@ async function doCompile(
         consecutiveFailures++;
         if (!firstFailureMsg) firstFailureMsg = msg;
         if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          aborted = true;
           await logLine(
             `Aborted after ${MAX_CONSECUTIVE_FAILURES} consecutive failures — first error: ${firstFailureMsg.slice(0, 200)}`,
           );
@@ -427,7 +430,7 @@ async function doCompile(
   const totalPages = pagesCreated + pagesUpdated;
   await appendLine(
     mdLogPath(),
-    logEntry('compile', `engine=${engine.name} created=${pagesCreated} updated=${pagesUpdated} skipped=${pagesSkipped} failed=${pagesFailed} elapsed=${elapsed}s`),
+    logEntry('compile', `${aborted ? 'aborted ' : ''}engine=${engine.name} created=${pagesCreated} updated=${pagesUpdated} skipped=${pagesSkipped} failed=${pagesFailed} elapsed=${elapsed}s`),
   );
 
   // ── Save state ───────────────────────────────────────────────────────────
@@ -435,5 +438,5 @@ async function doCompile(
   state.totalCompiles  = (state.totalCompiles ?? 0) + 1;
   await writeJson(mdStatePath(), state);
 
-  return { engine: engine.name, pagesCreated, pagesUpdated, pagesSkipped, pagesFailed, totalPages, elapsed };
+  return { engine: engine.name, pagesCreated, pagesUpdated, pagesSkipped, pagesFailed, totalPages, elapsed, aborted };
 }
