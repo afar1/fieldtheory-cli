@@ -228,13 +228,35 @@ export class EngineInvocationError extends Error {
 
 const DEFAULT_TIMEOUT   = 120_000;
 const DEFAULT_MAXBUF    = 1024 * 1024;
-const STDERR_TAIL_BYTES = 4096; // enough for a claude auth/rate-limit blurb
+const STDERR_TAIL_BYTES = 4096;     // clipped tail shown in errors/logs
+const STDERR_HARD_CAP   = 64 * 1024; // hard ceiling on in-memory stderr buffering
+const SIGKILL_GRACE_MS  = 2_000;     // grace period between SIGTERM and SIGKILL
 
 /** Clip the tail of a buffer to a byte budget — engines put the "what went
  *  wrong" line at the end of stderr. */
 function tailString(buf: Buffer, bytes: number): string {
   if (buf.length <= bytes) return buf.toString('utf-8');
   return '\u2026' + buf.subarray(buf.length - bytes).toString('utf-8');
+}
+
+/**
+ * Strip high-confidence secret shapes from child stderr before it lands in
+ * an error object or `log.md`. Deliberately narrow — only patterns that are
+ * ~impossible to collide with legitimate error text:
+ *
+ *   - provider-prefixed API keys (sk-…, used by Anthropic/OpenAI/Stripe)
+ *   - GitHub personal/app/oauth tokens (ghp_, gho_, ghu_, ghs_, ghr_)
+ *   - `Bearer <token>` authorization headers
+ *
+ * `claude` / `codex` don't currently echo secrets to stderr, but this is
+ * defense-in-depth: if an engine ever does, we don't want the raw token in
+ * `~/.ft-bookmarks/md/log.md` forever.
+ */
+export function redactSecrets(s: string): string {
+  return s
+    .replace(/\bsk-[A-Za-z0-9_-]{16,}/g, 'sk-***REDACTED***')
+    .replace(/\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,}/g, '$1_***REDACTED***')
+    .replace(/\bBearer\s+[A-Za-z0-9._-]{16,}/gi, 'Bearer ***REDACTED***');
 }
 
 /** Build a user-facing failure message. Deliberately does NOT inline the
@@ -288,7 +310,7 @@ export function invokeEngine(engine: ResolvedEngine, prompt: string, opts: Invok
   });
 
   const stderrBuf = result.stderr ?? Buffer.alloc(0);
-  const stderr    = tailString(stderrBuf, STDERR_TAIL_BYTES);
+  const stderr    = redactSecrets(tailString(stderrBuf, STDERR_TAIL_BYTES));
 
   if (result.error) {
     const anyErr = result.error as NodeJS.ErrnoException & { code?: string };
@@ -359,25 +381,44 @@ export function invokeEngineAsync(engine: ResolvedEngine, prompt: string, opts: 
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
     let stdoutBytes = 0;
+    let stderrBytes = 0;
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    /** Compute the redacted tail of buffered stderr for error reporting. */
+    const stderrTail = () =>
+      redactSecrets(tailString(Buffer.concat(stderrChunks), STDERR_TAIL_BYTES));
+
+    /** Send SIGTERM, then escalate to SIGKILL after a grace period in case
+     *  the child traps SIGTERM. `.unref()` so the escalation timer does not
+     *  keep the event loop alive past shutdown. */
+    const killChild = () => {
+      try { child.kill('SIGTERM'); } catch { /* already dead */ }
+      const escalate = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* already dead */ }
+      }, SIGKILL_GRACE_MS);
+      escalate.unref();
+    };
 
     const fail = (err: EngineInvocationError) => {
       if (settled) return;
       settled = true;
-      try { child.kill('SIGTERM'); } catch { /* already dead */ }
+      if (timer !== undefined) clearTimeout(timer);
+      killChild();
       reject(err);
     };
 
     const succeed = (out: string) => {
       if (settled) return;
       settled = true;
+      if (timer !== undefined) clearTimeout(timer);
       resolve(out);
     };
 
     child.stdout?.on('data', (d: Buffer) => {
       stdoutBytes += d.length;
       if (stdoutBytes > maxBuffer) {
-        const stderr = tailString(Buffer.concat(stderrChunks), STDERR_TAIL_BYTES);
+        const stderr = stderrTail();
         fail(new EngineInvocationError({
           engine: engine.name, bin, stderr,
           killed: true, code: null, signal: null, reason: 'maxbuffer',
@@ -389,13 +430,18 @@ export function invokeEngineAsync(engine: ResolvedEngine, prompt: string, opts: 
     });
 
     child.stderr?.on('data', (d: Buffer) => {
-      // Bound stderr buffering to avoid RAM blowup on a misbehaving child.
+      // Bound in-memory stderr by bytes, dropping the oldest chunks first.
+      // Keep at least one chunk so a single giant line still shows its tail.
       stderrChunks.push(d);
-      if (stderrChunks.length > 64) stderrChunks.splice(0, 32);
+      stderrBytes += d.length;
+      while (stderrBytes > STDERR_HARD_CAP && stderrChunks.length > 1) {
+        const dropped = stderrChunks.shift()!;
+        stderrBytes -= dropped.length;
+      }
     });
 
-    const timer = setTimeout(() => {
-      const stderr = tailString(Buffer.concat(stderrChunks), STDERR_TAIL_BYTES);
+    timer = setTimeout(() => {
+      const stderr = stderrTail();
       fail(new EngineInvocationError({
         engine: engine.name, bin, stderr,
         killed: true, code: null, signal: 'SIGTERM', reason: 'timeout',
@@ -404,7 +450,7 @@ export function invokeEngineAsync(engine: ResolvedEngine, prompt: string, opts: 
     }, timeout);
 
     child.on('error', (err: NodeJS.ErrnoException) => {
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
       if (settled) return;
       settled = true;
       reject(new EngineInvocationError({
@@ -415,9 +461,9 @@ export function invokeEngineAsync(engine: ResolvedEngine, prompt: string, opts: 
     });
 
     child.on('close', (code, signal) => {
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
       if (settled) return;
-      const stderr = tailString(Buffer.concat(stderrChunks), STDERR_TAIL_BYTES);
+      const stderr = stderrTail();
       if (code === 0) {
         succeed(Buffer.concat(stdoutChunks).toString('utf-8').trim());
         return;

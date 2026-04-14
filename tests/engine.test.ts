@@ -475,3 +475,131 @@ sleep 30
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+// ── Secret redaction ──────────────────────────────────────────────────
+//
+// Defense-in-depth: child stderr can in principle contain a secret, and we
+// write stderr tails to ~/.ft-bookmarks/md/log.md. Redact high-confidence
+// shapes before they're stored on EngineInvocationError or logged.
+
+test('redactSecrets: masks provider-prefixed API keys', async () => {
+  const { redactSecrets } = await import('../src/engine.js');
+
+  const input = 'Error: invalid API key sk-proj-abcdef1234567890zyxwvu after retry';
+  const output = redactSecrets(input);
+  assert.ok(output.includes('sk-***REDACTED***'), `expected redaction, got: ${output}`);
+  assert.ok(!output.includes('abcdef1234567890'), `raw secret should not appear, got: ${output}`);
+});
+
+test('redactSecrets: masks GitHub-style prefixed tokens', async () => {
+  const { redactSecrets } = await import('../src/engine.js');
+
+  for (const prefix of ['ghp', 'gho', 'ghu', 'ghs', 'ghr']) {
+    const input = `token ${prefix}_abcdefghij1234567890ZZZZ expired`;
+    const output = redactSecrets(input);
+    assert.ok(output.includes(`${prefix}_***REDACTED***`), `expected ${prefix} redaction, got: ${output}`);
+    assert.ok(!output.includes('abcdefghij1234567890'), `raw secret should not appear, got: ${output}`);
+  }
+});
+
+test('redactSecrets: masks Bearer auth tokens', async () => {
+  const { redactSecrets } = await import('../src/engine.js');
+
+  const input = 'Request failed: Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6Ik';
+  const output = redactSecrets(input);
+  assert.ok(output.includes('Bearer ***REDACTED***'), `expected Bearer redaction, got: ${output}`);
+  assert.ok(!output.includes('eyJhbGci'), `raw token should not appear, got: ${output}`);
+});
+
+test('redactSecrets: leaves normal error text untouched', async () => {
+  const { redactSecrets } = await import('../src/engine.js');
+  const normal = 'rate limit exceeded, please wait a moment and try again';
+  assert.equal(redactSecrets(normal), normal);
+});
+
+test('invokeEngineAsync: stderr is bounded under STDERR_TAIL_BYTES and redacted before storage', async () => {
+  if (process.platform === 'win32') return;
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-stderr-bound-'));
+  try {
+    // Spam ~100 KiB of stderr noise, then a "real" error line containing a
+    // fake secret. The stderr stored on the error should:
+    //   - be bounded (tailString clips to ~4 KiB + ellipsis)
+    //   - contain the tail (the error line at the end)
+    //   - have the fake secret redacted
+    const script = `#!/bin/sh
+yes 'noise noise noise noise noise noise noise noise noise noise' | head -c 102400 1>&2
+echo "Error: invalid sk-ant-abcdef1234567890zyxwvu9876 token" 1>&2
+exit 3
+`;
+    const engine = makeFakeEngine(tmpDir, script);
+    const { invokeEngineAsync, EngineInvocationError } = await import('../src/engine.js');
+
+    let caught: any = null;
+    try {
+      await invokeEngineAsync(engine, 'ignored', { timeout: 10_000 });
+    } catch (e) {
+      caught = e;
+    }
+
+    assert.ok(caught instanceof EngineInvocationError, `expected EngineInvocationError, got ${caught?.constructor?.name}`);
+    assert.equal(caught.reason, 'exit');
+    assert.equal(caught.code, 3);
+    // tailString bounds the stored stderr to ~4 KiB plus the ellipsis char.
+    assert.ok(caught.stderr.length < 5_000, `stderr should be clipped to tail, got ${caught.stderr.length} bytes`);
+    // The trailing error line should survive into the tail.
+    assert.ok(caught.stderr.includes('sk-***REDACTED***'), `expected redacted secret in tail, got: ${JSON.stringify(caught.stderr.slice(-300))}`);
+    assert.ok(!caught.stderr.includes('abcdef1234567890'), `raw secret should not appear in stored stderr`);
+    // And `.message` should not either, since it's built from the redacted stderr.
+    assert.ok(!caught.message.includes('abcdef1234567890'), `raw secret should not appear in .message`);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('invokeEngineAsync: SIGTERM-resistant child is killed via SIGKILL escalation', async () => {
+  if (process.platform === 'win32') return;
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-sigkill-'));
+  try {
+    // Child traps SIGTERM (prints a warning, otherwise ignores it) and
+    // sleeps. SIGTERM alone would leave it running; the SIGKILL escalation
+    // (after SIGKILL_GRACE_MS = 2s) should take it down. We assert that
+    // the close event lands within ~5s of the timeout, which is only
+    // possible if SIGKILL actually fires.
+    const script = `#!/bin/sh
+trap 'echo "ignoring SIGTERM" 1>&2' TERM
+# Loop so the trap has a chance to run between sleeps.
+i=0
+while [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done
+`;
+    const engine = makeFakeEngine(tmpDir, script);
+    const { invokeEngineAsync, EngineInvocationError } = await import('../src/engine.js');
+
+    let caught: any = null;
+    const t0 = Date.now();
+    try {
+      // 500ms timeout triggers fail() → SIGTERM; SIGKILL fires 2s later.
+      // Total time to reject the promise should be ~500ms (reject happens
+      // at SIGTERM, not at SIGKILL — we don't wait for the child to close).
+      await invokeEngineAsync(engine, 'ignored', { timeout: 500 });
+    } catch (e) {
+      caught = e;
+    }
+    const elapsedReject = Date.now() - t0;
+
+    assert.ok(caught instanceof EngineInvocationError);
+    assert.equal(caught.reason, 'timeout');
+    assert.ok(elapsedReject < 3_000, `promise should reject at SIGTERM, not wait for grace: took ${elapsedReject}ms`);
+
+    // Give the escalation timer room to land SIGKILL (2s) plus OS slack.
+    // The child should be dead by the time this test exits — we can't
+    // directly observe the PID state, but if SIGKILL didn't fire, Node's
+    // event loop would stay alive holding the child and the test runner
+    // would not exit cleanly. Waiting here ensures the escalation has
+    // at least had a chance to run before the test harness tears down.
+    await new Promise((r) => setTimeout(r, 2_500));
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
