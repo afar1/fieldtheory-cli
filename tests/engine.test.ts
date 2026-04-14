@@ -442,3 +442,36 @@ test('invokeEngineAsync: spawn failure (ENOENT) throws EngineInvocationError wit
   assert.equal(caught.reason, 'spawn');
   assert.equal(caught.killed, false);
 });
+
+test('invokeEngineAsync: stdout exceeding maxBuffer throws reason=maxbuffer and kills child', async () => {
+  if (process.platform === 'win32') return;
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-maxbuf-'));
+  try {
+    // Emit a 64KiB burst of stdout, then sleep 30s. With maxBuffer=1024
+    // the very first chunk should trip the cap and we should reject with
+    // reason='maxbuffer' well before the sleep would otherwise complete.
+    const script = `#!/bin/sh
+yes x | head -c 65536
+sleep 30
+`;
+    const engine = makeFakeEngine(tmpDir, script);
+    const { invokeEngineAsync, EngineInvocationError } = await import('../src/engine.js');
+
+    let caught: any = null;
+    const t0 = Date.now();
+    try {
+      await invokeEngineAsync(engine, 'ignored', { timeout: 10_000, maxBuffer: 1024 });
+    } catch (e) {
+      caught = e;
+    }
+    const elapsed = Date.now() - t0;
+
+    assert.ok(caught instanceof EngineInvocationError, `expected EngineInvocationError, got ${caught?.constructor?.name}`);
+    assert.equal(caught.reason, 'maxbuffer');
+    assert.equal(caught.killed, true);
+    assert.ok(elapsed < 5_000, `should trip on first over-cap chunk, not wait for sleep: took ${elapsed}ms`);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
