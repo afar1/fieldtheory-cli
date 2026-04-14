@@ -1237,9 +1237,10 @@ export function buildCli() {
 
   program
     .command('wiki')
-    .description('Compile Karpathy-style markdown wiki from bookmarks')
+    .description('Compile Karpathy-style markdown wiki from bookmarks (requires claude or codex CLI on PATH)')
     .option('--full', 'Recompile all pages (ignore incremental cache)')
     .option('--clean', 'Strip leftover LLM code fences from existing wiki pages (no compile)')
+    .addOption(engineOption())
     .action(safe(async (options) => {
       if (!requireIndex()) return;
 
@@ -1268,6 +1269,7 @@ export function buildCli() {
       try {
         const result = await compileMd({
           full: options.full,
+          engineOverride: options.engine ? String(options.engine) : undefined,
           onProgress: (s) => process.stderr.write(s + '\n'),
         });
         const elapsed = ((Date.now() - start) / 1000).toFixed(1);

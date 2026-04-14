@@ -71,10 +71,16 @@ export function detectAvailableEngines(): string[] {
 async function askYesNo(question: string): Promise<boolean> {
   const result = await promptText(question);
   if (result.kind === 'interrupt') {
-    throw new PromptCancelledError('Cancelled before selecting a model.', 130);
+    throw new PromptCancelledError(
+      'Cancelled — no engine selected. Pick one with `ft model <engine>`, or pass `--engine claude` / `--engine codex`.',
+      130,
+    );
   }
   if (result.kind === 'close') {
-    throw new PromptCancelledError('No model selected.', 0);
+    throw new PromptCancelledError(
+      'No engine selected. Pick one with `ft model <engine>`, or pass `--engine claude` / `--engine codex`.',
+      0,
+    );
   }
   return result.value.toLowerCase().startsWith('y');
 }

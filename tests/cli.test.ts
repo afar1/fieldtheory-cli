@@ -1,6 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compareVersions, runWithSpinner } from '../src/cli.js';
+import { compareVersions, runWithSpinner, buildCli } from '../src/cli.js';
+
+test('ft wiki: --engine option is registered', () => {
+  const program = buildCli();
+  const wikiCmd = program.commands.find((c: any) => c.name() === 'wiki');
+  assert.ok(wikiCmd, 'wiki command should be registered');
+  const opts = wikiCmd.options.map((o: any) => o.long);
+  assert.ok(opts.includes('--engine'), `expected --engine among ${opts.join(', ')}`);
+});
+
+test('ft wiki: description mentions engine prerequisite', () => {
+  const program = buildCli();
+  const wikiCmd = program.commands.find((c: any) => c.name() === 'wiki');
+  assert.ok(wikiCmd);
+  const desc = wikiCmd.description().toLowerCase();
+  assert.ok(desc.includes('claude') && desc.includes('codex'));
+});
 
 test('compareVersions: equal versions return 0', () => {
   assert.equal(compareVersions('1.2.3', '1.2.3'), 0);

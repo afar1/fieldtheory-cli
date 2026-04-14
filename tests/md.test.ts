@@ -51,7 +51,12 @@ test('sanitizeForPrompt: strips XML-like tags', () => {
 });
 
 // ── md: slug + logEntry ─────────────────────────────────────────────────
-import { slug, logEntry } from '../src/md.js';
+import { slug, logEntry, MAX_CONSECUTIVE_FAILURES } from '../src/md.js';
+
+test('MAX_CONSECUTIVE_FAILURES: is a sane positive integer', () => {
+  assert.ok(Number.isInteger(MAX_CONSECUTIVE_FAILURES));
+  assert.ok(MAX_CONSECUTIVE_FAILURES >= 3 && MAX_CONSECUTIVE_FAILURES <= 20);
+});
 
 test('slug: lowercases', () => {
   assert.equal(slug('AI'), 'ai');
