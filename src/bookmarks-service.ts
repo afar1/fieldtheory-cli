@@ -2,6 +2,7 @@ import { getTwitterBookmarksStatus, latestBookmarkSyncAt } from './bookmarks.js'
 import { buildIndex } from './bookmarks-db.js';
 import { loadTwitterOAuthToken } from './xauth.js';
 import { syncBookmarksGraphQL, type SyncProgress } from './graphql-bookmarks.js';
+import { renderStatusSections } from './status-render.js';
 
 export interface BookmarkEnableResult {
   synced: boolean;
@@ -59,13 +60,17 @@ export async function getBookmarkStatusView(): Promise<BookmarkStatusView> {
 }
 
 export function formatBookmarkStatus(view: BookmarkStatusView): string {
-  return [
-    'Bookmarks',
-    `  bookmarks: ${view.bookmarkCount}`,
-    `  last updated: ${view.lastUpdated ?? 'never'}`,
-    `  sync mode: ${view.mode}`,
-    `  cache: ${view.cachePath}`,
-  ].join('\n');
+  return renderStatusSections([
+    {
+      title: 'Bookmarks',
+      lines: [
+        { label: 'bookmarks:', value: String(view.bookmarkCount) },
+        { label: 'last updated:', value: view.lastUpdated ?? 'never' },
+        { label: 'sync mode:', value: view.mode },
+        { label: 'cache:', value: view.cachePath },
+      ],
+    },
+  ]);
 }
 
 export function formatBookmarkSummary(view: BookmarkStatusView): string {
