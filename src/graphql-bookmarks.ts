@@ -313,7 +313,14 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
 
   // X Articles / long-form note tweets store full text separately
   const noteTweetText = tweet?.note_tweet?.note_tweet_results?.result?.text;
-  const text = noteTweetText ?? legacy.full_text ?? legacy.text ?? '';
+  let text = noteTweetText ?? legacy.full_text ?? legacy.text ?? '';
+
+  // Expand t.co links in the text using display_url
+  for (const u of urlEntities) {
+    if (u.url && u.display_url) {
+      text = text.split(u.url).join(u.display_url);
+    }
+  }
 
   return {
     id: tweetId,

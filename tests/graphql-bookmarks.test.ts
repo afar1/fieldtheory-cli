@@ -568,6 +568,24 @@ test('sanitizeBookmarkedAt: clears GraphQL bookmark dates even when they look pl
   assert.equal(result.bookmarkedAt, null);
 });
 
+test('convertTweetToRecord: expands t.co links in full_text using display_url', () => {
+  const tr = {
+    rest_id: '1',
+    legacy: {
+      id_str: '1',
+      full_text: 'Check this: https://t.co/abc and this: https://t.co/def',
+      entities: {
+        urls: [
+          { url: 'https://t.co/abc', display_url: 'example.com/foo' },
+          { url: 'https://t.co/def', display_url: 'tools.exec.security' },
+        ],
+      },
+    },
+  };
+  const result = convertTweetToRecord(tr, NOW)!;
+  assert.equal(result.text, 'Check this: example.com/foo and this: tools.exec.security');
+});
+
 test('formatSyncResult: formats all fields', () => {
   const result = formatSyncResult({
     added: 50,
