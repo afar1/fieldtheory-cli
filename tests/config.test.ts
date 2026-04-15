@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { platform } from 'node:os';
 import { loadChromeSessionConfig } from '../src/config.js';
 
 test('loadChromeSessionConfig reads chrome user data dir and profile directory from env', () => {
@@ -51,5 +52,9 @@ test('loadChromeSessionConfig: --browser firefox resolves correctly', () => {
   const config = loadChromeSessionConfig({ browserId: 'firefox' });
   assert.equal(config.browser.id, 'firefox');
   assert.equal(config.browser.cookieBackend, 'firefox');
-  assert.match(config.chromeUserDataDir, /Firefox/);
+  if (platform() === 'darwin') {
+    assert.match(config.chromeUserDataDir, /Firefox/);
+  } else {
+    assert.match(config.chromeUserDataDir, /firefox/i);
+  }
 });

@@ -966,25 +966,28 @@ export function buildCli() {
     .command('classify')
     .description('Classify bookmarks by category and domain using LLM (requires claude or codex CLI)')
     .option('--regex', 'Use simple regex classification instead of LLM')
+    .option('--limit <n>', 'Only classify up to N bookmarks (useful for testing)', (v: string) => Number(v))
     .addOption(engineOption())
     .action(safe(async (options) => {
       if (!requireData()) return;
       if (options.regex) {
         process.stderr.write('Classifying bookmarks (regex)...\n');
         const result = await classifyAndRebuild();
-        console.log(`Indexed ${result.recordCount} bookmarks \u2192 ${result.dbPath}`);
+        console.log(`Indexed ${result.recordCount} bookmarks → ${result.dbPath}`);
         console.log(formatClassificationSummary(result.summary));
       } else {
         const engine = await resolveEngine({ override: options.engine ? String(options.engine) : undefined });
+        const limit = Number.isFinite(options.limit) && options.limit > 0 ? options.limit : undefined;
 
         let catStart = Date.now();
         process.stderr.write('Classifying categories with LLM (batches of 50, ~2 min per batch)...\n');
         const catResult = await classifyWithLlm({
           engine,
+          limit,
           onBatch: (done: number, total: number) => {
             const pct = total > 0 ? Math.round((done / total) * 100) : 0;
             const elapsed = Math.round((Date.now() - catStart) / 1000);
-            process.stderr.write(`  Categories: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
+            process.stderr.write(`  Categories: ${done}/${total} (${pct}%) │ ${elapsed}s elapsed\n`);
           },
         });
         console.log(`\nEngine: ${catResult.engine}`);
@@ -995,10 +998,11 @@ export function buildCli() {
         const domResult = await classifyDomainsWithLlm({
           engine,
           all: false,
+          limit,
           onBatch: (done: number, total: number) => {
             const pct = total > 0 ? Math.round((done / total) * 100) : 0;
             const elapsed = Math.round((Date.now() - domStart) / 1000);
-            process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
+            process.stderr.write(`  Domains: ${done}/${total} (${pct}%) │ ${elapsed}s elapsed\n`);
           },
         });
         console.log(`\nDomains: ${domResult.classified}/${domResult.totalUnclassified} classified`);
@@ -1011,19 +1015,22 @@ export function buildCli() {
     .command('classify-domains')
     .description('Classify bookmarks by subject domain using LLM (ai, finance, etc.)')
     .option('--all', 'Re-classify all bookmarks, not just missing')
+    .option('--limit <n>', 'Only classify up to N bookmarks (useful for testing)', (v: string) => Number(v))
     .addOption(engineOption())
     .action(safe(async (options) => {
       if (!requireData()) return;
       const engine = await resolveEngine({ override: options.engine ? String(options.engine) : undefined });
+      const limit = Number.isFinite(options.limit) && options.limit > 0 ? options.limit : undefined;
       const start = Date.now();
       process.stderr.write('Classifying bookmark domains with LLM (batches of 50, ~2 min per batch)...\n');
       const result = await classifyDomainsWithLlm({
         engine,
         all: options.all ?? false,
+        limit,
         onBatch: (done: number, total: number) => {
           const pct = total > 0 ? Math.round((done / total) * 100) : 0;
           const elapsed = Math.round((Date.now() - start) / 1000);
-          process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
+          process.stderr.write(`  Domains: ${done}/${total} (${pct}%) │ ${elapsed}s elapsed\n`);
         },
       });
       console.log(`\nDomains: ${result.classified}/${result.totalUnclassified} classified`);

@@ -110,9 +110,10 @@ export interface LlmClassifyResult {
 }
 
 export async function classifyWithLlm(
-  options: { engine: ResolvedEngine; onBatch?: (done: number, total: number) => void },
+  options: { engine: ResolvedEngine; limit?: number; onBatch?: (done: number, total: number) => void },
 ): Promise<LlmClassifyResult> {
   const { engine } = options;
+  const limitClause = options.limit && options.limit > 0 ? ` LIMIT ${Math.floor(options.limit)}` : '';
 
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
@@ -122,7 +123,7 @@ export async function classifyWithLlm(
     const rows = db.exec(
       `SELECT id, text, author_handle, links_json FROM bookmarks
        WHERE primary_category = 'unclassified' OR primary_category IS NULL
-       ORDER BY RANDOM()`
+       ORDER BY RANDOM()${limitClause}`
     );
 
     if (!rows.length || !rows[0].values.length) {
@@ -223,9 +224,10 @@ ${items}`;
 }
 
 export async function classifyDomainsWithLlm(
-  options: { engine: ResolvedEngine; all?: boolean; onBatch?: (done: number, total: number) => void },
+  options: { engine: ResolvedEngine; all?: boolean; limit?: number; onBatch?: (done: number, total: number) => void },
 ): Promise<LlmClassifyResult> {
   const { engine } = options;
+  const limitClause = options.limit && options.limit > 0 ? ` LIMIT ${Math.floor(options.limit)}` : '';
 
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
@@ -240,7 +242,7 @@ export async function classifyDomainsWithLlm(
       : 'primary_domain IS NULL';
     const rows = db.exec(
       `SELECT id, text, author_handle, categories FROM bookmarks
-       WHERE ${where} ORDER BY RANDOM()`
+       WHERE ${where} ORDER BY RANDOM()${limitClause}`
     );
 
     if (!rows.length || !rows[0].values.length) {
