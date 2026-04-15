@@ -199,3 +199,117 @@ test('slug: produces valid filenames for export', () => {
   assert.equal(slug('@karpathy'), 'karpathy');
   assert.equal(slug(''), '');
 });
+
+// ── Phase 1 scaffolding for authored entries ─────────────────────────────
+// Debate 2 consensus: scaffolding for `entries/` must land before writer/
+// reconcile phases. These tests verify path shape, exported helpers, and
+// that lint/ask now scan entries + concepts (the latter fixes an existing
+// half-integration bug flagged by both debates).
+import path from 'node:path';
+import { mdEntriesDir, mdConceptsDir, mdDir } from '../src/paths.js';
+import { extractWikilinks } from '../src/md-lint.js';
+
+test('mdEntriesDir: sits alongside other wiki dirs under md/', () => {
+  const entries = mdEntriesDir();
+  assert.equal(path.basename(entries), 'entries');
+  assert.equal(path.dirname(entries), mdDir());
+});
+
+test('mdEntriesDir: is a sibling of mdConceptsDir', () => {
+  assert.equal(path.dirname(mdEntriesDir()), path.dirname(mdConceptsDir()));
+});
+
+test('extractWikilinks: is exported from md-lint (needed by reconcileEntries)', () => {
+  assert.equal(typeof extractWikilinks, 'function');
+});
+
+test('extractWikilinks: parses single wikilink', () => {
+  assert.deepEqual(extractWikilinks('see [[categories/tool]] for details'), ['categories/tool']);
+});
+
+test('extractWikilinks: parses multiple wikilinks in body text', () => {
+  const body = 'Targets [[domains/ai]] and [[entities/karpathy]] and also [[categories/technique]].';
+  assert.deepEqual(extractWikilinks(body), ['domains/ai', 'entities/karpathy', 'categories/technique']);
+});
+
+test('extractWikilinks: returns empty array when no wikilinks present', () => {
+  assert.deepEqual(extractWikilinks('plain markdown with no links'), []);
+});
+
+test('extractWikilinks: handles adjacent and inline wikilinks', () => {
+  assert.deepEqual(extractWikilinks('[[a]][[b]] and [[c/d]]!'), ['a', 'b', 'c/d']);
+});
+
+// MdState.entryHashes is an optional field — this is a type-level assertion
+// that compiles only if the field exists on the interface. Runtime check is
+// incidental; the real test is `npm run build`.
+import type { MdState } from '../src/md.js';
+test('MdState: has optional entryHashes field', () => {
+  const s: MdState = {
+    lastCompileAt: '',
+    totalCompiles: 0,
+    groupCounts: {},
+    pageHashes: {},
+    entryHashes: { 'entries/2026-04-15-test': 'abc123' },
+  };
+  assert.ok(s.entryHashes);
+  assert.equal(s.entryHashes['entries/2026-04-15-test'], 'abc123');
+});
+
+// Integration tests: real fs scan behavior for the Phase 1 scaffolding.
+// These catch a class of regression that pure unit tests miss — someone
+// removing a scanDir call from Promise.all would still compile cleanly.
+import os from 'node:os';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { collectAllPagePathsForTest } from '../src/md-lint.js';
+import { selectRelevantPagesForTest } from '../src/md-ask.js';
+
+test('collectAllPagePaths: scans entries and concepts dirs (Phase 1 fix)', async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'ft-phase1-lint-'));
+  process.env.FT_DATA_DIR = tmpDir;
+  try {
+    const mdBase = path.join(tmpDir, 'md');
+    await mkdir(path.join(mdBase, 'entries'), { recursive: true });
+    await mkdir(path.join(mdBase, 'concepts'), { recursive: true });
+    await mkdir(path.join(mdBase, 'categories'), { recursive: true });
+    await mkdir(path.join(mdBase, 'domains'), { recursive: true });
+    await mkdir(path.join(mdBase, 'entities'), { recursive: true });
+    await writeFile(path.join(mdBase, 'entries', 'sample-entry.md'), '# sample\n');
+    await writeFile(path.join(mdBase, 'concepts', 'sample-concept.md'), '# sample\n');
+    await writeFile(path.join(mdBase, 'categories', 'tool.md'), '# tool\n');
+
+    const pages = await collectAllPagePathsForTest();
+
+    assert.ok(pages.has('entries/sample-entry'), 'entries/ should be scanned');
+    assert.ok(pages.has('concepts/sample-concept'), 'concepts/ should be scanned (fixes existing half-integration)');
+    assert.ok(pages.has('categories/tool'), 'existing category scan still works');
+  } finally {
+    delete process.env.FT_DATA_DIR;
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('selectRelevantPages: scans entries and concepts dirs (Phase 1 fix)', async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'ft-phase1-ask-'));
+  process.env.FT_DATA_DIR = tmpDir;
+  try {
+    const mdBase = path.join(tmpDir, 'md');
+    await mkdir(path.join(mdBase, 'entries'), { recursive: true });
+    await mkdir(path.join(mdBase, 'concepts'), { recursive: true });
+    await mkdir(path.join(mdBase, 'categories'), { recursive: true });
+    await mkdir(path.join(mdBase, 'domains'), { recursive: true });
+    await mkdir(path.join(mdBase, 'entities'), { recursive: true });
+    // Filenames contain the question keyword so scorePageName gives a positive score.
+    await writeFile(path.join(mdBase, 'entries', 'wiki-entries-design.md'), '# wiki entries\n');
+    await writeFile(path.join(mdBase, 'concepts', 'wiki-lookup.md'), '# wiki lookup\n');
+
+    const selected = await selectRelevantPagesForTest('wiki entries');
+    const selectedBasenames = selected.map((p) => path.basename(p));
+
+    assert.ok(selectedBasenames.includes('wiki-entries-design.md'), 'entries/ should be scored and selected');
+    assert.ok(selectedBasenames.includes('wiki-lookup.md'), 'concepts/ should be scored and selected');
+  } finally {
+    delete process.env.FT_DATA_DIR;
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});

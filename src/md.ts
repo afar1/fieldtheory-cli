@@ -17,7 +17,7 @@ import path from 'node:path';
 import { ensureDir, pathExists, readJson, writeMd, appendLine, writeJson, listFiles, readMd } from './fs.js';
 import {
   mdDir, mdIndexPath, mdLogPath, mdStatePath, mdSchemaPath,
-  mdCategoriesDir, mdDomainsDir, mdEntitiesDir, mdConceptsDir,
+  mdCategoriesDir, mdDomainsDir, mdEntitiesDir, mdConceptsDir, mdEntriesDir,
 } from './paths.js';
 import {
   getCategoryCounts, getDomainCounts, sampleByCategory, sampleByDomain,
@@ -51,6 +51,7 @@ export interface MdState {
   totalCompiles: number;
   groupCounts: Record<string, string>;
   pageHashes: Record<string, string>;
+  entryHashes?: Record<string, string>;
 }
 
 export interface CompileOptions {
@@ -109,7 +110,7 @@ function mapToMdBookmarks(samples: CategorySample[]): MdBookmark[] {
   }));
 }
 
-async function writePage(
+export async function writePage(
   filePath: string,
   content: string,
   state: MdState,
@@ -319,6 +320,7 @@ async function doCompile(
   await ensureDir(mdDomainsDir());
   await ensureDir(mdEntitiesDir());
   await ensureDir(mdConceptsDir());
+  await ensureDir(mdEntriesDir());
 
   await generateSchemaIfMissing();
 
@@ -397,6 +399,11 @@ async function doCompile(
     }
 
     // ── Generate each page ───────────────────────────────────────────────
+    // Track which target pages were just regenerated. Reconcile reads this
+    // to re-apply authored-entry influence after a bookmark-driven rewrite
+    // clobbered the previous reconcile state. Keys match the wikilink form
+    // (e.g. "categories/tool") — no `.md` extension.
+    const dirtyPages = new Set<string>();
     let consecutiveFailures = 0;
     let firstFailureMsg = '';
     for (let i = 0; i < toGenerate.length; i++) {
@@ -460,11 +467,35 @@ async function doCompile(
       else if (outcome === 'updated') pagesUpdated++;
       else pagesSkipped++;
 
+      if (outcome !== 'unchanged') {
+        // Use the slugged wiki-relative form (no `.md`) so reconcile's
+        // wikilink-based match works. `item.key` uses the raw name from
+        // the SQL groupCounts, which wouldn't match `[[domains/ai]]` for
+        // a domain named e.g. "AI News".
+        dirtyPages.add(relPath.replace(/\.md$/, ''));
+      }
+
       // Save state after each page so Ctrl-C resumes where we left off
       await writeJson(mdStatePath(), state);
 
       await logLine(`${tag} ${item.key} → ${outcome}`);
       consecutiveFailures = 0;
+    }
+
+    // ── Reconcile authored entries ───────────────────────────────────────
+    // Runs AFTER bookmark-driven compile so entries can influence compiled
+    // pages without fighting the incremental hash-skip logic. Skipped when
+    // compile aborted — if auth is broken, reconcile would just pile on
+    // failures with the same error.
+    if (!aborted) {
+      try {
+        const { reconcileEntries } = await import('./md-entries.js');
+        await reconcileEntries({ state, engine, progress, dirtyPages });
+      } catch (err) {
+        // Never let a reconcile surprise take down the whole compile —
+        // log and move on to index regeneration.
+        await logLine(`reconcile error: ${(err as Error).message ?? String(err)}`);
+      }
     }
   } finally {
     db.close();

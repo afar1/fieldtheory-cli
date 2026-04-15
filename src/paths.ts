@@ -93,3 +93,7 @@ export function mdEntitiesDir(): string {
 export function mdConceptsDir(): string {
   return path.join(mdDir(), 'concepts');
 }
+
+export function mdEntriesDir(): string {
+  return path.join(mdDir(), 'entries');
+}

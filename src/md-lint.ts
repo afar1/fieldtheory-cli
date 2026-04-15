@@ -10,7 +10,7 @@ import path from 'node:path';
 import { pathExists, listFiles, readJson, readMd } from './fs.js';
 import {
   mdDir, mdIndexPath, mdCategoriesDir, mdDomainsDir, mdEntitiesDir,
-  mdStatePath,
+  mdConceptsDir, mdEntriesDir, mdStatePath,
 } from './paths.js';
 import { getCategoryCounts, getDomainCounts, openBookmarksDb } from './bookmarks-db.js';
 import { slug, type MdState } from './md.js';
@@ -32,7 +32,7 @@ export interface LintResult {
   stats: { totalPages: number; totalLinks: number; healthScore: number };
 }
 
-function extractWikilinks(content: string): string[] {
+export function extractWikilinks(content: string): string[] {
   const matches = content.matchAll(/\[\[([^\]]+)\]\]/g);
   return [...matches].map((m) => m[1]);
 }
@@ -52,6 +52,8 @@ async function collectAllPagePaths(): Promise<Map<string, string>> {
     scanDir(mdCategoriesDir(), 'categories'),
     scanDir(mdDomainsDir(), 'domains'),
     scanDir(mdEntitiesDir(), 'entities'),
+    scanDir(mdConceptsDir(), 'concepts'),
+    scanDir(mdEntriesDir(), 'entries'),
   ]);
 
   return pages;
@@ -184,6 +186,9 @@ export async function lintMd(): Promise<LintResult> {
 
   return { issues, stats: { totalPages, totalLinks, healthScore } };
 }
+
+// ── Test exports ──────────────────────────────────────────────────────────
+export const collectAllPagePathsForTest = collectAllPagePaths;
 
 export async function fixLintIssues(issues: LintIssue[]): Promise<number> {
   const fixable = issues.filter((i) => i.fixable && i.groupKey);

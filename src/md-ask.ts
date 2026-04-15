@@ -11,15 +11,16 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathExists, writeMd, appendLine, listFiles, readMd } from './fs.js';
+import { pathExists, appendLine, listFiles, readMd } from './fs.js';
 import {
   mdIndexPath, mdLogPath, mdConceptsDir, mdCategoriesDir,
-  mdDomainsDir, mdEntitiesDir, mdDir,
+  mdDomainsDir, mdEntitiesDir, mdEntriesDir, mdDir,
 } from './paths.js';
 import { searchBookmarks } from './bookmarks-db.js';
 import { resolveEngine, invokeEngineAsync } from './engine.js';
 import { buildAskPrompt, type MdBookmark } from './md-prompts.js';
 import { slug, logEntry } from './md.js';
+import { writeEntry } from './md-entries.js';
 
 const MAX_WIKI_PAGES    = 5;
 const MAX_RAW_BOOKMARKS = 20;
@@ -63,6 +64,8 @@ async function selectRelevantPages(question: string): Promise<string[]> {
     scanDir(mdCategoriesDir(), 'categories'),
     scanDir(mdDomainsDir(), 'domains'),
     scanDir(mdEntitiesDir(), 'entities'),
+    scanDir(mdConceptsDir(), 'concepts'),
+    scanDir(mdEntriesDir(), 'entries'),
   ]);
 
   try {
@@ -151,27 +154,19 @@ export async function askMd(question: string, options: AskOptions = {}): Promise
   const answer      = stripWikiUpdatesSection(rawAnswer);
 
   // ── Optional save ────────────────────────────────────────────────────────
+  // Saved answers are authored entries, pre-filled with the LLM's response.
+  // `writeEntry` handles filename, frontmatter, and the log append.
   let savedAs: string | undefined;
   if (options.save) {
-    const conceptSlug = slug(question);
-    const now         = new Date().toISOString().slice(0, 10);
-    const filePath    = path.join(mdConceptsDir(), `${now}-${conceptSlug}.md`);
-    const conceptContent = [
-      `---`,
-      `tags: [ft/concept]`,
-      `question: "${question.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, ' ')}"`,
-      `source_type: bookmarks`,
-      `last_updated: ${now}`,
-      `---`,
-      ``,
-      `# ${question}`,
-      ``,
-      answer,
-    ].join('\n');
-
-    await writeMd(filePath, conceptContent);
-    savedAs = filePath;
-    progress(`  Saved concept page: ${filePath}`);
+    const result = await writeEntry({
+      title: question,
+      body: answer,
+      entryTag: 'ft/concept',
+      sourceType: 'ask',
+      question,
+    });
+    savedAs = result.filePath;
+    progress(`  Saved entry: ${result.filePath}`);
   }
 
   // ── Log entry ─────────────────────────────────────────────────────────
@@ -194,3 +189,4 @@ export async function askMd(question: string, options: AskOptions = {}): Promise
 export const extractWikiUpdatesForTest = extractWikiUpdates;
 export const stripWikiUpdatesSectionForTest = stripWikiUpdatesSection;
 export const scorePageNameForTest = scorePageName;
+export const selectRelevantPagesForTest = selectRelevantPages;
