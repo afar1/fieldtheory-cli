@@ -83,6 +83,19 @@ export interface BookmarkRecord {
   /** Parallel arrays of folder IDs and display names this bookmark is in on X. */
   folderIds?: string[];
   folderNames?: string[];
+  /**
+   * Set once `ft sync --gaps` has attempted to expand long-form text for this
+   * record. Present regardless of whether expansion actually lengthened the
+   * stored text — its purpose is to keep the gap-fill selector idempotent so
+   * subsequent runs don't re-fetch the same records forever.
+   */
+  textExpandedAt?: string;
+  /**
+   * Set when gap-fill tried to backfill the quoted tweet for this record and
+   * failed permanently (deleted, forbidden, empty body). Prevents retrying the
+   * same dead tweet on every run.
+   */
+  quotedTweetFailedAt?: string;
 }
 
 export interface BookmarkFolder {

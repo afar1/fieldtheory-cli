@@ -1,9 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   convertTweetToRecord,
   parseBookmarksResponse,
   parseFolderTimelineResponse,
+  parseTweetResultByRestId,
   sanitizeBookmarkedAt,
   scoreRecord,
   mergeBookmarkRecord,
@@ -11,9 +17,16 @@ import {
   applyFolderMirror,
   clearFolderEverywhere,
   formatSyncResult,
+  syncGaps,
 } from '../src/graphql-bookmarks.js';
+import { buildIndex, getBookmarkById } from '../src/bookmarks-db.js';
 import { resolveFolder, formatFolderMirrorStats } from '../src/cli.js';
 import type { BookmarkFolder, BookmarkRecord } from '../src/types.js';
+
+const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
+function loadFixture(name: string): any {
+  return JSON.parse(readFileSync(path.join(FIXTURES_DIR, name), 'utf8'));
+}
 
 const NOW = '2026-03-28T00:00:00.000Z';
 
@@ -300,6 +313,312 @@ test('convertTweetToRecord: handles missing quoted tweet gracefully', () => {
   assert.ok(result);
   assert.equal(result.quotedStatusId, '7777777');
   assert.equal(result.quotedTweet, undefined);
+});
+
+test('convertTweetToRecord: quoted tweet prefers note_tweet body over legacy full_text', () => {
+  const tr = makeTweetResult({
+    legacy: { quoted_status_id_str: '8888888' },
+    tweet: {
+      quoted_status_result: {
+        result: {
+          rest_id: '8888888',
+          note_tweet: {
+            note_tweet_results: {
+              result: {
+                text: 'Full long-form quoted body that would be truncated in legacy.full_text',
+              },
+            },
+          },
+          legacy: {
+            id_str: '8888888',
+            full_text: 'Full long-form quoted body that would be truncated in',
+            created_at: 'Mon Apr 13 10:00:00 +0000 2026',
+            entities: { urls: [] },
+          },
+          core: {
+            user_results: {
+              result: {
+                rest_id: '9999',
+                core: { screen_name: 'longform', name: 'Long Form' },
+                legacy: {},
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  const result = convertTweetToRecord(tr, NOW);
+  assert.ok(result);
+  assert.equal(
+    result.quotedTweet!.text,
+    'Full long-form quoted body that would be truncated in legacy.full_text',
+  );
+});
+
+test('parseBookmarksResponse: captures full note_tweet body from live bookmarks-feed fixture', () => {
+  const fixture = loadFixture('bookmark-feed-note-tweet.json');
+  const { records } = parseBookmarksResponse(fixture, NOW);
+  assert.equal(records.length, 1);
+  const record = records[0];
+  assert.equal(record.tweetId, '2039805659525644595');
+  assert.equal(record.authorHandle, 'karpathy');
+  // The whole point of the feature-flag fix: a long note_tweet must land in
+  // `text` as the full body, not the 275-char preview from legacy.full_text.
+  assert.equal(record.text.length, 3447);
+  assert.ok(record.text.startsWith('LLM Knowledge Bases'));
+  assert.ok(record.text.endsWith('hacky collection of scripts.'));
+});
+
+test('parseTweetResultByRestId: extracts note_tweet body from live TweetResultByRestId fixture', () => {
+  const fixture = loadFixture('tweet-result-by-rest-id-note-tweet.json');
+  const snapshot = parseTweetResultByRestId(fixture, '2039805659525644595');
+  assert.ok(snapshot);
+  assert.equal(snapshot.id, '2039805659525644595');
+  assert.equal(snapshot.authorHandle, 'karpathy');
+  assert.equal(snapshot.text.length, 3447);
+  assert.ok(snapshot.text.startsWith('LLM Knowledge Bases'));
+});
+
+test('parseTweetResultByRestId: returns null on tombstone / unavailable tweets', () => {
+  assert.equal(
+    parseTweetResultByRestId({ data: { tweetResult: { result: { __typename: 'TweetTombstone' } } } }, '123'),
+    null,
+  );
+});
+
+async function withIsolatedGapFillDataDir(
+  fn: () => Promise<void>,
+  fixtures: BookmarkRecord[],
+): Promise<void> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ft-gaps-test-'));
+  const jsonl = fixtures.map((r) => JSON.stringify(r)).join('\n') + '\n';
+  await writeFile(path.join(dir, 'bookmarks.jsonl'), jsonl);
+  const savedDataDir = process.env.FT_DATA_DIR;
+  const savedChromeDir = process.env.FT_CHROME_USER_DATA_DIR;
+  process.env.FT_DATA_DIR = dir;
+  // Point Chrome extraction at an empty path so resolveGapFillCookies fails
+  // fast and the fetcher falls back cleanly when we aren't injecting one.
+  process.env.FT_CHROME_USER_DATA_DIR = path.join(dir, '__no_chrome__');
+  try {
+    await fn();
+  } finally {
+    if (savedDataDir !== undefined) process.env.FT_DATA_DIR = savedDataDir;
+    else delete process.env.FT_DATA_DIR;
+    if (savedChromeDir !== undefined) process.env.FT_CHROME_USER_DATA_DIR = savedChromeDir;
+    else delete process.env.FT_CHROME_USER_DATA_DIR;
+  }
+}
+
+test('syncGaps: expands truncated note_tweet and stamps textExpandedAt', async () => {
+  const fixture = loadFixture('tweet-result-by-rest-id-note-tweet.json');
+  const legacyPreview: string = fixture.data.tweetResult.result.legacy.full_text;
+  const fullBody: string = fixture.data.tweetResult.result.note_tweet.note_tweet_results.result.text;
+
+  const truncated: BookmarkRecord = {
+    id: '2039805659525644595',
+    tweetId: '2039805659525644595',
+    url: 'https://x.com/karpathy/status/2039805659525644595',
+    text: legacyPreview,
+    authorHandle: 'karpathy',
+    syncedAt: NOW,
+    postedAt: '2026-04-02T20:42:21.000Z',
+    language: 'en',
+    tags: [],
+    ingestedVia: 'graphql',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    let fetchCalls = 0;
+    const result = await syncGaps({
+      tweetFetcher: async (tweetId) => {
+        fetchCalls += 1;
+        assert.equal(tweetId, '2039805659525644595');
+        return { snapshot: parseTweetResultByRestId(fixture, tweetId), status: 'ok', source: 'graphql' };
+      },
+    });
+
+    assert.equal(fetchCalls, 1);
+    assert.equal(result.textExpanded, 1);
+    assert.equal(result.failed, 0);
+
+    const refreshed = await getBookmarkById('2039805659525644595');
+    assert.ok(refreshed);
+    assert.equal(refreshed.text.length, fullBody.length);
+    assert.ok(refreshed.text.startsWith('LLM Knowledge Bases'));
+
+    // Marker should land in the JSONL so the next run skips this record.
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+    assert.ok(stored.textExpandedAt, 'textExpandedAt should be set after expansion');
+    assert.equal(stored.text.length, fullBody.length);
+  }, [truncated]);
+});
+
+test('syncGaps: skips records that already have textExpandedAt set', async () => {
+  const alreadyChecked: BookmarkRecord = {
+    id: '111',
+    tweetId: '111',
+    url: 'https://x.com/user/status/111',
+    text: 'x'.repeat(280),
+    syncedAt: NOW,
+    tags: [],
+    ingestedVia: 'graphql',
+    textExpandedAt: '2026-04-14T00:00:00.000Z',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    let fetchCalls = 0;
+    const result = await syncGaps({
+      tweetFetcher: async () => {
+        fetchCalls += 1;
+        return { snapshot: null, status: 'ok' };
+      },
+    });
+    assert.equal(fetchCalls, 0, 'fetcher should not run when all records are already marked');
+    assert.equal(result.textExpanded, 0);
+    assert.equal(result.failed, 0);
+    assert.equal(result.total, 0, 'empty gap-fill should report total=0 so CLI prints "No gaps found"');
+  }, [alreadyChecked]);
+});
+
+test('syncGaps: syndication "ok" with truncated preview does NOT stamp textExpandedAt', async () => {
+  // Regression for the bug where a user with expired cookies (graphql falls
+  // through to syndication) would have every long note_tweet permanently
+  // marked as checked even though syndication can't see note_tweet bodies.
+  const truncated: BookmarkRecord = {
+    id: '444',
+    tweetId: '444',
+    url: 'https://x.com/user/status/444',
+    text: 'z'.repeat(280),
+    syncedAt: NOW,
+    tags: [],
+    ingestedVia: 'graphql',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    const result = await syncGaps({
+      tweetFetcher: async () => ({
+        snapshot: {
+          id: '444',
+          text: 'z'.repeat(280),
+          url: 'https://x.com/user/status/444',
+        },
+        status: 'ok',
+        source: 'syndication',
+      }),
+    });
+    assert.equal(result.textExpanded, 0);
+
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+    assert.equal(
+      stored.textExpandedAt,
+      undefined,
+      'syndication cannot settle Gap 2 — record must remain unmarked so graphql can try next run',
+    );
+  }, [truncated]);
+});
+
+test('syncGaps: syndication snapshot with genuinely longer text still expands and stamps', async () => {
+  // Defensive corner: if syndication somehow returns a longer text than what
+  // we had cached (non-note_tweet edge case), that IS real new information —
+  // apply it and mark checked.
+  const stale: BookmarkRecord = {
+    id: '555',
+    tweetId: '555',
+    url: 'https://x.com/user/status/555',
+    text: 'short cached preview that is exactly 275 characters long '.repeat(5).slice(0, 275),
+    syncedAt: NOW,
+    tags: [],
+    ingestedVia: 'graphql',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    const longer = 'x'.repeat(400);
+    const result = await syncGaps({
+      tweetFetcher: async () => ({
+        snapshot: { id: '555', text: longer, url: 'https://x.com/user/status/555' },
+        status: 'ok',
+        source: 'syndication',
+      }),
+    });
+    assert.equal(result.textExpanded, 1);
+
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+    assert.equal(stored.text.length, 400);
+    assert.ok(stored.textExpandedAt);
+  }, [stale]);
+});
+
+test('syncGaps: transient failure does NOT stamp textExpandedAt so next run retries', async () => {
+  const truncated: BookmarkRecord = {
+    id: '333',
+    tweetId: '333',
+    url: 'https://x.com/user/status/333',
+    text: 'y'.repeat(300),
+    syncedAt: NOW,
+    tags: [],
+    ingestedVia: 'graphql',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    const result = await syncGaps({
+      tweetFetcher: async () => ({ snapshot: null, status: 'rate_limited' }),
+    });
+    assert.equal(result.failed, 1);
+
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+    assert.equal(
+      stored.textExpandedAt,
+      undefined,
+      'transient failures must not mark the record so the next run can retry',
+    );
+  }, [truncated]);
+});
+
+test('syncGaps: permanent quoted-tweet failure stamps quotedTweetFailedAt so reruns skip it', async () => {
+  const deadQuoted: BookmarkRecord = {
+    id: '222',
+    tweetId: '222',
+    url: 'https://x.com/user/status/222',
+    text: 'Check out this tweet',
+    syncedAt: NOW,
+    tags: [],
+    ingestedVia: 'graphql',
+    quotedStatusId: '999999999',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    let fetchCalls = 0;
+    const firstRun = await syncGaps({
+      tweetFetcher: async () => {
+        fetchCalls += 1;
+        return { snapshot: null, status: 'not_found' };
+      },
+    });
+    assert.equal(fetchCalls, 1);
+    assert.equal(firstRun.failed, 1);
+
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+    assert.ok(stored.quotedTweetFailedAt, 'quotedTweetFailedAt should be set after permanent failure');
+
+    // Second run should not touch the fetcher for this record.
+    const secondCalls = { n: 0 };
+    const secondRun = await syncGaps({
+      tweetFetcher: async () => {
+        secondCalls.n += 1;
+        return { snapshot: null, status: 'not_found' };
+      },
+    });
+    assert.equal(secondCalls.n, 0, 'second run must not retry permanent failures');
+    assert.equal(secondRun.total, 0);
+  }, [deadQuoted]);
 });
 
 test('parseBookmarksResponse: preserves sortIndex for bookmark ordering without fabricating bookmarkedAt', () => {

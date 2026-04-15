@@ -17,6 +17,14 @@ const X_PUBLIC_BEARER =
 const BOOKMARKS_QUERY_ID = 'Z9GWmP0kP2dajyckAaDUBw';
 const BOOKMARKS_OPERATION = 'Bookmarks';
 
+// TweetResultByRestId — used by `--gaps` to re-fetch truncated note_tweets by
+// id. The queryId is hardcoded to match the bookmarks-feed convention; refresh
+// by searching for `operationName:"TweetResultByRestId"` inside the current
+// `abs.twimg.com/responsive-web/client-web/main.<hash>.js` bundle. Verified
+// working against Karpathy's 2039805659525644595 note_tweet on 2026-04-15.
+const TWEET_RESULT_BY_REST_ID_QUERY_ID = 'fHLDP3qFEjnTqhWBVvsREg';
+const TWEET_RESULT_BY_REST_ID_OPERATION = 'TweetResultByRestId';
+
 // ──────────────────────────────────────────────────────────────────────────
 // Folder endpoints — READ ONLY. We never POST/PUT/DELETE to X.
 // The folder feature makes exactly these two GraphQL GET calls, nothing else.
@@ -44,6 +52,7 @@ const GRAPHQL_FEATURES = {
   vibe_api_enabled: true,
   responsive_web_text_conversations_enabled: false,
   freedom_of_speech_not_reach_fetch_enabled: true,
+  longform_notetweets_consumption_enabled: true,
   longform_notetweets_rich_text_read_enabled: true,
   longform_notetweets_inline_media_enabled: true,
   responsive_web_enhance_cards_enabled: false,
@@ -290,9 +299,10 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
       const qtUser = qtTweet?.core?.user_results?.result;
       const qtHandle = qtUser?.core?.screen_name ?? qtUser?.legacy?.screen_name;
       const qtMediaEntities = qtLegacy?.extended_entities?.media ?? qtLegacy?.entities?.media ?? [];
+      const qtNoteText = qtTweet?.note_tweet?.note_tweet_results?.result?.text;
       quotedTweet = {
         id: qtId,
-        text: qtLegacy.full_text ?? qtLegacy.text ?? '',
+        text: qtNoteText ?? qtLegacy.full_text ?? qtLegacy.text ?? '',
         authorHandle: qtHandle,
         authorName: qtUser?.core?.name ?? qtUser?.legacy?.name,
         authorProfileImageUrl:
@@ -1254,13 +1264,173 @@ export async function syncBookmarkFolders(
 
 const SYNDICATION_URL = 'https://cdn.syndication.twimg.com/tweet-result';
 
-interface SyndicationResult {
+// Features sent with TweetResultByRestId. The only one that actually matters
+// for the gap-fill bug is `longform_notetweets_consumption_enabled` — without
+// it, the response omits `note_tweet` entirely and long-form tweets come back
+// as a 275-char preview. The rest mirror what x.com's own web client sends so
+// X doesn't 400 the request for an unknown feature set.
+const TWEET_RESULT_FEATURES = {
+  creator_subscriptions_tweet_preview_api_enabled: true,
+  premium_content_api_read_enabled: true,
+  communities_web_enable_tweet_community_results_fetch: true,
+  c9s_tweet_anatomy_moderator_badge_enabled: true,
+  responsive_web_grok_analyze_button_fetch_trends_enabled: false,
+  responsive_web_grok_analyze_post_followups_enabled: false,
+  responsive_web_jetfuel_frame: false,
+  responsive_web_grok_share_attachment_enabled: false,
+  responsive_web_grok_annotations_enabled: false,
+  articles_preview_enabled: true,
+  responsive_web_edit_tweet_api_enabled: true,
+  graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
+  view_counts_everywhere_api_enabled: true,
+  longform_notetweets_consumption_enabled: true,
+  responsive_web_twitter_article_tweet_consumption_enabled: true,
+  content_disclosure_indicator_enabled: false,
+  content_disclosure_ai_generated_indicator_enabled: false,
+  responsive_web_grok_show_grok_translated_post: false,
+  responsive_web_grok_analysis_button_from_backend: false,
+  post_ctas_fetch_enabled: false,
+  rweb_cashtags_enabled: true,
+  freedom_of_speech_not_reach_fetch_enabled: true,
+  standardized_nudges_misinfo: true,
+  tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
+  longform_notetweets_rich_text_read_enabled: true,
+  longform_notetweets_inline_media_enabled: true,
+  profile_label_improvements_pcf_label_in_post_enabled: true,
+  responsive_web_profile_redirect_enabled: false,
+  rweb_tipjar_consumption_enabled: true,
+  verified_phone_label_enabled: false,
+  responsive_web_grok_image_annotation_enabled: false,
+  responsive_web_grok_imagine_annotation_enabled: false,
+  responsive_web_grok_community_note_auto_translation_is_enabled: false,
+  responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
+  responsive_web_graphql_timeline_navigation_enabled: true,
+  responsive_web_enhance_cards_enabled: false,
+};
+
+export type TweetFetchSource = 'graphql' | 'syndication';
+
+export interface TweetFetchResult {
   snapshot: QuotedTweetSnapshot | null;
   status: 'ok' | 'empty' | 'not_found' | 'forbidden' | 'rate_limited' | 'server_error' | 'error';
   httpStatus?: number;
+  /**
+   * Which backend produced this result. `'graphql'` is authoritative for
+   * note_tweet expansion; `'syndication'` cannot see note_tweet bodies and so
+   * a `'syndication'` + `'ok'` result with a 275-char preview must not be
+   * treated as settling Gap 2.
+   */
+  source?: TweetFetchSource;
 }
 
-async function fetchTweetViaSyndication(tweetId: string): Promise<SyndicationResult> {
+export function parseTweetResultByRestId(json: any, tweetId: string): QuotedTweetSnapshot | null {
+  const result = json?.data?.tweetResult?.result;
+  if (!result) return null;
+  // X may wrap the tweet inside a TweetWithVisibilityResults / TweetTombstone.
+  // Unwrap the same way the bookmarks parser does in convertTweetToRecord.
+  const tweet = result.tweet ?? result;
+  const legacy = tweet?.legacy;
+  if (!legacy) return null;
+
+  const noteText = tweet?.note_tweet?.note_tweet_results?.result?.text;
+  const text = noteText ?? legacy.full_text ?? legacy.text ?? '';
+  if (!text) return null;
+
+  const userResult = tweet?.core?.user_results?.result;
+  const handle = userResult?.core?.screen_name ?? userResult?.legacy?.screen_name;
+  const mediaEntities: any[] = legacy?.extended_entities?.media ?? legacy?.entities?.media ?? [];
+  const resolvedId = String(legacy.id_str ?? tweet?.rest_id ?? tweetId);
+
+  return {
+    id: resolvedId,
+    text,
+    authorHandle: handle,
+    authorName: userResult?.core?.name ?? userResult?.legacy?.name,
+    authorProfileImageUrl:
+      userResult?.avatar?.image_url ?? userResult?.legacy?.profile_image_url_https,
+    postedAt: legacy.created_at ?? null,
+    media: mediaEntities.map((m: any) => m.media_url_https ?? m.media_url).filter(Boolean),
+    mediaObjects: mediaEntities.map((m: any) => ({
+      type: m.type,
+      url: m.media_url_https ?? m.media_url,
+      expandedUrl: m.expanded_url,
+      width: m.original_info?.width,
+      height: m.original_info?.height,
+    })),
+    url: `https://x.com/${handle ?? '_'}/status/${resolvedId}`,
+  };
+}
+
+function buildTweetResultByRestIdUrl(tweetId: string): string {
+  const variables = {
+    tweetId,
+    withCommunity: false,
+    includePromotedContent: false,
+    withVoice: false,
+  };
+  const params = new URLSearchParams({
+    variables: JSON.stringify(variables),
+    features: JSON.stringify(TWEET_RESULT_FEATURES),
+  });
+  return `https://x.com/i/api/graphql/${TWEET_RESULT_BY_REST_ID_QUERY_ID}/${TWEET_RESULT_BY_REST_ID_OPERATION}?${params}`;
+}
+
+export async function fetchTweetByIdViaGraphQL(
+  tweetId: string,
+  csrfToken: string,
+  cookieHeader?: string,
+): Promise<TweetFetchResult> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(buildTweetResultByRestIdUrl(tweetId), {
+        headers: buildHeaders(csrfToken, cookieHeader),
+      });
+    } catch {
+      await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+      continue;
+    }
+
+    if (response.ok) {
+      let json: any;
+      try {
+        json = await response.json();
+      } catch {
+        return { snapshot: null, status: 'error', source: 'graphql' };
+      }
+      // Tombstoned / deleted tweets come back with a result.__typename like
+      // TweetTombstone or TweetUnavailable and no legacy block.
+      const result = json?.data?.tweetResult?.result;
+      const typename = result?.__typename;
+      if (!result || typename === 'TweetTombstone' || typename === 'TweetUnavailable') {
+        return { snapshot: null, status: 'not_found', source: 'graphql' };
+      }
+      const snapshot = parseTweetResultByRestId(json, tweetId);
+      if (!snapshot) return { snapshot: null, status: 'empty', source: 'graphql' };
+      return { snapshot, status: 'ok', source: 'graphql' };
+    }
+
+    if (response.status === 429) {
+      await new Promise((r) => setTimeout(r, Math.min(15 * Math.pow(2, attempt), 120) * 1000));
+      continue;
+    }
+    if (response.status >= 500) {
+      await new Promise((r) => setTimeout(r, 5000 * (attempt + 1)));
+      continue;
+    }
+    if (response.status === 404) {
+      return { snapshot: null, status: 'not_found', httpStatus: 404, source: 'graphql' };
+    }
+    if (response.status === 401 || response.status === 403) {
+      return { snapshot: null, status: 'forbidden', httpStatus: response.status, source: 'graphql' };
+    }
+    // Other 4xx (400 usually means X rotated feature flags / queryId) — don't retry.
+    return { snapshot: null, status: 'error', httpStatus: response.status, source: 'graphql' };
+  }
+  return { snapshot: null, status: 'rate_limited', source: 'graphql' };
+}
+
+async function fetchTweetViaSyndication(tweetId: string): Promise<TweetFetchResult> {
   for (let attempt = 0; attempt < 4; attempt++) {
     const response = await fetch(`${SYNDICATION_URL}?id=${tweetId}&token=x`, {
       headers: {
@@ -1270,11 +1440,12 @@ async function fetchTweetViaSyndication(tweetId: string): Promise<SyndicationRes
 
     if (response.ok) {
       const data = await response.json() as any;
-      if (!data?.text) return { snapshot: null, status: 'empty' };
+      if (!data?.text) return { snapshot: null, status: 'empty', source: 'syndication' };
       const handle = data.user?.screen_name;
       const mediaEntities: any[] = data.mediaDetails ?? [];
       return {
         status: 'ok',
+        source: 'syndication',
         snapshot: {
           id: String(data.id_str ?? tweetId),
           text: data.text,
@@ -1304,13 +1475,22 @@ async function fetchTweetViaSyndication(tweetId: string): Promise<SyndicationRes
     }
     // 404/403 — tweet unavailable, don't retry
     const status = response.status === 404 ? 'not_found' as const : 'forbidden' as const;
-    return { snapshot: null, status, httpStatus: response.status };
+    return { snapshot: null, status, httpStatus: response.status, source: 'syndication' };
   }
-  return { snapshot: null, status: 'rate_limited' };
+  return { snapshot: null, status: 'rate_limited', source: 'syndication' };
 }
 
 // Text >= 275 chars may be truncated by Twitter's legacy.full_text limit
 const TRUNCATION_THRESHOLD = 275;
+
+const GAP_FILL_FAILURE_REASONS: Record<string, string> = {
+  empty: 'tweet exists but has no text content',
+  not_found: 'deleted or does not exist',
+  forbidden: 'private or suspended account',
+  rate_limited: 'rate limited after 4 retries',
+  server_error: 'X server error after 4 retries',
+  error: 'X GraphQL rejected the request (likely rotated queryId or feature flags)',
+};
 
 export interface GapFillProgress {
   done: number;
@@ -1338,21 +1518,80 @@ export interface GapFillResult {
   total: number;
 }
 
-export async function syncGaps(options?: {
+type TweetFetcher = (tweetId: string) => Promise<TweetFetchResult>;
+
+export interface SyncGapsOptions {
   onProgress?: (progress: GapFillProgress) => void;
   delayMs?: number;
-}): Promise<GapFillResult> {
-  const delayMs = options?.delayMs ?? 300;
+  /** Browser id (e.g. 'chrome', 'firefox') for cookie extraction. */
+  browser?: string;
+  chromeUserDataDir?: string;
+  chromeProfileDirectory?: string;
+  firefoxProfileDir?: string;
+  /** Direct csrf token override; skips cookie extraction. */
+  csrfToken?: string;
+  /** Direct cookie header override; skips cookie extraction. */
+  cookieHeader?: string;
+  /**
+   * Injected fetcher, used by tests. Production code should not set this —
+   * when omitted, gap-fill resolves cookies and uses TweetResultByRestId with
+   * syndication as a fallback.
+   */
+  tweetFetcher?: TweetFetcher;
+}
+
+function resolveGapFillCookies(options: SyncGapsOptions): { csrfToken?: string; cookieHeader?: string } {
+  if (options.csrfToken) {
+    return { csrfToken: options.csrfToken, cookieHeader: options.cookieHeader };
+  }
+  try {
+    const config = loadChromeSessionConfig({ browserId: options.browser });
+    if (config.browser.cookieBackend === 'firefox') {
+      const cookies = extractFirefoxXCookies(options.firefoxProfileDir);
+      return { csrfToken: cookies.csrfToken, cookieHeader: cookies.cookieHeader };
+    }
+    const chromeDir = options.chromeUserDataDir ?? config.chromeUserDataDir;
+    const chromeProfile = options.chromeProfileDirectory ?? config.chromeProfileDirectory;
+    const cookies = extractChromeXCookies(chromeDir, chromeProfile, config.browser);
+    return { csrfToken: cookies.csrfToken, cookieHeader: cookies.cookieHeader };
+  } catch {
+    // No cookies available (e.g. no browser install) — gap-fill degrades to
+    // syndication-only, which still backfills quoted-tweet metadata but cannot
+    // expand truncated note_tweets.
+    return {};
+  }
+}
+
+export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillResult> {
+  const delayMs = options.delayMs ?? 300;
   const cachePath = twitterBookmarksCachePath();
   const loaded = sanitizeRecords(await readJsonLines<BookmarkRecord>(cachePath));
   const records = loaded.records;
 
-  // Gap 1: missing quoted tweets
-  const needsQuotedTweet = records.filter((r) => r.quotedStatusId && !r.quotedTweet);
+  const cookies = options.tweetFetcher ? {} : resolveGapFillCookies(options);
+  const fetcher: TweetFetcher = options.tweetFetcher
+    ?? (async (tweetId) => {
+      if (cookies.csrfToken) {
+        const graphqlResult = await fetchTweetByIdViaGraphQL(tweetId, cookies.csrfToken, cookies.cookieHeader);
+        // Permanent GraphQL outcomes (ok, not_found, empty) are authoritative.
+        // Transient failures (auth drift, rate limit, network) fall through to
+        // syndication so at least quoted-tweet metadata can be backfilled.
+        if (graphqlResult.status === 'ok' || graphqlResult.status === 'not_found' || graphqlResult.status === 'empty') {
+          return graphqlResult;
+        }
+      }
+      return fetchTweetViaSyndication(tweetId);
+    });
+
+  // Gap 1: missing quoted tweets. Skip records where a previous gap-fill run
+  // already tried and failed — otherwise dead tweets get re-fetched forever.
+  const needsQuotedTweet = records.filter((r) => r.quotedStatusId && !r.quotedTweet && !r.quotedTweetFailedAt);
   const quotedIds = new Set(needsQuotedTweet.map((r) => r.quotedStatusId!));
 
-  // Gap 2: potentially truncated text (articles/long notes cut off by legacy.full_text)
-  const maybeTruncated = records.filter((r) => (r.text?.length ?? 0) >= TRUNCATION_THRESHOLD);
+  // Gap 2: potentially truncated text. Skip records we've already attempted
+  // to expand — `textExpandedAt` is set regardless of outcome, so a note_tweet
+  // that's already full-length won't be re-fetched on every run.
+  const maybeTruncated = records.filter((r) => (r.text?.length ?? 0) >= TRUNCATION_THRESHOLD && !r.textExpandedAt);
   const truncatedIds = new Set(maybeTruncated.map((r) => r.tweetId));
 
   // Build lookup indexes for applying results
@@ -1383,22 +1622,20 @@ export async function syncGaps(options?: {
   // Fetch and apply incrementally
   for (let i = 0; i < allFetchIds.length; i++) {
     const tweetId = allFetchIds[i];
+    const now = new Date().toISOString();
     let snapshot: QuotedTweetSnapshot | null = null;
+    let resultStatus: TweetFetchResult['status'] = 'error';
+    let resultSource: TweetFetchSource | undefined;
     try {
-      const result = await fetchTweetViaSyndication(tweetId);
+      const result = await fetcher(tweetId);
       snapshot = result.snapshot;
+      resultStatus = result.status;
+      resultSource = result.source;
       if (!snapshot) {
         failed++;
-        const reasons: Record<string, string> = {
-          empty: 'tweet exists but has no text content',
-          not_found: 'deleted or does not exist',
-          forbidden: 'private or suspended account',
-          rate_limited: 'rate limited after 4 retries',
-          server_error: 'X server error after 4 retries',
-        };
         failures.push({
           tweetId,
-          reason: reasons[result.status] ?? result.status,
+          reason: GAP_FILL_FAILURE_REASONS[result.status] ?? result.status,
           url: `https://x.com/_/status/${tweetId}`,
         });
       }
@@ -1411,23 +1648,40 @@ export async function syncGaps(options?: {
       });
     }
 
-    // Apply immediately so progress is accurate
-    if (snapshot) {
-      // Quoted tweet gap
-      for (const record of recordsByQuotedId.get(tweetId) ?? []) {
-        if (!record.quotedTweet) {
-          record.quotedTweet = snapshot;
-          dbQuotedUpdates.push({ id: record.id, quotedTweet: snapshot });
-          quotedFetched++;
-        }
+    // A permanent negative result (deleted / forbidden / empty body) should
+    // stop re-trying the same id; transient ones (rate_limited, network) should
+    // not mark the record so the next run can retry.
+    const isPermanentFailure = resultStatus === 'not_found' || resultStatus === 'forbidden' || resultStatus === 'empty';
+
+    // Gap 1 (quoted tweet): syndication snapshots are fine here — they carry
+    // enough metadata (author, media, preview text) to make the quoted tweet
+    // useful in the UI even if a note_tweet body is cut off.
+    for (const record of recordsByQuotedId.get(tweetId) ?? []) {
+      if (snapshot && !record.quotedTweet) {
+        record.quotedTweet = snapshot;
+        dbQuotedUpdates.push({ id: record.id, quotedTweet: snapshot });
+        quotedFetched++;
+      } else if (!snapshot && isPermanentFailure) {
+        record.quotedTweetFailedAt = now;
       }
-      // Truncated text gap
-      for (const record of recordsByTweetId.get(tweetId) ?? []) {
-        if (snapshot.text.length > (record.text?.length ?? 0)) {
-          record.text = snapshot.text;
-          dbTextUpdates.push({ id: record.id, text: snapshot.text });
-          textExpanded++;
-        }
+    }
+
+    // Gap 2 (truncated text): only GraphQL can expose note_tweet bodies, so a
+    // syndication-only `ok` response with the 275-char preview must NOT mark
+    // the record as checked — otherwise a user with expired cookies (or after
+    // X rotates the queryId) permanently locks every long-form tweet into its
+    // truncated form. Mark only when GraphQL settled the question, when we
+    // genuinely expanded the text, or when the tweet is permanently gone.
+    const graphqlSettled = resultSource === 'graphql' && snapshot != null;
+    for (const record of recordsByTweetId.get(tweetId) ?? []) {
+      const didExpand = snapshot != null && snapshot.text.length > (record.text?.length ?? 0);
+      if (didExpand) {
+        record.text = snapshot!.text;
+        dbTextUpdates.push({ id: record.id, text: snapshot!.text });
+        textExpanded++;
+      }
+      if (didExpand || graphqlSettled || isPermanentFailure) {
+        record.textExpandedAt = now;
       }
     }
 
