@@ -17,7 +17,7 @@ import {
 } from '../src/paths.js';
 import { buildReconcilePrompt } from '../src/md-prompts.js';
 import type { ResolvedEngine, InvokeOptions } from '../src/engine.js';
-import type { MdState } from '../src/md.js';
+import { generateIndex, type MdState } from '../src/md.js';
 
 // All tests run against a temp FT_DATA_DIR. writeEntry + writeMd handle
 // recursive mkdir internally, so the entries/ dir doesn't need to pre-exist.
@@ -777,6 +777,82 @@ test('migrateConceptsToEntries: skips when destination already exists in entries
     // Destination unchanged
     const dest = await readFile(path.join(mdEntriesDir(), '2026-04-10-x.md'), 'utf8');
     assert.equal(dest, '# x from entries (existing)');
+  });
+});
+
+// ── generateIndex — Phase 4 section ordering + Entries section ──────────
+
+test('generateIndex: includes an Entries section listing authored entry files', async () => {
+  await withTmpDataDir('idx-entries', async () => {
+    await mkdir(mdEntriesDir(), { recursive: true });
+    await writeFile(path.join(mdEntriesDir(), '2026-04-15-a.md'), '# a');
+    await writeFile(path.join(mdEntriesDir(), '2026-04-15-b.md'), '# b');
+
+    const content = await generateIndex();
+    assert.match(content, /^## Entries \(2\)$/m);
+    assert.ok(content.includes('- [[entries/2026-04-15-a]]'));
+    assert.ok(content.includes('- [[entries/2026-04-15-b]]'));
+  });
+});
+
+test('generateIndex: Entries section is omitted when entries/ is empty or missing', async () => {
+  await withTmpDataDir('idx-no-entries', async () => {
+    // No mkdir — directory does not exist at all
+    const content = await generateIndex();
+    assert.ok(!content.includes('## Entries'));
+  });
+});
+
+test('generateIndex: Concepts section renders with deprecated label', async () => {
+  await withTmpDataDir('idx-concepts-deprecated', async () => {
+    await mkdir(mdConceptsDir(), { recursive: true });
+    await writeFile(path.join(mdConceptsDir(), '2026-01-01-old.md'), '# old concept');
+
+    const content = await generateIndex();
+    assert.match(content, /## Concepts \(1\) — deprecated, migrating to entries\//);
+    assert.ok(content.includes('- [[concepts/2026-01-01-old]]'));
+  });
+});
+
+test('generateIndex: sections appear in canonical order (Categories, Domains, Entities, Entries, Concepts)', async () => {
+  await withTmpDataDir('idx-ordering', async () => {
+    await mkdir(mdCategoriesDir(), { recursive: true });
+    await mkdir(mdDomainsDir(), { recursive: true });
+    await mkdir(mdEntitiesDir(), { recursive: true });
+    await mkdir(mdEntriesDir(), { recursive: true });
+    await mkdir(mdConceptsDir(), { recursive: true });
+    await writeFile(path.join(mdCategoriesDir(), 'tool.md'), '# tool');
+    await writeFile(path.join(mdDomainsDir(), 'ai.md'), '# ai');
+    await writeFile(path.join(mdEntitiesDir(), 'karpathy.md'), '# karpathy');
+    await writeFile(path.join(mdEntriesDir(), '2026-04-15-foo.md'), '# foo');
+    await writeFile(path.join(mdConceptsDir(), '2026-01-01-bar.md'), '# bar');
+
+    const content = await generateIndex();
+    // Find the position of each section heading in the output
+    const positions = {
+      categories: content.indexOf('## Categories'),
+      domains:    content.indexOf('## Domains'),
+      entities:   content.indexOf('## Entities'),
+      entries:    content.indexOf('## Entries'),
+      concepts:   content.indexOf('## Concepts'),
+    };
+    for (const [name, pos] of Object.entries(positions)) {
+      assert.ok(pos > 0, `${name} section must exist`);
+    }
+    assert.ok(positions.categories < positions.domains, 'Categories before Domains');
+    assert.ok(positions.domains < positions.entities, 'Domains before Entities');
+    assert.ok(positions.entities < positions.entries, 'Entities before Entries');
+    assert.ok(positions.entries < positions.concepts, 'Entries before Concepts');
+  });
+});
+
+test('generateIndex: top-matter has ft/index tag and today date', async () => {
+  await withTmpDataDir('idx-header', async () => {
+    const content = await generateIndex();
+    const today = new Date().toISOString().slice(0, 10);
+    assert.match(content, /^---\ntags: \[ft\/index\]\nlast_updated: /m);
+    assert.ok(content.includes(`last_updated: ${today}`));
+    assert.ok(content.includes('# FT Knowledge Base Index'));
   });
 });
 

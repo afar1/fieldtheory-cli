@@ -207,7 +207,7 @@ when authored entries disagree with existing content.
   await writeMd(schemaPath, schema);
 }
 
-async function generateIndex(): Promise<string> {
+export async function generateIndex(): Promise<string> {
   const categoryFiles = (await listFiles(mdCategoriesDir())).filter(f => f.endsWith('.md')).sort();
   const domainFiles   = (await listFiles(mdDomainsDir())).filter(f => f.endsWith('.md')).sort();
   const entityFiles   = (await listFiles(mdEntitiesDir())).filter(f => f.endsWith('.md')).sort();

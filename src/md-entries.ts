@@ -230,7 +230,9 @@ export async function reconcileEntries(options: ReconcileOptions): Promise<Recon
     aborted: false,
   };
 
-  state.entryHashes ??= {};
+  // Capture the hash map locally after ??= so downstream code doesn't need
+  // non-null assertions on every access.
+  const entryHashes: Record<string, string> = (state.entryHashes ??= {});
 
   const scanned = await scanEntries();
   if (scanned.length === 0) return result;
@@ -252,7 +254,13 @@ export async function reconcileEntries(options: ReconcileOptions): Promise<Recon
       continue;
     }
 
-    const dir = targetDirFor(targetRel)!;
+    const dir = targetDirFor(targetRel);
+    if (!dir) {
+      // Defensive — targetMap only contains targets with targetDirFor !== null,
+      // but narrowing keeps downstream code honest.
+      result.pagesSkipped++;
+      continue;
+    }
     const slugPart = targetRel.split('/')[1];
     const filePath = path.join(dir, `${slugPart}.md`);
 
@@ -265,7 +273,7 @@ export async function reconcileEntries(options: ReconcileOptions): Promise<Recon
 
     const isDirty = dirtyPages?.has(targetRel) ?? false;
     const hasChangedEntries = contributingEntries.some(
-      (e) => state.entryHashes![e.relPath] !== e.hash,
+      (e) => entryHashes[e.relPath] !== e.hash,
     );
     if (!isDirty && !hasChangedEntries) {
       result.pagesUnchanged++;
@@ -314,7 +322,7 @@ export async function reconcileEntries(options: ReconcileOptions): Promise<Recon
     }
 
     for (const e of contributingEntries) {
-      state.entryHashes![e.relPath] = e.hash;
+      entryHashes[e.relPath] = e.hash;
     }
     await writeJson(mdStatePath(), state);
 
