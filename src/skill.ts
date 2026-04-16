@@ -52,6 +52,15 @@ Combine filters: \`ft list --category tool --domain ai --limit 10\`
 - Don't dump raw output — summarize and connect findings to the user's current work
 - Cross-reference multiple queries to build a complete picture
 - Look for recurring authors, topic clusters, and connections between bookmarks
+
+## Knowledge compounding
+
+Two portable command files at \`~/.fieldtheory/commands/\` let any agent pull from and write to the wiki:
+
+- \`~/.fieldtheory/commands/wiki.md\` — **lookup.** Before non-trivial work, run this to check what the wiki already knows. It greps \`~/.ft-bookmarks/md/entries/\` (authored knowledge) and the rest of the wiki for relevant content.
+- \`~/.fieldtheory/commands/entry.md\` — **capture.** After producing a reusable, non-obvious insight — a lesson, decision, or observation worth remembering — run this to write it into \`~/.ft-bookmarks/md/entries/\` with the canonical frontmatter. Entries integrate into the compiled wiki pages via the reconcile pass on the next \`ft wiki\` run.
+
+Not every session produces an entry; use judgment. Ephemeral task details belong in git history, not the wiki.
 `;
 
 /** Full skill file with YAML frontmatter (for Claude Code commands). */
