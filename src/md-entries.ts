@@ -13,11 +13,12 @@
  */
 
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { writeMd, readMd, appendLine, listFiles, pathExists, writeJson } from './fs.js';
 import {
   mdEntriesDir, mdLogPath, mdStatePath,
-  mdCategoriesDir, mdDomainsDir, mdEntitiesDir,
+  mdCategoriesDir, mdDomainsDir, mdEntitiesDir, mdConceptsDir,
 } from './paths.js';
 import { slug, logEntry, writePage, type MdState } from './md.js';
 import { extractWikilinks } from './md-lint.js';
@@ -324,8 +325,135 @@ export async function reconcileEntries(options: ReconcileOptions): Promise<Recon
   return result;
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Concepts → entries migration — Phase 4
+// ──────────────────────────────────────────────────────────────────────────
+//
+// Debate 2 deprecated the `concepts/` lane in favor of a unified `entries/`
+// directory. Legacy `ft ask --save` output under `concepts/` is rewritten
+// into entry-shaped frontmatter and moved on every `ft wiki` run. Idempotent:
+// after the first successful migration the concepts/ dir is empty and the
+// function is a no-op. Safe to run repeatedly.
+
+export interface MigrateConceptsResult {
+  migrated: number;
+  skipped: number;
+  failed: number;
+}
+
+export interface MigrateConceptsOptions {
+  progress?: (s: string) => void;
+}
+
+/**
+ * Rewrites a legacy `concepts/` file's frontmatter into the new entry shape.
+ *
+ * Old shape (from `md-ask.ts` pre-refactor save block):
+ *   ---
+ *   tags: [ft/concept]
+ *   question: "…"
+ *   source_type: bookmarks
+ *   last_updated: YYYY-MM-DD
+ *   ---
+ *
+ * New shape:
+ *   ---
+ *   tags: [ft/entry, ft/concept]
+ *   source_type: ask         # or 'authored' if no question field was present
+ *   question: "…"            # only when source_type: ask
+ *   last_updated: YYYY-MM-DD
+ *   ---
+ *
+ * Body is preserved verbatim. If the input has no recognizable frontmatter
+ * block, a minimal entry frontmatter is prepended and the entire original
+ * content is treated as the body — preserves hand-edited files.
+ */
+function rewriteConceptFrontmatter(content: string, today: string): string {
+  const match = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  if (!match) {
+    return [
+      '---',
+      'tags: [ft/entry, ft/concept]',
+      'source_type: authored',
+      `last_updated: ${today}`,
+      '---',
+      '',
+      content.trimStart(),
+    ].join('\n');
+  }
+
+  const [, frontmatter, body] = match;
+  const fields: Record<string, string> = {};
+  for (const line of frontmatter.split('\n')) {
+    const m = line.match(/^([a-z_]+):\s*(.*)$/);
+    if (m) fields[m[1]] = m[2];
+  }
+
+  const hasQuestion = Boolean(fields.question);
+  const sourceType = hasQuestion ? 'ask' : 'authored';
+  const lastUpdated = fields.last_updated ?? today;
+
+  const newFrontmatter: string[] = [
+    '---',
+    'tags: [ft/entry, ft/concept]',
+    `source_type: ${sourceType}`,
+  ];
+  if (hasQuestion) newFrontmatter.push(`question: ${fields.question}`);
+  newFrontmatter.push(`last_updated: ${lastUpdated}`, '---');
+
+  return `${newFrontmatter.join('\n')}\n${body.replace(/^\n*/, '')}`;
+}
+
+export async function migrateConceptsToEntries(
+  options: MigrateConceptsOptions = {},
+): Promise<MigrateConceptsResult> {
+  const progress = options.progress ?? (() => {});
+  const result: MigrateConceptsResult = { migrated: 0, skipped: 0, failed: 0 };
+
+  const conceptsDir = mdConceptsDir();
+  if (!(await pathExists(conceptsDir))) return result;
+
+  const files = (await listFiles(conceptsDir)).filter((f) => f.endsWith('.md'));
+  if (files.length === 0) return result;
+
+  const today = new Date().toISOString().slice(0, 10);
+
+  for (const filename of files) {
+    const oldPath = path.join(conceptsDir, filename);
+    const newPath = path.join(mdEntriesDir(), filename);
+    const relPath = `entries/${filename.replace(/\.md$/, '')}`;
+
+    if (await pathExists(newPath)) {
+      // Destination already has a file — either this ran before or there's
+      // a legitimate collision. Skip without touching either file.
+      result.skipped++;
+      progress(`concepts/${filename} → entries/ (skipped: destination exists)`);
+      continue;
+    }
+
+    try {
+      const original = await readMd(oldPath);
+      const migrated = rewriteConceptFrontmatter(original, today);
+      await writeMd(newPath, migrated);
+      await fs.rm(oldPath);
+      await appendLine(mdLogPath(), logEntry('migrate', `${relPath} <- concepts/${filename.replace(/\.md$/, '')}`));
+      result.migrated++;
+      progress(`concepts/${filename} → ${relPath}`);
+    } catch (err) {
+      result.failed++;
+      await appendLine(
+        mdLogPath(),
+        logEntry('migrate', `FAILED ${filename}: ${(err as Error).message ?? String(err)}`),
+      );
+    }
+  }
+
+  return result;
+}
+
 // ── Test exports ──────────────────────────────────────────────────────────
 export const yamlEscapeDoubleQuotedForTest = yamlEscapeDoubleQuoted;
 export const targetDirForTest = targetDirFor;
 export const scanEntriesForTest = scanEntries;
 export const groupByTargetForTest = groupByTarget;
+export const rewriteConceptFrontmatterForTest = rewriteConceptFrontmatter;

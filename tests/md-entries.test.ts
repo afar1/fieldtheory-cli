@@ -4,14 +4,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile, access } from 'node:fs/promises';
 import {
-  writeEntry, reconcileEntries, yamlEscapeDoubleQuotedForTest,
-  targetDirForTest, scanEntriesForTest, groupByTargetForTest,
+  writeEntry, reconcileEntries, migrateConceptsToEntries,
+  yamlEscapeDoubleQuotedForTest, targetDirForTest, scanEntriesForTest,
+  groupByTargetForTest, rewriteConceptFrontmatterForTest,
   type ReconcileOptions,
 } from '../src/md-entries.js';
 import {
   mdEntriesDir, mdLogPath, mdCategoriesDir, mdDomainsDir, mdEntitiesDir,
+  mdConceptsDir,
 } from '../src/paths.js';
 import { buildReconcilePrompt } from '../src/md-prompts.js';
 import type { ResolvedEngine, InvokeOptions } from '../src/engine.js';
@@ -640,6 +642,158 @@ test('reconcileEntries: engine failure counts as pagesFailed and does not update
     assert.ok(
       !state.entryHashes?.['entries/2026-04-15-e'],
       'entry hash must not be recorded on failure — next run should retry',
+    );
+  });
+});
+
+// ── migrateConceptsToEntries — Phase 4 ───────────────────────────────────
+
+test('rewriteConceptFrontmatter: legacy ask-style concept becomes ask entry', () => {
+  const input = `---
+tags: [ft/concept]
+question: "What is whisper?"
+source_type: bookmarks
+last_updated: 2026-04-10
+---
+
+# What is whisper?
+
+Whisper is an ASR model from OpenAI.`;
+
+  const out = rewriteConceptFrontmatterForTest(input, '2026-04-15');
+  assert.match(out, /tags: \[ft\/entry, ft\/concept\]/);
+  assert.match(out, /source_type: ask/);
+  assert.match(out, /question: "What is whisper\?"/);
+  assert.match(out, /last_updated: 2026-04-10/); // preserves original date
+  assert.ok(out.includes('# What is whisper?'));
+  assert.ok(out.includes('Whisper is an ASR model from OpenAI.'));
+});
+
+test('rewriteConceptFrontmatter: concept without question becomes authored entry', () => {
+  const input = `---
+tags: [ft/concept]
+source_type: bookmarks
+last_updated: 2026-04-10
+---
+
+# Standalone note
+
+Body content.`;
+
+  const out = rewriteConceptFrontmatterForTest(input, '2026-04-15');
+  assert.match(out, /source_type: authored/);
+  assert.ok(!out.includes('question:'), 'no question field when absent from source');
+});
+
+test('rewriteConceptFrontmatter: no frontmatter wraps with minimal entry shape', () => {
+  const input = '# Hand-edited file\n\njust a body';
+  const out = rewriteConceptFrontmatterForTest(input, '2026-04-15');
+  assert.match(out, /^---\ntags: \[ft\/entry, ft\/concept\]\nsource_type: authored\nlast_updated: 2026-04-15\n---\n/);
+  assert.ok(out.includes('# Hand-edited file'));
+});
+
+test('migrateConceptsToEntries: returns zero counts when concepts/ does not exist', async () => {
+  await withTmpDataDir('mig-missing', async () => {
+    const result = await migrateConceptsToEntries();
+    assert.deepEqual(result, { migrated: 0, skipped: 0, failed: 0 });
+  });
+});
+
+test('migrateConceptsToEntries: returns zero counts when concepts/ is empty', async () => {
+  await withTmpDataDir('mig-empty', async () => {
+    await mkdir(mdConceptsDir(), { recursive: true });
+    const result = await migrateConceptsToEntries();
+    assert.deepEqual(result, { migrated: 0, skipped: 0, failed: 0 });
+  });
+});
+
+test('migrateConceptsToEntries: migrates a legacy ask concept file', async () => {
+  await withTmpDataDir('mig-one', async () => {
+    await mkdir(mdConceptsDir(), { recursive: true });
+    const legacyFilename = '2026-04-10-what-is-whisper.md';
+    const legacyContent = `---
+tags: [ft/concept]
+question: "What is whisper?"
+source_type: bookmarks
+last_updated: 2026-04-10
+---
+
+# What is whisper?
+
+Whisper is an ASR model from OpenAI.`;
+    await writeFile(path.join(mdConceptsDir(), legacyFilename), legacyContent);
+
+    const result = await migrateConceptsToEntries();
+
+    assert.equal(result.migrated, 1);
+    assert.equal(result.skipped, 0);
+    assert.equal(result.failed, 0);
+
+    // New file exists in entries/
+    const newPath = path.join(mdEntriesDir(), legacyFilename);
+    const newContent = await readFile(newPath, 'utf8');
+    assert.match(newContent, /tags: \[ft\/entry, ft\/concept\]/);
+    assert.match(newContent, /source_type: ask/);
+    assert.match(newContent, /question: "What is whisper\?"/);
+    assert.ok(newContent.includes('Whisper is an ASR model'));
+
+    // Old file removed
+    await assert.rejects(() => access(path.join(mdConceptsDir(), legacyFilename)));
+  });
+});
+
+test('migrateConceptsToEntries: is idempotent across multiple runs', async () => {
+  await withTmpDataDir('mig-idempotent', async () => {
+    await mkdir(mdConceptsDir(), { recursive: true });
+    await writeFile(
+      path.join(mdConceptsDir(), '2026-04-10-foo.md'),
+      '---\ntags: [ft/concept]\nquestion: "foo?"\nsource_type: bookmarks\nlast_updated: 2026-04-10\n---\n\n# foo?\n\nbody',
+    );
+
+    const first = await migrateConceptsToEntries();
+    assert.equal(first.migrated, 1);
+
+    const second = await migrateConceptsToEntries();
+    assert.deepEqual(second, { migrated: 0, skipped: 0, failed: 0 },
+      'second run is a complete no-op — concepts/ is now empty');
+  });
+});
+
+test('migrateConceptsToEntries: skips when destination already exists in entries/', async () => {
+  await withTmpDataDir('mig-collision', async () => {
+    await mkdir(mdConceptsDir(), { recursive: true });
+    await mkdir(mdEntriesDir(), { recursive: true });
+    await writeFile(path.join(mdConceptsDir(), '2026-04-10-x.md'), '# x from concepts');
+    await writeFile(path.join(mdEntriesDir(), '2026-04-10-x.md'), '# x from entries (existing)');
+
+    const result = await migrateConceptsToEntries();
+    assert.equal(result.skipped, 1);
+    assert.equal(result.migrated, 0);
+
+    // Source still exists (we didn't touch it)
+    const stillThere = await readFile(path.join(mdConceptsDir(), '2026-04-10-x.md'), 'utf8');
+    assert.equal(stillThere, '# x from concepts');
+
+    // Destination unchanged
+    const dest = await readFile(path.join(mdEntriesDir(), '2026-04-10-x.md'), 'utf8');
+    assert.equal(dest, '# x from entries (existing)');
+  });
+});
+
+test('migrateConceptsToEntries: appends grep-parseable log line for each migration', async () => {
+  await withTmpDataDir('mig-log', async () => {
+    await mkdir(mdConceptsDir(), { recursive: true });
+    await writeFile(
+      path.join(mdConceptsDir(), '2026-04-10-foo.md'),
+      '---\ntags: [ft/concept]\n---\n\n# foo\n\nbody',
+    );
+
+    await migrateConceptsToEntries();
+
+    const logContent = await readFile(mdLogPath(), 'utf8');
+    assert.match(
+      logContent,
+      /^## \[\d{4}-\d{2}-\d{2}\] migrate \| entries\/2026-04-10-foo <- concepts\/2026-04-10-foo$/m,
     );
   });
 });

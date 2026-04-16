@@ -138,22 +138,41 @@ Edit it to evolve how the LLM maintains wiki pages.
 \`\`\`
 ~/.ft-bookmarks/md/
 ├── index.md          # Content catalog (auto-generated, do not edit)
-├── log.md            # Append-only compile + query log
-├── md-state.json     # Internal compilation state
-├── categories/       # Pages by bookmark type (tool, security, technique, …)
-├── domains/          # Pages by subject matter (ai, finance, devops, …)
-├── entities/         # Pages for individual authors/contributors
-└── concepts/         # Q&A answers saved with ft ask --save
+├── log.md            # Append-only compile + query + reconcile log
+├── md-state.json     # Internal compilation state (page hashes + entry hashes)
+├── categories/       # Compiled pages by bookmark type (tool, security, …)
+├── domains/          # Compiled pages by subject matter (ai, finance, …)
+├── entities/         # Compiled pages for individual authors/contributors
+├── entries/          # Agent/user-authored knowledge entries
+└── concepts/         # DEPRECATED — legacy ft ask --save output, auto-migrated
 \`\`\`
+
+\`categories/\`, \`domains/\`, and \`entities/\` are LLM-derived from bookmarks
+and get rewritten when bookmark counts change. \`entries/\` is authored content
+(never overwritten by compile) that integrates into the compiled pages via
+\`reconcileEntries()\` — an entry body containing \`[[domains/ai]]\` declares
+\`domains/ai\` as a reconcile target.
 
 ## Frontmatter Requirements
 
-Every page MUST have:
+### Compiled pages (categories/domains/entities)
+
 \`\`\`yaml
 ---
-tags: [ft/category]  # or ft/domain, ft/entity, ft/concept
+tags: [ft/category]       # or ft/domain, ft/entity
 source_count: 42
 source_type: bookmarks
+last_updated: 2026-01-01
+---
+\`\`\`
+
+### Authored entries (entries/)
+
+\`\`\`yaml
+---
+tags: [ft/entry, ft/concept]   # or ft/entry + ft/lesson | ft/decision | ft/note | …
+source_type: ask               # or 'authored' — 'ask' for ft ask --save output
+question: "..."                # only when source_type: ask
 last_updated: 2026-01-01
 ---
 \`\`\`
@@ -164,16 +183,25 @@ Internal cross-references use wikilink syntax:
 - \`[[categories/tool]]\` — link to a category page
 - \`[[domains/ai]]\` — link to a domain page
 - \`[[entities/karpathy]]\` — link to an entity page
+- \`[[entries/2026-04-15-whisper-build]]\` — link to an authored entry
+
+Wikilinks in entry bodies drive the reconcile dependency graph.
 
 ## Source Citation Rule
 
-Every factual claim must link back to a bookmark URL:
+Every factual claim in a compiled page must link back to a bookmark URL:
 > "Claude 3.5 Sonnet topped the LMSYS leaderboard ([source](https://x.com/...))."
+
+Authored entries are themselves sources — they don't need bookmark citations
+but should link to any external URLs they reference.
 
 ## Contradiction Rule
 
 When bookmarks in a group disagree, note it explicitly:
 > **Contradiction**: Some bookmarks advocate X while others argue Y.
+
+Reconcile preserves contradictions from compiled pages and adds new ones
+when authored entries disagree with existing content.
 `;
 
   await writeMd(schemaPath, schema);
@@ -183,6 +211,7 @@ async function generateIndex(): Promise<string> {
   const categoryFiles = (await listFiles(mdCategoriesDir())).filter(f => f.endsWith('.md')).sort();
   const domainFiles   = (await listFiles(mdDomainsDir())).filter(f => f.endsWith('.md')).sort();
   const entityFiles   = (await listFiles(mdEntitiesDir())).filter(f => f.endsWith('.md')).sort();
+  const entryFiles    = (await listFiles(mdEntriesDir())).filter(f => f.endsWith('.md')).sort();
   const conceptFiles  = (await listFiles(mdConceptsDir())).filter(f => f.endsWith('.md')).sort();
 
   const now = new Date().toISOString().slice(0, 10);
@@ -219,8 +248,18 @@ async function generateIndex(): Promise<string> {
     lines.push('');
   }
 
+  if (entryFiles.length > 0) {
+    lines.push(`## Entries (${entryFiles.length})`);
+    lines.push('');
+    for (const f of entryFiles) lines.push(`- [[entries/${f.replace(/\.md$/, '')}]]`);
+    lines.push('');
+  }
+
+  // concepts/ is deprecated — auto-migrated to entries/ on each ft wiki run.
+  // Keep the section in the index for the transitional window where some
+  // users still have unmigrated files (e.g. mid-upgrade).
   if (conceptFiles.length > 0) {
-    lines.push(`## Concepts (${conceptFiles.length})`);
+    lines.push(`## Concepts (${conceptFiles.length}) — deprecated, migrating to entries/`);
     lines.push('');
     for (const f of conceptFiles) lines.push(`- [[concepts/${f.replace(/\.md$/, '')}]]`);
     lines.push('');
@@ -323,6 +362,19 @@ async function doCompile(
   await ensureDir(mdEntriesDir());
 
   await generateSchemaIfMissing();
+
+  // Migrate legacy concepts/ pages to entries/ on every compile. Idempotent —
+  // once concepts/ is empty the call is a no-op. Debate 2 deprecated the
+  // concepts/ lane in favor of a unified entries/ dir with richer frontmatter.
+  try {
+    const { migrateConceptsToEntries } = await import('./md-entries.js');
+    const mig = await migrateConceptsToEntries({ progress });
+    if (mig.migrated > 0) {
+      progress(`Migrated ${mig.migrated} concept page(s) → entries/`);
+    }
+  } catch (err) {
+    progress(`concepts migration error: ${(err as Error).message ?? String(err)}`);
+  }
 
   const state = await loadMdState();
   const isFullCompile = Boolean(options.full);
