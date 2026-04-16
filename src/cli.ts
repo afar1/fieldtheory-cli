@@ -177,6 +177,11 @@ function showCachedUpdateNotice(): void {
 // ── What's new ────────────────────────────────────────────────────────────
 
 const WHATS_NEW: Record<string, string[]> = {
+  '1.3.9': [
+    'ft sync now captures full long-form note_tweets (Karpathy-style threads) instead of 275-char previews',
+    'ft sync --gaps backfills existing truncated note_tweets via an authenticated GraphQL path',
+    'ft sync --gaps is now idempotent \u2014 second runs print "No gaps found" instead of re-fetching forever',
+  ],
   '1.3.5': [
     'ft sync --folders \u2014 sync X bookmark folder tags (read-only mirror)',
     'ft sync --folder <name> \u2014 sync a single folder by name',
@@ -549,8 +554,24 @@ export function buildCli() {
             parts.push(`${elapsed}s`);
             return parts.join(' \u2502 ');
           });
+          // Parse --cookies <ct0> [auth_token] — variadic, gives us an array
+          let gapCsrfToken: string | undefined;
+          let gapCookieHeader: string | undefined;
+          if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
+            gapCsrfToken = String(options.cookies[0]);
+            const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
+            const parts = [`ct0=${gapCsrfToken}`];
+            if (authToken) parts.push(`auth_token=${authToken}`);
+            gapCookieHeader = parts.join('; ');
+          }
           const result = await runWithSpinner(spinner, () => syncGaps({
             delayMs: Number(options.delayMs) || 300,
+            browser: options.browser ? String(options.browser) : undefined,
+            chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+            chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+            firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+            csrfToken: gapCsrfToken,
+            cookieHeader: gapCookieHeader,
             onProgress: (progress: GapFillProgress) => {
               lastProgress = progress;
               spinner.update();
