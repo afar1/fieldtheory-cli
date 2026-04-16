@@ -6,7 +6,9 @@
  * No API keys needed. No local models. Just a logged-in Claude or Codex CLI.
  */
 
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import winPath from 'node:path/win32';
 import { openDb, saveDb } from './db.js';
 import { classificationLockPath, ensureDataDir, twitterBookmarksIndexPath } from './paths.js';
 import type { ResolvedEngine } from './engine.js';
@@ -18,6 +20,7 @@ export interface ClassificationLock {
   pid: number;
   kind: 'classify' | 'classify-domains';
   startedAt: string;
+  processStartedAt: string;
 }
 
 type ClassificationLockReadResult =
@@ -123,6 +126,68 @@ export interface LlmClassifyResult {
 
 const CLASSIFICATION_LOCK_PARSE_GRACE_MS = 5_000;
 
+function toIsoSecond(timestampMs: number): string {
+  return new Date(Math.floor(timestampMs / 1000) * 1000).toISOString();
+}
+
+function currentProcessStartedAt(): string {
+  return toIsoSecond(Date.now() - (process.uptime() * 1000));
+}
+
+function safeLockAgeMs(lockPath: string): number | null {
+  try {
+    return Date.now() - fs.statSync(lockPath).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+function windowsPowerShellCandidates(env: NodeJS.ProcessEnv = process.env): string[] {
+  const systemRoot = env.SystemRoot || env.WINDIR;
+  if (!systemRoot || !winPath.isAbsolute(systemRoot)) {
+    return [];
+  }
+
+  const candidates = [
+    winPath.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    winPath.join(systemRoot, 'Sysnative', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+  ];
+
+  return [...new Set(candidates.filter(candidate => fs.existsSync(candidate)))];
+}
+
+function processStartedAt(pid: number): string | null {
+  try {
+    if (process.platform === 'win32') {
+      const script = `(Get-Process -Id ${pid}).StartTime.ToUniversalTime().ToString('o')`;
+      for (const command of windowsPowerShellCandidates()) {
+        try {
+          const output = execFileSync(
+            command,
+            ['-NonInteractive', '-NoProfile', '-Command', script],
+            { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true },
+          ).trim();
+          if (output) return output;
+        } catch {
+          continue;
+        }
+      }
+      return null;
+    }
+
+    const output = execFileSync(
+      'ps',
+      ['-p', String(pid), '-o', 'lstart='],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim();
+    if (!output) return null;
+    const parsed = Date.parse(output);
+    return Number.isNaN(parsed) ? null : toIsoSecond(parsed);
+  } catch {
+    return null;
+  }
+}
+
 function isProcessAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -142,10 +207,11 @@ function readClassificationLockState(): ClassificationLockReadResult {
     if (
       typeof raw.pid !== 'number' ||
       (raw.kind !== 'classify' && raw.kind !== 'classify-domains') ||
-      typeof raw.startedAt !== 'string'
+      typeof raw.startedAt !== 'string' ||
+      typeof raw.processStartedAt !== 'string'
     ) {
-      const ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
-      if (ageMs <= CLASSIFICATION_LOCK_PARSE_GRACE_MS) {
+      const ageMs = safeLockAgeMs(lockPath);
+      if (ageMs !== null && ageMs <= CLASSIFICATION_LOCK_PARSE_GRACE_MS) {
         return { state: 'initializing' };
       }
       fs.rmSync(lockPath, { force: true });
@@ -157,17 +223,24 @@ function readClassificationLockState(): ClassificationLockReadResult {
       return { state: 'missing' };
     }
 
+    const liveProcessStartedAt = processStartedAt(raw.pid);
+    if (liveProcessStartedAt && liveProcessStartedAt !== raw.processStartedAt) {
+      fs.rmSync(lockPath, { force: true });
+      return { state: 'missing' };
+    }
+
     return {
       state: 'active',
       lock: {
         pid: raw.pid,
         kind: raw.kind,
         startedAt: raw.startedAt,
+        processStartedAt: raw.processStartedAt,
       },
     };
   } catch {
-    const ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
-    if (ageMs <= CLASSIFICATION_LOCK_PARSE_GRACE_MS) {
+    const ageMs = safeLockAgeMs(lockPath);
+    if (ageMs !== null && ageMs <= CLASSIFICATION_LOCK_PARSE_GRACE_MS) {
       return { state: 'initializing' };
     }
     fs.rmSync(lockPath, { force: true });
@@ -209,12 +282,12 @@ export async function withClassificationLock<T>(
     pid: process.pid,
     kind,
     startedAt: new Date().toISOString(),
+    processStartedAt: currentProcessStartedAt(),
   };
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       tryWriteClassificationLock(lock);
-      return await fn();
     } catch (error: any) {
       if (error?.code !== 'EEXIST') {
         throw error;
@@ -229,6 +302,11 @@ export async function withClassificationLock<T>(
       }
 
       fs.rmSync(classificationLockPath(), { force: true });
+      continue;
+    }
+
+    try {
+      return await fn();
     } finally {
       removeClassificationLock(lock);
     }

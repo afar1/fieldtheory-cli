@@ -15,7 +15,7 @@ test('formatBookmarkStatus produces human-readable summary', () => {
     bookmarkCount: 99,
     categoriesDone: 12,
     domainsDone: 34,
-    classificationJob: { pid: 17169, kind: 'classify-domains', startedAt: '2026-03-28T17:20:00Z' },
+    classificationJob: { pid: 17169, kind: 'classify-domains', startedAt: '2026-03-28T17:20:00Z', processStartedAt: '2026-03-28T17:19:30Z' },
     lastUpdated: '2026-03-28T17:23:00Z',
     mode: 'Incremental by default (GraphQL + API available)',
     cachePath: '/tmp/x-bookmarks.jsonl',
@@ -53,7 +53,7 @@ test('formatBookmarkSummary produces concise operator-friendly output', () => {
     bookmarkCount: 99,
     categoriesDone: 12,
     domainsDone: 34,
-    classificationJob: { pid: 17169, kind: 'classify-domains', startedAt: '2026-03-28T17:20:00Z' },
+    classificationJob: { pid: 17169, kind: 'classify-domains', startedAt: '2026-03-28T17:20:00Z', processStartedAt: '2026-03-28T17:19:30Z' },
     lastUpdated: '2026-03-28T17:23:00Z',
     mode: 'API sync',
     cachePath: '/tmp/x-bookmarks.jsonl',
@@ -152,6 +152,7 @@ test('getBookmarkStatusView includes classification progress and live lock info'
       pid: process.pid,
       kind: 'classify',
       startedAt: '2026-04-05T12:35:00Z',
+      processStartedAt: new Date(Math.floor((Date.now() - (process.uptime() * 1000)) / 1000) * 1000).toISOString(),
     });
 
     const view = await getBookmarkStatusView();

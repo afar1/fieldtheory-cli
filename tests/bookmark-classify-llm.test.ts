@@ -44,6 +44,23 @@ test('withClassificationLock rejects a second concurrent classify run', async ()
   }
 });
 
+test('withClassificationLock preserves callback errors even when they carry EEXIST', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-lock-'));
+  process.env.FT_DATA_DIR = tmpDir;
+
+  try {
+    const error = Object.assign(new Error('boom'), { code: 'EEXIST' });
+    await assert.rejects(
+      () => withClassificationLock('classify', async () => { throw error; }),
+      (caught: unknown) => caught === error,
+    );
+    assert.equal(readClassificationLock(), null);
+  } finally {
+    delete process.env.FT_DATA_DIR;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('readClassificationLock leaves a freshly malformed lock file in place', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-lock-'));
   process.env.FT_DATA_DIR = tmpDir;
@@ -89,6 +106,27 @@ test('readClassificationLock removes malformed lock files only after the grace w
     fs.writeFileSync(lockPath, '{\n', 'utf8');
     const staleTime = new Date(Date.now() - 10_000);
     fs.utimesSync(lockPath, staleTime, staleTime);
+
+    assert.equal(readClassificationLock(), null);
+    assert.equal(fs.existsSync(lockPath), false);
+  } finally {
+    delete process.env.FT_DATA_DIR;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('readClassificationLock removes stale locks when pid was recycled', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-lock-'));
+  process.env.FT_DATA_DIR = tmpDir;
+
+  try {
+    const lockPath = classificationLockPath();
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: process.pid,
+      kind: 'classify',
+      startedAt: '2026-04-16T00:00:00.000Z',
+      processStartedAt: '2000-01-01T00:00:00.000Z',
+    }), 'utf8');
 
     assert.equal(readClassificationLock(), null);
     assert.equal(fs.existsSync(lockPath), false);
