@@ -20,6 +20,11 @@ export interface ClassificationLock {
   startedAt: string;
 }
 
+type ClassificationLockReadResult =
+  | { state: 'missing' }
+  | { state: 'initializing' }
+  | { state: 'active'; lock: ClassificationLock };
+
 interface UnclassifiedBookmark {
   id: string;
   text: string;
@@ -116,6 +121,8 @@ export interface LlmClassifyResult {
   batches: number;
 }
 
+const CLASSIFICATION_LOCK_PARSE_GRACE_MS = 5_000;
+
 function isProcessAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -126,9 +133,9 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-export function readClassificationLock(): ClassificationLock | null {
+function readClassificationLockState(): ClassificationLockReadResult {
   const lockPath = classificationLockPath();
-  if (!fs.existsSync(lockPath)) return null;
+  if (!fs.existsSync(lockPath)) return { state: 'missing' };
 
   try {
     const raw = JSON.parse(fs.readFileSync(lockPath, 'utf8')) as Partial<ClassificationLock>;
@@ -137,24 +144,40 @@ export function readClassificationLock(): ClassificationLock | null {
       (raw.kind !== 'classify' && raw.kind !== 'classify-domains') ||
       typeof raw.startedAt !== 'string'
     ) {
+      const ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
+      if (ageMs <= CLASSIFICATION_LOCK_PARSE_GRACE_MS) {
+        return { state: 'initializing' };
+      }
       fs.rmSync(lockPath, { force: true });
-      return null;
+      return { state: 'missing' };
     }
 
     if (!isProcessAlive(raw.pid)) {
       fs.rmSync(lockPath, { force: true });
-      return null;
+      return { state: 'missing' };
     }
 
     return {
-      pid: raw.pid,
-      kind: raw.kind,
-      startedAt: raw.startedAt,
+      state: 'active',
+      lock: {
+        pid: raw.pid,
+        kind: raw.kind,
+        startedAt: raw.startedAt,
+      },
     };
   } catch {
+    const ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
+    if (ageMs <= CLASSIFICATION_LOCK_PARSE_GRACE_MS) {
+      return { state: 'initializing' };
+    }
     fs.rmSync(lockPath, { force: true });
-    return null;
+    return { state: 'missing' };
   }
+}
+
+export function readClassificationLock(): ClassificationLock | null {
+  const result = readClassificationLockState();
+  return result.state === 'active' ? result.lock : null;
 }
 
 function removeClassificationLock(lock: ClassificationLock): void {
@@ -197,9 +220,12 @@ export async function withClassificationLock<T>(
         throw error;
       }
 
-      const existing = readClassificationLock();
-      if (existing) {
-        throw new Error(`Classification already running (${existing.kind}, pid ${existing.pid})`);
+      const existing = readClassificationLockState();
+      if (existing.state === 'active') {
+        throw new Error(`Classification already running (${existing.lock.kind}, pid ${existing.lock.pid})`);
+      }
+      if (existing.state === 'initializing') {
+        throw new Error('Classification already running (lock file initializing)');
       }
 
       fs.rmSync(classificationLockPath(), { force: true });
