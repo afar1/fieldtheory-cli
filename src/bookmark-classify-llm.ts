@@ -6,12 +6,19 @@
  * No API keys needed. No local models. Just a logged-in Claude or Codex CLI.
  */
 
+import fs from 'node:fs';
 import { openDb, saveDb } from './db.js';
-import { twitterBookmarksIndexPath } from './paths.js';
+import { classificationLockPath, ensureDataDir, twitterBookmarksIndexPath } from './paths.js';
 import type { ResolvedEngine } from './engine.js';
 import { invokeEngine } from './engine.js';
 
 const BATCH_SIZE = 50;
+
+export interface ClassificationLock {
+  pid: number;
+  kind: 'classify' | 'classify-domains';
+  startedAt: string;
+}
 
 interface UnclassifiedBookmark {
   id: string;
@@ -107,6 +114,101 @@ export interface LlmClassifyResult {
   classified: number;
   failed: number;
   batches: number;
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function readClassificationLock(): ClassificationLock | null {
+  const lockPath = classificationLockPath();
+  if (!fs.existsSync(lockPath)) return null;
+
+  try {
+    const raw = JSON.parse(fs.readFileSync(lockPath, 'utf8')) as Partial<ClassificationLock>;
+    if (
+      typeof raw.pid !== 'number' ||
+      (raw.kind !== 'classify' && raw.kind !== 'classify-domains') ||
+      typeof raw.startedAt !== 'string'
+    ) {
+      fs.rmSync(lockPath, { force: true });
+      return null;
+    }
+
+    if (!isProcessAlive(raw.pid)) {
+      fs.rmSync(lockPath, { force: true });
+      return null;
+    }
+
+    return {
+      pid: raw.pid,
+      kind: raw.kind,
+      startedAt: raw.startedAt,
+    };
+  } catch {
+    fs.rmSync(lockPath, { force: true });
+    return null;
+  }
+}
+
+function removeClassificationLock(lock: ClassificationLock): void {
+  const current = readClassificationLock();
+  if (
+    current?.pid === lock.pid &&
+    current.kind === lock.kind &&
+    current.startedAt === lock.startedAt
+  ) {
+    fs.rmSync(classificationLockPath(), { force: true });
+  }
+}
+
+function tryWriteClassificationLock(lock: ClassificationLock): void {
+  ensureDataDir();
+  const fd = fs.openSync(classificationLockPath(), 'wx', 0o600);
+  try {
+    fs.writeFileSync(fd, `${JSON.stringify(lock, null, 2)}\n`, 'utf8');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+export async function withClassificationLock<T>(
+  kind: 'classify' | 'classify-domains',
+  fn: () => Promise<T>,
+): Promise<T> {
+  const lock: ClassificationLock = {
+    pid: process.pid,
+    kind,
+    startedAt: new Date().toISOString(),
+  };
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      tryWriteClassificationLock(lock);
+      return await fn();
+    } catch (error: any) {
+      if (error?.code !== 'EEXIST') {
+        throw error;
+      }
+
+      const existing = readClassificationLock();
+      if (existing) {
+        throw new Error(`Classification already running (${existing.kind}, pid ${existing.pid})`);
+      }
+
+      fs.rmSync(classificationLockPath(), { force: true });
+    } finally {
+      removeClassificationLock(lock);
+    }
+  }
+
+  throw new Error('Unable to acquire classification lock');
 }
 
 export async function classifyWithLlm(

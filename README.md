@@ -95,7 +95,7 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 |---------|-------------|
 | `ft index` | Rebuild search index from JSONL cache (preserves classifications) |
 | `ft fetch-media` | Download media assets (static images only) |
-| `ft status` | Show sync status and data location |
+| `ft status` | Show sync status, classification progress, and data location |
 | `ft path` | Print data directory path |
 
 ## Agent integration

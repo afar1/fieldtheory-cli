@@ -1,5 +1,6 @@
 import { getTwitterBookmarksStatus, latestBookmarkSyncAt } from './bookmarks.js';
-import { buildIndex } from './bookmarks-db.js';
+import { readClassificationLock, type ClassificationLock } from './bookmark-classify-llm.js';
+import { buildIndex, getClassificationProgress } from './bookmarks-db.js';
 import { loadTwitterOAuthToken } from './xauth.js';
 import { syncBookmarksGraphQL, type SyncProgress } from './graphql-bookmarks.js';
 
@@ -14,6 +15,9 @@ export interface BookmarkEnableResult {
 export interface BookmarkStatusView {
   connected: boolean;
   bookmarkCount: number;
+  categoriesDone: number;
+  domainsDone: number;
+  classificationJob: ClassificationLock | null;
   lastUpdated: string | null;
   mode: string;
   cachePath: string;
@@ -49,9 +53,13 @@ export async function enableBookmarks(): Promise<BookmarkEnableResult> {
 export async function getBookmarkStatusView(): Promise<BookmarkStatusView> {
   const token = await loadTwitterOAuthToken();
   const status = await getTwitterBookmarksStatus();
+  const progress = await getClassificationProgress();
   return {
     connected: Boolean(token?.access_token),
     bookmarkCount: status.totalBookmarks,
+    categoriesDone: progress.categoriesDone,
+    domainsDone: progress.domainsDone,
+    classificationJob: readClassificationLock(),
     lastUpdated: latestBookmarkSyncAt(status),
     mode: token?.access_token ? 'Incremental by default (GraphQL + API available)' : 'Incremental by default (GraphQL)',
     cachePath: status.cachePath,
@@ -62,6 +70,11 @@ export function formatBookmarkStatus(view: BookmarkStatusView): string {
   return [
     'Bookmarks',
     `  bookmarks: ${view.bookmarkCount}`,
+    `  categories: ${view.categoriesDone}/${view.bookmarkCount}`,
+    `  domains: ${view.domainsDone}/${view.bookmarkCount}`,
+    ...(view.classificationJob
+      ? [`  classification: running (${view.classificationJob.kind}, pid ${view.classificationJob.pid})`]
+      : []),
     `  last updated: ${view.lastUpdated ?? 'never'}`,
     `  sync mode: ${view.mode}`,
     `  cache: ${view.cachePath}`,
@@ -69,5 +82,8 @@ export function formatBookmarkStatus(view: BookmarkStatusView): string {
 }
 
 export function formatBookmarkSummary(view: BookmarkStatusView): string {
-  return `bookmarks=${view.bookmarkCount} updated=${view.lastUpdated ?? 'never'} mode="${view.mode}"`;
+  const classification = view.classificationJob
+    ? ` classification=${view.classificationJob.kind}:${view.classificationJob.pid}`
+    : '';
+  return `bookmarks=${view.bookmarkCount} categories=${view.categoriesDone}/${view.bookmarkCount} domains=${view.domainsDone}/${view.bookmarkCount}${classification} updated=${view.lastUpdated ?? 'never'} mode="${view.mode}"`;
 }

@@ -21,7 +21,7 @@ import {
   getBookmarkById,
 } from './bookmarks-db.js';
 import { formatClassificationSummary } from './bookmark-classify.js';
-import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm.js';
+import { classifyWithLlm, classifyDomainsWithLlm, withClassificationLock } from './bookmark-classify-llm.js';
 import { resolveEngine, detectAvailableEngines } from './engine.js';
 import { loadPreferences, savePreferences } from './preferences.js';
 import { compileMd } from './md.js';
@@ -435,35 +435,36 @@ export function buildCli() {
 
   async function classifyNew(override?: string): Promise<void> {
     const engine = await resolveEngine({ override });
+    await withClassificationLock('classify', async () => {
+      const start = Date.now();
+      process.stderr.write('  Classifying new bookmarks (categories)...\n');
+      const catResult = await classifyWithLlm({
+        engine,
+        onBatch: (done: number, total: number) => {
+          const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+          const elapsed = Math.round((Date.now() - start) / 1000);
+          process.stderr.write(`  Categories: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
+        },
+      });
+      if (catResult.classified > 0) {
+        process.stderr.write(`  \u2713 ${catResult.classified} categorized\n`);
+      }
 
-    const start = Date.now();
-    process.stderr.write('  Classifying new bookmarks (categories)...\n');
-    const catResult = await classifyWithLlm({
-      engine,
-      onBatch: (done: number, total: number) => {
-        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-        const elapsed = Math.round((Date.now() - start) / 1000);
-        process.stderr.write(`  Categories: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
-      },
+      const domStart = Date.now();
+      process.stderr.write('  Classifying new bookmarks (domains)...\n');
+      const domResult = await classifyDomainsWithLlm({
+        engine,
+        all: false,
+        onBatch: (done: number, total: number) => {
+          const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+          const elapsed = Math.round((Date.now() - domStart) / 1000);
+          process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
+        },
+      });
+      if (domResult.classified > 0) {
+        process.stderr.write(`  \u2713 ${domResult.classified} domains assigned\n`);
+      }
     });
-    if (catResult.classified > 0) {
-      process.stderr.write(`  \u2713 ${catResult.classified} categorized\n`);
-    }
-
-    const domStart = Date.now();
-    process.stderr.write('  Classifying new bookmarks (domains)...\n');
-    const domResult = await classifyDomainsWithLlm({
-      engine,
-      all: false,
-      onBatch: (done: number, total: number) => {
-        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-        const elapsed = Math.round((Date.now() - domStart) / 1000);
-        process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
-      },
-    });
-    if (domResult.classified > 0) {
-      process.stderr.write(`  \u2713 ${domResult.classified} domains assigned\n`);
-    }
   }
 
   program
@@ -976,32 +977,33 @@ export function buildCli() {
         console.log(formatClassificationSummary(result.summary));
       } else {
         const engine = await resolveEngine({ override: options.engine ? String(options.engine) : undefined });
+        await withClassificationLock('classify', async () => {
+          let catStart = Date.now();
+          process.stderr.write('Classifying categories with LLM (batches of 50, ~2 min per batch)...\n');
+          const catResult = await classifyWithLlm({
+            engine,
+            onBatch: (done: number, total: number) => {
+              const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+              const elapsed = Math.round((Date.now() - catStart) / 1000);
+              process.stderr.write(`  Categories: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
+            },
+          });
+          console.log(`\nEngine: ${catResult.engine}`);
+          console.log(`Categories: ${catResult.classified}/${catResult.totalUnclassified} classified`);
 
-        let catStart = Date.now();
-        process.stderr.write('Classifying categories with LLM (batches of 50, ~2 min per batch)...\n');
-        const catResult = await classifyWithLlm({
-          engine,
-          onBatch: (done: number, total: number) => {
-            const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-            const elapsed = Math.round((Date.now() - catStart) / 1000);
-            process.stderr.write(`  Categories: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
-          },
+          let domStart = Date.now();
+          process.stderr.write('\nClassifying domains with LLM (batches of 50, ~2 min per batch)...\n');
+          const domResult = await classifyDomainsWithLlm({
+            engine,
+            all: false,
+            onBatch: (done: number, total: number) => {
+              const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+              const elapsed = Math.round((Date.now() - domStart) / 1000);
+              process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
+            },
+          });
+          console.log(`\nDomains: ${domResult.classified}/${domResult.totalUnclassified} classified`);
         });
-        console.log(`\nEngine: ${catResult.engine}`);
-        console.log(`Categories: ${catResult.classified}/${catResult.totalUnclassified} classified`);
-
-        let domStart = Date.now();
-        process.stderr.write('\nClassifying domains with LLM (batches of 50, ~2 min per batch)...\n');
-        const domResult = await classifyDomainsWithLlm({
-          engine,
-          all: false,
-          onBatch: (done: number, total: number) => {
-            const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-            const elapsed = Math.round((Date.now() - domStart) / 1000);
-            process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
-          },
-        });
-        console.log(`\nDomains: ${domResult.classified}/${domResult.totalUnclassified} classified`);
       }
     }));
 
@@ -1015,18 +1017,20 @@ export function buildCli() {
     .action(safe(async (options) => {
       if (!requireData()) return;
       const engine = await resolveEngine({ override: options.engine ? String(options.engine) : undefined });
-      const start = Date.now();
-      process.stderr.write('Classifying bookmark domains with LLM (batches of 50, ~2 min per batch)...\n');
-      const result = await classifyDomainsWithLlm({
-        engine,
-        all: options.all ?? false,
-        onBatch: (done: number, total: number) => {
-          const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-          const elapsed = Math.round((Date.now() - start) / 1000);
-          process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
-        },
+      await withClassificationLock('classify-domains', async () => {
+        const start = Date.now();
+        process.stderr.write('Classifying bookmark domains with LLM (batches of 50, ~2 min per batch)...\n');
+        const result = await classifyDomainsWithLlm({
+          engine,
+          all: options.all ?? false,
+          onBatch: (done: number, total: number) => {
+            const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+            const elapsed = Math.round((Date.now() - start) / 1000);
+            process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
+          },
+        });
+        console.log(`\nDomains: ${result.classified}/${result.totalUnclassified} classified`);
       });
-      console.log(`\nDomains: ${result.classified}/${result.totalUnclassified} classified`);
     }));
 
   // ── model ───────────────────────────────────────────────────────────────

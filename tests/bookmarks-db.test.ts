@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, sanitizeFtsQuery, getCategoryCounts, sampleByCategory } from '../src/bookmarks-db.js';
+import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, sanitizeFtsQuery, getCategoryCounts, sampleByCategory, getClassificationProgress } from '../src/bookmarks-db.js';
 import { openDb, saveDb } from '../src/db.js';
 import { twitterBookmarksIndexPath } from '../src/paths.js';
 
@@ -127,6 +127,39 @@ test('getStats returns correct aggregate data', async () => {
     assert.equal(stats.topAuthors[0].count, 2);
     assert.equal(stats.languageBreakdown[0].language, 'en');
     assert.equal(stats.languageBreakdown[0].count, 3);
+  });
+});
+
+test('getClassificationProgress counts completed categories and domains', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+
+    const dbPath = twitterBookmarksIndexPath();
+    const db = await openDb(dbPath);
+    try {
+      db.run(
+        `UPDATE bookmarks
+         SET categories = ?, primary_category = ?, domains = ?, primary_domain = ?
+         WHERE id = ?`,
+        ['tool', 'tool', 'ai', 'ai', '1'],
+      );
+      db.run(
+        `UPDATE bookmarks
+         SET categories = ?, primary_category = ?
+         WHERE id = ?`,
+        ['research', 'research', '2'],
+      );
+      saveDb(db, dbPath);
+    } finally {
+      db.close();
+    }
+
+    const progress = await getClassificationProgress();
+    assert.deepEqual(progress, {
+      total: 3,
+      categoriesDone: 2,
+      domainsDone: 1,
+    });
   });
 });
 
