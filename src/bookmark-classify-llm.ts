@@ -130,6 +130,11 @@ function toIsoSecond(timestampMs: number): string {
   return new Date(Math.floor(timestampMs / 1000) * 1000).toISOString();
 }
 
+function normalizeProcessStartedAt(value: string): string | null {
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : toIsoSecond(parsed);
+}
+
 function currentProcessStartedAt(): string {
   return toIsoSecond(Date.now() - (process.uptime() * 1000));
 }
@@ -167,7 +172,7 @@ function processStartedAt(pid: number): string | null {
             ['-NonInteractive', '-NoProfile', '-Command', script],
             { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true },
           ).trim();
-          if (output) return output;
+          if (output) return normalizeProcessStartedAt(output);
         } catch {
           continue;
         }
@@ -180,9 +185,7 @@ function processStartedAt(pid: number): string | null {
       ['-p', String(pid), '-o', 'lstart='],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
     ).trim();
-    if (!output) return null;
-    const parsed = Date.parse(output);
-    return Number.isNaN(parsed) ? null : toIsoSecond(parsed);
+    return output ? normalizeProcessStartedAt(output) : null;
   } catch {
     return null;
   }
@@ -198,34 +201,64 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+function removeLockFileIfContentsMatch(lockPath: string, expectedContents: string): void {
+  try {
+    if (fs.readFileSync(lockPath, 'utf8') !== expectedContents) {
+      return;
+    }
+    fs.rmSync(lockPath, { force: true });
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+}
+
 function readClassificationLockState(): ClassificationLockReadResult {
   const lockPath = classificationLockPath();
   if (!fs.existsSync(lockPath)) return { state: 'missing' };
 
+  let contents: string;
   try {
-    const raw = JSON.parse(fs.readFileSync(lockPath, 'utf8')) as Partial<ClassificationLock>;
+    contents = fs.readFileSync(lockPath, 'utf8');
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') {
+      return { state: 'missing' };
+    }
+    throw error;
+  }
+
+  try {
+    const raw = JSON.parse(contents) as Partial<ClassificationLock>;
+    const normalizedProcessStartedAt = typeof raw.processStartedAt === 'string'
+      ? normalizeProcessStartedAt(raw.processStartedAt)
+      : null;
     if (
       typeof raw.pid !== 'number' ||
       (raw.kind !== 'classify' && raw.kind !== 'classify-domains') ||
       typeof raw.startedAt !== 'string' ||
-      typeof raw.processStartedAt !== 'string'
+      normalizedProcessStartedAt === null
     ) {
       const ageMs = safeLockAgeMs(lockPath);
-      if (ageMs !== null && ageMs <= CLASSIFICATION_LOCK_PARSE_GRACE_MS) {
+      if (ageMs === null) {
+        return { state: 'missing' };
+      }
+      if (ageMs <= CLASSIFICATION_LOCK_PARSE_GRACE_MS) {
         return { state: 'initializing' };
       }
-      fs.rmSync(lockPath, { force: true });
+      removeLockFileIfContentsMatch(lockPath, contents);
       return { state: 'missing' };
     }
 
     if (!isProcessAlive(raw.pid)) {
-      fs.rmSync(lockPath, { force: true });
+      removeLockFileIfContentsMatch(lockPath, contents);
       return { state: 'missing' };
     }
 
     const liveProcessStartedAt = processStartedAt(raw.pid);
-    if (liveProcessStartedAt && liveProcessStartedAt !== raw.processStartedAt) {
-      fs.rmSync(lockPath, { force: true });
+    if (liveProcessStartedAt && liveProcessStartedAt !== normalizedProcessStartedAt) {
+      removeLockFileIfContentsMatch(lockPath, contents);
       return { state: 'missing' };
     }
 
@@ -235,15 +268,18 @@ function readClassificationLockState(): ClassificationLockReadResult {
         pid: raw.pid,
         kind: raw.kind,
         startedAt: raw.startedAt,
-        processStartedAt: raw.processStartedAt,
+        processStartedAt: normalizedProcessStartedAt,
       },
     };
   } catch {
     const ageMs = safeLockAgeMs(lockPath);
-    if (ageMs !== null && ageMs <= CLASSIFICATION_LOCK_PARSE_GRACE_MS) {
+    if (ageMs === null) {
+      return { state: 'missing' };
+    }
+    if (ageMs <= CLASSIFICATION_LOCK_PARSE_GRACE_MS) {
       return { state: 'initializing' };
     }
-    fs.rmSync(lockPath, { force: true });
+    removeLockFileIfContentsMatch(lockPath, contents);
     return { state: 'missing' };
   }
 }
@@ -301,7 +337,6 @@ export async function withClassificationLock<T>(
         throw new Error('Classification already running (lock file initializing)');
       }
 
-      fs.rmSync(classificationLockPath(), { force: true });
       continue;
     }
 

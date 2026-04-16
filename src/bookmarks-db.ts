@@ -938,7 +938,17 @@ export async function getCategoryCounts(existingDb?: Database): Promise<Record<s
 
 export async function getClassificationProgress(): Promise<BookmarkClassificationProgress> {
   const dbPath = twitterBookmarksIndexPath();
-  const db = await openDb(dbPath);
+  let db: Database;
+  try {
+    db = await openDb(dbPath);
+  } catch {
+    return {
+      total: 0,
+      categoriesDone: 0,
+      domainsDone: 0,
+    };
+  }
+
   try {
     ensureMigrations(db);
     const row = db.exec(

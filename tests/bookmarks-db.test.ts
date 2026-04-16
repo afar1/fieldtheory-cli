@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -159,6 +160,20 @@ test('getClassificationProgress counts completed categories and domains', async 
       total: 3,
       categoriesDone: 2,
       domainsDone: 1,
+    });
+  });
+});
+
+test('getClassificationProgress returns zeros when the index cannot be opened', async () => {
+  await withIsolatedDataDir(async () => {
+    const dbPath = twitterBookmarksIndexPath();
+    fs.writeFileSync(dbPath, 'not a sqlite database', 'utf8');
+
+    const progress = await getClassificationProgress();
+    assert.deepEqual(progress, {
+      total: 0,
+      categoriesDone: 0,
+      domainsDone: 0,
     });
   });
 });

@@ -13,6 +13,7 @@ test('formatBookmarkStatus produces human-readable summary', () => {
   const text = formatBookmarkStatus({
     connected: true,
     bookmarkCount: 99,
+    classificationTotal: 80,
     categoriesDone: 12,
     domainsDone: 34,
     classificationJob: { pid: 17169, kind: 'classify-domains', startedAt: '2026-03-28T17:20:00Z', processStartedAt: '2026-03-28T17:19:30Z' },
@@ -23,8 +24,8 @@ test('formatBookmarkStatus produces human-readable summary', () => {
 
   assert.match(text, /^Bookmarks/);
   assert.match(text, /bookmarks: 99/);
-  assert.match(text, /categories: 12\/99/);
-  assert.match(text, /domains: 34\/99/);
+  assert.match(text, /categories: 12\/80/);
+  assert.match(text, /domains: 34\/80/);
   assert.match(text, /classification: running \(classify-domains, pid 17169\)/);
   assert.match(text, /last updated: 2026-03-28T17:23:00Z/);
   assert.match(text, /sync mode: Incremental by default \(GraphQL \+ API available\)/);
@@ -36,6 +37,7 @@ test('formatBookmarkStatus shows never when no lastUpdated', () => {
   const text = formatBookmarkStatus({
     connected: false,
     bookmarkCount: 0,
+    classificationTotal: 0,
     categoriesDone: 0,
     domainsDone: 0,
     classificationJob: null,
@@ -51,6 +53,7 @@ test('formatBookmarkSummary produces concise operator-friendly output', () => {
   const text = formatBookmarkSummary({
     connected: true,
     bookmarkCount: 99,
+    classificationTotal: 80,
     categoriesDone: 12,
     domainsDone: 34,
     classificationJob: { pid: 17169, kind: 'classify-domains', startedAt: '2026-03-28T17:20:00Z', processStartedAt: '2026-03-28T17:19:30Z' },
@@ -60,8 +63,8 @@ test('formatBookmarkSummary produces concise operator-friendly output', () => {
   });
 
   assert.match(text, /bookmarks=99/);
-  assert.match(text, /categories=12\/99/);
-  assert.match(text, /domains=34\/99/);
+  assert.match(text, /categories=12\/80/);
+  assert.match(text, /domains=34\/80/);
   assert.match(text, /classification=classify-domains:17169/);
   assert.match(text, /updated=2026-03-28T17:23:00Z/);
   assert.match(text, /mode="API sync"/);
@@ -83,6 +86,7 @@ test('getBookmarkStatusView uses the most recent sync timestamp', async () => {
     const view = await getBookmarkStatusView();
 
     assert.equal(view.bookmarkCount, 3);
+    assert.equal(view.classificationTotal, 0);
     assert.equal(view.lastUpdated, '2026-04-05T12:34:56Z');
     assert.equal(view.connected, false);
   } finally {
@@ -158,6 +162,7 @@ test('getBookmarkStatusView includes classification progress and live lock info'
     const view = await getBookmarkStatusView();
 
     assert.equal(view.bookmarkCount, 2);
+    assert.equal(view.classificationTotal, 2);
     assert.equal(view.categoriesDone, 1);
     assert.equal(view.domainsDone, 1);
     assert.equal(view.classificationJob?.pid, process.pid);

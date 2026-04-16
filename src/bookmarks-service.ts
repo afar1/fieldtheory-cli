@@ -15,6 +15,7 @@ export interface BookmarkEnableResult {
 export interface BookmarkStatusView {
   connected: boolean;
   bookmarkCount: number;
+  classificationTotal: number;
   categoriesDone: number;
   domainsDone: number;
   classificationJob: ClassificationLock | null;
@@ -57,6 +58,7 @@ export async function getBookmarkStatusView(): Promise<BookmarkStatusView> {
   return {
     connected: Boolean(token?.access_token),
     bookmarkCount: status.totalBookmarks,
+    classificationTotal: progress.total,
     categoriesDone: progress.categoriesDone,
     domainsDone: progress.domainsDone,
     classificationJob: readClassificationLock(),
@@ -66,12 +68,17 @@ export async function getBookmarkStatusView(): Promise<BookmarkStatusView> {
   };
 }
 
+function classificationDenominator(view: BookmarkStatusView): number {
+  return view.classificationTotal;
+}
+
 export function formatBookmarkStatus(view: BookmarkStatusView): string {
+  const classificationTotal = classificationDenominator(view);
   return [
     'Bookmarks',
     `  bookmarks: ${view.bookmarkCount}`,
-    `  categories: ${view.categoriesDone}/${view.bookmarkCount}`,
-    `  domains: ${view.domainsDone}/${view.bookmarkCount}`,
+    `  categories: ${view.categoriesDone}/${classificationTotal}`,
+    `  domains: ${view.domainsDone}/${classificationTotal}`,
     ...(view.classificationJob
       ? [`  classification: running (${view.classificationJob.kind}, pid ${view.classificationJob.pid})`]
       : []),
@@ -82,8 +89,9 @@ export function formatBookmarkStatus(view: BookmarkStatusView): string {
 }
 
 export function formatBookmarkSummary(view: BookmarkStatusView): string {
+  const classificationTotal = classificationDenominator(view);
   const classification = view.classificationJob
     ? ` classification=${view.classificationJob.kind}:${view.classificationJob.pid}`
     : '';
-  return `bookmarks=${view.bookmarkCount} categories=${view.categoriesDone}/${view.bookmarkCount} domains=${view.domainsDone}/${view.bookmarkCount}${classification} updated=${view.lastUpdated ?? 'never'} mode="${view.mode}"`;
+  return `bookmarks=${view.bookmarkCount} categories=${view.categoriesDone}/${classificationTotal} domains=${view.domainsDone}/${classificationTotal}${classification} updated=${view.lastUpdated ?? 'never'} mode="${view.mode}"`;
 }
