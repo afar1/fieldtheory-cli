@@ -72,12 +72,72 @@ ${items}`;
 
 // ── Parse and validate response ─────────────────────────────────────────
 
+function extractBalancedArraySpan(raw: string, start: number): string | null {
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+
+  for (let i = start; i < raw.length; i += 1) {
+    const ch = raw[i];
+
+    if (escape) {
+      escape = false;
+      continue;
+    }
+
+    if (inString) {
+      if (ch === '\\') {
+        escape = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === '[') {
+      depth += 1;
+      continue;
+    }
+
+    if (ch === ']') {
+      depth -= 1;
+      if (depth === 0) return raw.slice(start, i + 1);
+    }
+  }
+
+  return null;
+}
+
+export function extractJsonArray(raw: string): string | null {
+  for (let start = raw.indexOf('['); start !== -1; start = raw.indexOf('[', start + 1)) {
+    const candidate = extractBalancedArraySpan(raw, start);
+    if (!candidate) return null;
+
+    try {
+      const parsed = JSON.parse(candidate);
+      const looksLikeObjectArray =
+        Array.isArray(parsed) &&
+        (parsed.length === 0 || parsed.some((item) => item != null && typeof item === 'object' && !Array.isArray(item)));
+      if (looksLikeObjectArray) return candidate;
+    } catch {
+      // Keep scanning for a later bracket span that is valid JSON.
+    }
+  }
+
+  return null;
+}
+
 function parseResponse(raw: string, batchIds: Set<string>): LlmClassification[] {
   // Extract JSON array from response (model might add markdown fences or commentary)
-  const jsonMatch = raw.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) throw new Error('No JSON array found in response');
+  const jsonArray = extractJsonArray(raw);
+  if (!jsonArray) throw new Error('No JSON array found in response');
 
-  const parsed = JSON.parse(jsonMatch[0]);
+  const parsed = JSON.parse(jsonArray);
   if (!Array.isArray(parsed)) throw new Error('Response is not an array');
 
   const results: LlmClassification[] = [];
