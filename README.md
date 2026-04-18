@@ -165,7 +165,7 @@ Use `ft classify` for LLM-powered classification that catches what regex misses.
 
 | Feature | macOS | Linux | Windows |
 |---------|-------|-------|---------|
-| Session sync (`ft sync`) | Chrome, Chromium, Brave, Helium, Comet, Firefox | Chrome, Chromium, Brave, Firefox | Chrome, Chromium, Brave, Firefox |
+| Session sync (`ft sync`) | Chrome, Chromium, Brave, Helium, Comet, Dia, Firefox | Chrome, Chromium, Brave, Firefox | Chrome, Chromium, Brave, Firefox |
 | OAuth API sync (`ft sync --api`) | Yes | Yes | Yes |
 | Search, list, classify, viz, wiki | Yes | Yes | Yes |
 
