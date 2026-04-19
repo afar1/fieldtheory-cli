@@ -186,6 +186,14 @@ function showCachedUpdateNotice(): void {
 // ── What's new ────────────────────────────────────────────────────────────
 
 const WHATS_NEW: Record<string, string[]> = {
+  '1.3.12': [
+    'ft md now exports correct ISO dates in bookmark filenames and frontmatter',
+    'ft sync --rebuild now refreshes existing caches without stopping early',
+    'ft classify-domains is more robust when the model adds bracketed commentary',
+    'Bookmark text now expands visible t.co links using display_url',
+    'ft sync now pauses cleanly on X rate limits and saves progress for ft sync --continue',
+    'Paused rebuilds no longer mark a full bookmark crawl as completed',
+  ],
   '1.3.11': [
     'ft md now exports correct ISO dates in bookmark filenames and frontmatter',
     'ft sync --rebuild now refreshes existing caches without stopping early',
