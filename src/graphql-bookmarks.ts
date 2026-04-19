@@ -743,11 +743,12 @@ export async function syncBookmarksGraphQL(
 
   const syncedAt = new Date().toISOString();
   const bookmarkedAtMissing = existing.filter((record) => !record.bookmarkedAt).length;
+  const completedFullSync = !incremental && stopReason === 'end of bookmarks';
   await writeJsonLines(cachePath, existing);
   await writeJson(metaPath, {
     provider: 'twitter',
     schemaVersion: 1,
-    lastFullSyncAt: incremental ? previousMeta?.lastFullSyncAt : syncedAt,
+    lastFullSyncAt: completedFullSync ? syncedAt : previousMeta?.lastFullSyncAt,
     lastIncrementalSyncAt: incremental ? syncedAt : previousMeta?.lastIncrementalSyncAt,
     totalBookmarks: existing.length,
   } satisfies BookmarkCacheMeta);

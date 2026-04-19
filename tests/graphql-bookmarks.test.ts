@@ -682,6 +682,12 @@ test('syncBookmarksGraphQL: rate limit stops cleanly and saves cursor for contin
     const originalFetch = globalThis.fetch;
     const originalSetTimeout = globalThis.setTimeout;
     let fetchCalls = 0;
+    await writeFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks-meta.json'), JSON.stringify({
+      provider: 'twitter',
+      schemaVersion: 1,
+      lastFullSyncAt: '2026-04-18T12:00:00.000Z',
+      totalBookmarks: existing.length,
+    }));
     globalThis.fetch = (async () => {
       fetchCalls += 1;
       if (fetchCalls === 1) {
@@ -718,6 +724,9 @@ test('syncBookmarksGraphQL: rate limit stops cleanly and saves cursor for contin
       const state = JSON.parse(await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks-backfill-state.json'), 'utf8'));
       assert.equal(state.stopReason, 'rate limited');
       assert.equal(state.lastCursor, 'cursor-2');
+
+      const meta = JSON.parse(await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks-meta.json'), 'utf8'));
+      assert.equal(meta.lastFullSyncAt, '2026-04-18T12:00:00.000Z');
     } finally {
       globalThis.fetch = originalFetch;
       globalThis.setTimeout = originalSetTimeout;
