@@ -17,6 +17,7 @@ import {
   applyFolderMirror,
   clearFolderEverywhere,
   formatSyncResult,
+  syncBookmarksGraphQL,
   syncGaps,
 } from '../src/graphql-bookmarks.js';
 import { buildIndex, getBookmarkById } from '../src/bookmarks-db.js';
@@ -189,6 +190,22 @@ test('convertTweetToRecord: extracts links, filtering out t.co', () => {
 
   assert.equal(result.links!.length, 1);
   assert.equal(result.links![0], 'https://example.com/article');
+});
+
+test('convertTweetToRecord: expands t.co links in visible text using display_url', () => {
+  const result = convertTweetToRecord(makeTweetResult({
+    legacy: {
+      full_text: 'Check this: https://t.co/abc and this: https://t.co/def',
+      entities: {
+        urls: [
+          { expanded_url: 'https://example.com/article', url: 'https://t.co/abc', display_url: 'example.com/foo' },
+          { expanded_url: 'https://tools.exec.security', url: 'https://t.co/def', display_url: 'tools.exec.security' },
+        ],
+      },
+    },
+  }), NOW)!;
+
+  assert.equal(result.text, 'Check this: example.com/foo and this: tools.exec.security');
 });
 
 test('convertTweetToRecord: handles location as object', () => {
@@ -579,6 +596,74 @@ test('syncGaps: transient failure does NOT stamp textExpandedAt so next run retr
       'transient failures must not mark the record so the next run can retry',
     );
   }, [truncated]);
+});
+
+test('syncBookmarksGraphQL: rebuild mode does not treat merged-only pages as stale', async () => {
+  const page1 = makeGraphQLResponse([
+    makeTweetResult({
+      rest_id: '1',
+      legacy: {
+        id_str: '1',
+        full_text: 'First existing bookmark',
+        created_at: 'Tue Mar 11 12:00:00 +0000 2026',
+      },
+    }),
+  ], 'cursor-2');
+  const page2 = makeGraphQLResponse([
+    makeTweetResult({
+      rest_id: '2',
+      legacy: {
+        id_str: '2',
+        full_text: 'Second existing bookmark',
+        created_at: 'Tue Mar 10 12:00:00 +0000 2026',
+      },
+    }),
+  ]);
+
+  const existing = [
+    makeRecord({
+      id: '1',
+      tweetId: '1',
+      text: 'First existing bookmark',
+      postedAt: 'Tue Mar 11 12:00:00 +0000 2026',
+    }),
+    makeRecord({
+      id: '2',
+      tweetId: '2',
+      text: 'Second existing bookmark',
+      postedAt: 'Tue Mar 10 12:00:00 +0000 2026',
+    }),
+  ];
+
+  await withIsolatedGapFillDataDir(async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      const body = fetchCalls === 0 ? page1 : page2;
+      fetchCalls += 1;
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    try {
+      const result = await syncBookmarksGraphQL({
+        incremental: false,
+        csrfToken: 'ct0',
+        cookieHeader: 'ct0=ct0; auth_token=auth',
+        delayMs: 0,
+        stalePageLimit: 1,
+      });
+
+      assert.equal(fetchCalls, 2);
+      assert.equal(result.pages, 2);
+      assert.equal(result.added, 0);
+      assert.equal(result.stopReason, 'end of bookmarks');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }, existing);
 });
 
 test('syncGaps: permanent quoted-tweet failure stamps quotedTweetFailedAt so reruns skip it', async () => {

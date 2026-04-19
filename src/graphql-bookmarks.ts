@@ -323,7 +323,12 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
 
   // X Articles / long-form note tweets store full text separately
   const noteTweetText = tweet?.note_tweet?.note_tweet_results?.result?.text;
-  const text = noteTweetText ?? legacy.full_text ?? legacy.text ?? '';
+  let text = noteTweetText ?? legacy.full_text ?? legacy.text ?? '';
+  for (const entity of urlEntities) {
+    if (typeof entity?.url === 'string' && typeof entity?.display_url === 'string') {
+      text = text.split(entity.url).join(entity.display_url);
+    }
+  }
 
   return {
     id: tweetId,
@@ -571,7 +576,7 @@ export async function syncBookmarksGraphQL(
     result.records.forEach((r) => allSeenIds.push(r.id));
     const reachedLatestStored = Boolean(newestKnownId) && result.records.some((record) => record.id === newestKnownId);
 
-    stalePages = added === 0 ? stalePages + 1 : 0;
+    stalePages = (incremental ? added === 0 : result.records.length === 0) ? stalePages + 1 : 0;
 
     options.onProgress?.({
       page,
