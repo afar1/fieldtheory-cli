@@ -113,6 +113,7 @@ export interface SyncResult {
   stopReason: string;
   cachePath: string;
   statePath: string;
+  retryAfterSec?: number;
 }
 
 function parseSnowflake(value?: string | null): bigint | null {
@@ -398,6 +399,35 @@ export function parseBookmarksResponse(json: any, now?: string): PageResult {
   return { records, nextCursor };
 }
 
+class RateLimitError extends Error {
+  constructor(message: string, readonly retryAfterSec?: number) {
+    super(message);
+    this.name = 'RateLimitError';
+  }
+}
+
+function parseRetryAfterSec(response: Response): number | undefined {
+  const retryAfter = response.headers.get('retry-after');
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds);
+
+    const resumeAt = Date.parse(retryAfter);
+    if (!Number.isNaN(resumeAt)) {
+      const secondsUntil = Math.ceil((resumeAt - Date.now()) / 1000);
+      if (secondsUntil > 0) return secondsUntil;
+    }
+  }
+
+  const resetAt = Number(response.headers.get('x-rate-limit-reset'));
+  if (Number.isFinite(resetAt) && resetAt > 0) {
+    const secondsUntil = Math.ceil(resetAt - Date.now() / 1000);
+    if (secondsUntil > 0) return secondsUntil;
+  }
+
+  return undefined;
+}
+
 async function fetchPageWithRetry(csrfToken: string, cursor?: string, cookieHeader?: string, pageSize?: number): Promise<PageResult> {
   let lastError: Error | undefined;
 
@@ -405,8 +435,9 @@ async function fetchPageWithRetry(csrfToken: string, cursor?: string, cookieHead
     const response = await fetch(buildUrl(cursor, pageSize), { headers: buildHeaders(csrfToken, cookieHeader) });
 
     if (response.status === 429) {
-      const waitSec = Math.min(15 * Math.pow(2, attempt), 120);
-      lastError = new Error(`Rate limited (429) on attempt ${attempt + 1}`);
+      const retryAfterSec = parseRetryAfterSec(response);
+      const waitSec = retryAfterSec ?? Math.min(15 * Math.pow(2, attempt), 120);
+      lastError = new RateLimitError(`Rate limited (429) on attempt ${attempt + 1}`, retryAfterSec);
       await new Promise((r) => setTimeout(r, waitSec * 1000));
       continue;
     }
@@ -555,6 +586,20 @@ export async function syncBookmarksGraphQL(
   let cursor: string | undefined = options.resumeCursor;
   const allSeenIds: string[] = [];
   let stopReason = 'unknown';
+  let retryAfterSec: number | undefined;
+
+  const fetchNextPage = async (): Promise<PageResult | undefined> => {
+    try {
+      return await fetchPageWithRetry(csrfToken, cursor, cookieHeader, pageSize);
+    } catch (error) {
+      if (error instanceof RateLimitError) {
+        stopReason = 'rate limited';
+        retryAfterSec = error.retryAfterSec;
+        return undefined;
+      }
+      throw error;
+    }
+  };
 
   while (page < maxPages) {
     if (Date.now() - started > maxMinutes * 60_000) {
@@ -562,7 +607,8 @@ export async function syncBookmarksGraphQL(
       break;
     }
 
-    const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader, pageSize);
+    const result = await fetchNextPage();
+    if (!result) break;
     page += 1;
 
     if (result.records.length === 0 && !result.nextCursor) {
@@ -624,6 +670,7 @@ export async function syncBookmarksGraphQL(
     !options.resumeCursor &&
     existing.length >= OLD_CAP_THRESHOLD &&
     !terminalStops.has(stopReason) &&
+    stopReason !== 'rate limited' &&
     cursor != null;
 
   if (shouldAutoContinue) {
@@ -651,7 +698,8 @@ export async function syncBookmarksGraphQL(
         break;
       }
 
-      const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader, pageSize);
+      const result = await fetchNextPage();
+      if (!result) break;
       page += 1;
 
       if (result.records.length === 0 && !result.nextCursor) {
@@ -733,6 +781,7 @@ export async function syncBookmarksGraphQL(
     stopReason,
     cachePath,
     statePath,
+    retryAfterSec,
   };
 }
 

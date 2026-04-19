@@ -666,6 +666,65 @@ test('syncBookmarksGraphQL: rebuild mode does not treat merged-only pages as sta
   }, existing);
 });
 
+test('syncBookmarksGraphQL: rate limit stops cleanly and saves cursor for continue', async () => {
+  const page1 = makeGraphQLResponse([makeTweetResult()], 'cursor-2');
+
+  const existing = [
+    makeRecord({
+      id: '1234567890',
+      tweetId: '1234567890',
+      text: 'Existing bookmark',
+      postedAt: 'Tue Mar 10 12:00:00 +0000 2026',
+    }),
+  ];
+
+  await withIsolatedGapFillDataDir(async () => {
+    const originalFetch = globalThis.fetch;
+    const originalSetTimeout = globalThis.setTimeout;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      if (fetchCalls === 1) {
+        return new Response(JSON.stringify(page1), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('', {
+        status: 429,
+        headers: { 'retry-after': '1' },
+      });
+    }) as typeof fetch;
+    globalThis.setTimeout = (((handler: TimerHandler, _timeout?: number, ...args: any[]) => {
+      if (typeof handler === 'function') handler(...args);
+      return 0 as any;
+    }) as typeof setTimeout);
+
+    try {
+      const result = await syncBookmarksGraphQL({
+        incremental: false,
+        csrfToken: 'ct0',
+        cookieHeader: 'ct0=ct0; auth_token=auth',
+        delayMs: 0,
+        stalePageLimit: 1,
+      });
+
+      assert.equal(fetchCalls, 5);
+      assert.equal(result.pages, 1);
+      assert.equal(result.added, 0);
+      assert.equal(result.stopReason, 'rate limited');
+      assert.equal(result.retryAfterSec, 1);
+
+      const state = JSON.parse(await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks-backfill-state.json'), 'utf8'));
+      assert.equal(state.stopReason, 'rate limited');
+      assert.equal(state.lastCursor, 'cursor-2');
+    } finally {
+      globalThis.fetch = originalFetch;
+      globalThis.setTimeout = originalSetTimeout;
+    }
+  }, existing);
+});
+
 test('syncGaps: permanent quoted-tweet failure stamps quotedTweetFailedAt so reruns skip it', async () => {
   const deadQuoted: BookmarkRecord = {
     id: '222',

@@ -37,7 +37,7 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 |---------|-------------|
 | `ft sync` | Download and sync bookmarks (no API required) |
 | `ft sync --rebuild` | Full re-crawl of all bookmarks |
-| `ft sync --continue` | Resume an interrupted sync from the saved cursor |
+| `ft sync --continue` | Resume a paused or interrupted sync from the saved cursor |
 | `ft sync --gaps` | Backfill quoted tweets, expand truncated articles, enrich linked article content |
 | `ft sync --folders` | Also sync X bookmark folder tags (read-only mirror of X state) |
 | `ft sync --folder <name>` | Sync a single folder by name (exact or unambiguous prefix) |

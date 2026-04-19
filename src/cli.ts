@@ -92,12 +92,21 @@ const FRIENDLY_STOP_REASONS: Record<string, string> = {
   'end of bookmarks': 'Sync complete \u2014 all bookmarks fetched.',
   'max runtime reached': 'Paused after 30 minutes. Run again to continue.',
   'max pages reached': 'Paused after reaching page limit. Run again to continue.',
+  'rate limited': 'Paused by X rate limiting.',
   'target additions reached': 'Reached target bookmark count.',
 };
 
 function friendlyStopReason(raw?: string): string {
   if (!raw) return 'Sync complete.';
   return FRIENDLY_STOP_REASONS[raw] ?? `Sync complete \u2014 ${raw}`;
+}
+
+function formatRetryAfter(seconds?: number): string | undefined {
+  if (!seconds || seconds <= 0) return undefined;
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
 }
 
 function warnIfEmpty(totalBookmarks: number): void {
@@ -712,6 +721,14 @@ export function buildCli() {
 
           console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
           console.log(`  ${friendlyStopReason(result.stopReason)}`);
+          if (result.stopReason === 'rate limited') {
+            const retryAfter = formatRetryAfter(result.retryAfterSec);
+            if (retryAfter) {
+              console.log(`  Retry after about ${retryAfter}, then resume with: ft sync --continue`);
+            } else {
+              console.log('  Resume with: ft sync --continue');
+            }
+          }
           if (result.bookmarkedAtRepaired > 0) {
             console.log(`  \u2713 ${result.bookmarkedAtRepaired} invalid bookmark dates cleared`);
           }
