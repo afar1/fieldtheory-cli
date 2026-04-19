@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, copyFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, copyFileSync, mkdtempSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { tmpdir, platform } from 'node:os';
+import { tmpdir, platform, homedir } from 'node:os';
 import { createRequire } from 'node:module';
 import type { ChromeCookieResult } from './chrome-cookies.js';
 import { getBrowser, browserUserDataDir } from './browsers.js';
@@ -64,64 +64,189 @@ export function ensureFirefoxCookieBackendAvailable(
 
 // ── Profile detection ────────────────────────────────────────────────────────
 
-function firefoxBaseDir(): string {
-  const dir = browserUserDataDir(getBrowser('firefox'));
-  if (dir) return dir;
+interface FirefoxProfileEntry {
+  name: string | null;
+  path: string;
+  isRelative: boolean;
+  isDefault: boolean;
+  installDefault: boolean;
+}
+
+interface FirefoxProfileCandidate {
+  dir: string;
+  name: string | null;
+  isDefault: boolean;
+  installDefault: boolean;
+  modifiedMs: number;
+}
+
+const FIREFOX_EXTRA_ROOTS: Record<string, string[]> = {
+  darwin: [],
+  linux: [
+    '.config/mozilla/firefox',
+    'snap/firefox/common/.mozilla/firefox',
+    '.var/app/org.mozilla.firefox/.mozilla/firefox',
+  ],
+  win32: [],
+};
+
+function firefoxBaseDirs(): string[] {
+  const os = platform();
+  const home = homedir();
+  const browserDir = browserUserDataDir(getBrowser('firefox'));
+  const extraRoots = (FIREFOX_EXTRA_ROOTS[os] ?? []).map((relative) => join(home, relative));
+  const candidates = [browserDir, ...extraRoots].filter((value): value is string => Boolean(value));
+  if (candidates.length > 0) return [...new Set(candidates)];
+
   throw new Error(
-    `Firefox cookie extraction is not supported on this platform (detected: ${platform()}).\n` +
+    `Firefox cookie extraction is not supported on this platform (detected: ${os}).\n` +
     'Pass cookies manually:  ft sync --cookies <ct0> <auth_token>'
   );
 }
 
-export function detectFirefoxProfileDir(): string {
-  const base = firefoxBaseDir();
-  const iniPath = join(base, 'profiles.ini');
+function parseFirefoxProfilesIni(ini: string): FirefoxProfileEntry[] {
+  const sections = ini
+    .split(/\r?\n(?=\[)/)
+    .map((section) => section.trim())
+    .filter(Boolean);
 
-  if (!existsSync(iniPath)) {
-    throw new Error(
-      'Firefox profiles.ini not found.\n' +
-      `Is Firefox installed? Expected: ${iniPath}`
-    );
+  const installDefaults = new Set<string>();
+  const profiles: FirefoxProfileEntry[] = [];
+
+  for (const section of sections) {
+    const lines = section.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const header = lines[0]?.match(/^\[([^\]]+)\]$/)?.[1] ?? null;
+    if (!header) continue;
+
+    const values: Record<string, string> = {};
+    for (const line of lines.slice(1)) {
+      if (line.startsWith(';')) continue;
+      const equals = line.indexOf('=');
+      if (equals <= 0) continue;
+      values[line.slice(0, equals).trim()] = line.slice(equals + 1).trim();
+    }
+
+    if (header.startsWith('Install') && values.Default) {
+      installDefaults.add(values.Default);
+      continue;
+    }
+
+    if (!header.startsWith('Profile') || !values.Path) continue;
+    profiles.push({
+      name: values.Name ?? null,
+      path: values.Path,
+      isRelative: values.IsRelative !== '0',
+      isDefault: values.Default === '1',
+      installDefault: false,
+    });
   }
 
-  const ini = readFileSync(iniPath, 'utf8');
-  const profiles: { name: string; path: string; isRelative: boolean }[] = [];
-  let current: { name?: string; path?: string; isRelative?: boolean } = {};
+  return profiles.map((profile) => ({
+    ...profile,
+    installDefault: installDefaults.has(profile.path),
+  }));
+}
 
-  for (const line of ini.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith('[Profile')) {
-      if (current.path) profiles.push(current as any);
-      current = {};
-    } else if (trimmed.startsWith('Name=')) {
-      current.name = trimmed.slice(5);
-    } else if (trimmed.startsWith('Path=')) {
-      current.path = trimmed.slice(5);
-    } else if (trimmed.startsWith('IsRelative=')) {
-      current.isRelative = trimmed.slice(11) === '1';
+function firefoxProfileScore(candidate: FirefoxProfileCandidate): number {
+  let score = 0;
+  if (candidate.installDefault) score += 1000;
+  if (candidate.isDefault) score += 500;
+
+  const name = (candidate.name ?? '').toLowerCase();
+  const base = basename(candidate.dir).toLowerCase();
+  if (name === 'default-release') score += 200;
+  else if (name === 'default') score += 150;
+  else if (name.includes('default')) score += 100;
+
+  if (base.includes('default-release')) score += 80;
+  else if (base.includes('default')) score += 40;
+  return score;
+}
+
+function firefoxProfileModifiedMs(profileDir: string): number {
+  try {
+    return statSync(join(profileDir, 'cookies.sqlite')).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+function collectFirefoxProfileCandidates(root: string): FirefoxProfileCandidate[] {
+  const candidates: FirefoxProfileCandidate[] = [];
+  const seen = new Set<string>();
+  const addCandidate = (
+    dir: string,
+    details: { name?: string | null; isDefault?: boolean; installDefault?: boolean } = {},
+  ): void => {
+    const cookiesPath = join(dir, 'cookies.sqlite');
+    if (!existsSync(cookiesPath) || seen.has(dir)) return;
+    seen.add(dir);
+    candidates.push({
+      dir,
+      name: details.name ?? null,
+      isDefault: details.isDefault ?? false,
+      installDefault: details.installDefault ?? false,
+      modifiedMs: firefoxProfileModifiedMs(dir),
+    });
+  };
+
+  const iniPath = join(root, 'profiles.ini');
+  if (existsSync(iniPath)) {
+    const ini = readFileSync(iniPath, 'utf8');
+    for (const profile of parseFirefoxProfilesIni(ini)) {
+      const dir = profile.isRelative ? join(root, profile.path) : profile.path;
+      addCandidate(dir, profile);
     }
   }
-  if (current.path) profiles.push(current as any);
 
-  const resolve = (p: { path: string; isRelative: boolean }) =>
-    p.isRelative ? join(base, p.path) : p.path;
-
-  // Prefer default-release, then any profile with cookies.sqlite
-  const defaultRelease = profiles.find(p => p.name === 'default-release');
-  if (defaultRelease) {
-    const dir = resolve(defaultRelease);
-    if (existsSync(join(dir, 'cookies.sqlite'))) return dir;
+  try {
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      addCandidate(join(root, entry.name));
+    }
+  } catch {
+    // Ignore unreadable roots and rely on other candidates.
   }
 
-  for (const p of profiles) {
-    const dir = resolve(p);
-    if (existsSync(join(dir, 'cookies.sqlite'))) return dir;
-  }
+  return candidates;
+}
 
-  throw new Error(
-    'No Firefox profile with cookies.sqlite found.\n' +
-    'Open Firefox and log into x.com first, then retry.'
+function buildFirefoxProfileDiscoveryError(roots: string[], sawProfilesIni: boolean): Error {
+  const checked = roots.map((root) => `  ${root}`).join('\n');
+  return new Error(
+    (sawProfilesIni
+      ? 'No Firefox profile with cookies.sqlite found in the standard profile roots.\n'
+      : 'Firefox profiles.ini was not found in the standard profile roots.\n') +
+    `Checked:\n${checked}\n` +
+    'If auto-detect missed your profile, pass it explicitly with --firefox-profile-dir <path>.'
   );
+}
+
+export function listFirefoxProfileDirs(): string[] {
+  const roots = firefoxBaseDirs();
+  const candidates: FirefoxProfileCandidate[] = [];
+
+  for (const root of roots) {
+    if (!existsSync(root)) continue;
+    candidates.push(...collectFirefoxProfileCandidates(root));
+  }
+
+  candidates.sort((a, b) =>
+    firefoxProfileScore(b) - firefoxProfileScore(a)
+    || b.modifiedMs - a.modifiedMs
+    || a.dir.localeCompare(b.dir)
+  );
+
+  return candidates.map((candidate) => candidate.dir);
+}
+
+export function detectFirefoxProfileDir(): string {
+  const roots = firefoxBaseDirs();
+  const dirs = listFirefoxProfileDirs();
+  if (dirs.length > 0) return dirs[0];
+
+  const sawProfilesIni = roots.some((root) => existsSync(join(root, 'profiles.ini')));
+  throw buildFirefoxProfileDiscoveryError(roots, sawProfilesIni);
 }
 
 // ── Cookie query ─────────────────────────────────────────────────────────────
@@ -155,26 +280,80 @@ function createFirefoxSnapshot(dbPath: string): { snapshotPath: string; cleanup:
   }
 }
 
-function queryWithNodeSqlite(
+function buildFirefoxReadError(dbPath: string, error: unknown, recoveryHint: string): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  const needsNativeSqliteHint =
+    platform() === 'win32' &&
+    !loadNodeSqlite() &&
+    /sqlite3|ENOENT/i.test(message);
+  return new Error(
+    `Could not read Firefox cookies database.\n` +
+    `Path: ${dbPath}\n` +
+    `Error: ${message}\n` +
+    (needsNativeSqliteHint
+      ? 'Fix: Use Node.js 22.5+ on Windows, or install sqlite3 on PATH.\n'
+      : '') +
+    recoveryHint
+  );
+}
+
+function queryFirefoxSqlWithNodeSqlite<T>(
   snapshotPath: string,
-  host: string,
-  names: string[],
-): { name: string; value: string }[] | null {
+  sql: string,
+  mapRow: (row: SqliteRow) => T,
+): T[] | null {
   const sqlite = loadNodeSqlite();
   if (!sqlite) return null;
 
   const db = new sqlite.DatabaseSync(snapshotPath, { readOnly: true });
   try {
-    const placeholders = names.map(() => '?').join(', ');
-    const stmt = db.prepare(
-      `SELECT name, value FROM moz_cookies WHERE host LIKE ? AND name IN (${placeholders});`
-    );
-    return stmt.all(`%${host}`, ...names).map((row) => ({
-      name: String(row.name ?? ''),
-      value: String(row.value ?? ''),
-    }));
+    return db.prepare(sql).all().map(mapRow);
   } finally {
     db.close();
+  }
+}
+
+function queryFirefoxSqlWithSqlite3<T>(
+  snapshotPath: string,
+  sql: string,
+  mapRow: (row: SqliteRow) => T,
+): T[] {
+  const output = execFileSync('sqlite3', ['-json', snapshotPath, sql], {
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    timeout: 10000,
+  }).trim();
+
+  if (!output || output === '[]') return [];
+  try {
+    return (JSON.parse(output) as SqliteRow[]).map(mapRow);
+  } catch {
+    return [];
+  }
+}
+
+export function queryFirefoxSqlRows<T>(
+  dbPath: string,
+  sql: string,
+  mapRow: (row: SqliteRow) => T,
+  recoveryHint: string = 'If Firefox is open, try closing it and retrying.',
+): T[] {
+  if (!existsSync(dbPath)) {
+    throw new Error(
+      `Firefox cookies.sqlite not found at: ${dbPath}\n` +
+      'Open Firefox and browse to any site first so the cookie DB is created.'
+    );
+  }
+
+  const { snapshotPath, cleanup } = createFirefoxSnapshot(dbPath);
+  try {
+    const nativeRows = queryFirefoxSqlWithNodeSqlite(snapshotPath, sql, mapRow);
+    if (nativeRows) return nativeRows;
+    return queryFirefoxSqlWithSqlite3(snapshotPath, sql, mapRow);
+  } catch (error) {
+    throw buildFirefoxReadError(dbPath, error, recoveryHint);
+  } finally {
+    cleanup();
   }
 }
 
@@ -183,59 +362,17 @@ function queryFirefoxCookies(
   host: string,
   names: string[],
 ): { name: string; value: string }[] {
-  if (!existsSync(dbPath)) {
-    throw new Error(
-      `Firefox cookies.sqlite not found at: ${dbPath}\n` +
-      'Open Firefox and browse to any site first so the cookie DB is created.'
-    );
-  }
-
   const safeHost = host.replace(/'/g, "''");
-  const nameList = names.map(n => `'${n.replace(/'/g, "''")}'`).join(',');
+  const nameList = names.map((n) => `'${n.replace(/'/g, "''")}'`).join(',');
   const sql = `SELECT name, value FROM moz_cookies WHERE host LIKE '%${safeHost}' AND name IN (${nameList});`;
-  const tryQueryWithBinary = (path: string): string =>
-    execFileSync('sqlite3', ['-json', path, sql], {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 10000,
-    }).trim();
-
-  const buildReadError = (error: unknown): Error => {
-    const message = error instanceof Error ? error.message : String(error);
-    const needsNativeSqliteHint =
-      platform() === 'win32' &&
-      !loadNodeSqlite() &&
-      /sqlite3|ENOENT/i.test(message);
-    return new Error(
-      `Could not read Firefox cookies database.\n` +
-      `Path: ${dbPath}\n` +
-      `Error: ${message}\n` +
-      (needsNativeSqliteHint
-        ? 'Fix: Use Node.js 22.5+ on Windows, or install sqlite3 on PATH.\n'
-        : '') +
-      'If Firefox is open, try closing it and retrying.'
-    );
-  };
-
-  try {
-    const { snapshotPath, cleanup } = createFirefoxSnapshot(dbPath);
-    try {
-      const nativeRows = queryWithNodeSqlite(snapshotPath, host, names);
-      if (nativeRows) return nativeRows;
-
-      const output = tryQueryWithBinary(snapshotPath);
-      if (!output || output === '[]') return [];
-      try {
-        return JSON.parse(output);
-      } catch {
-        return [];
-      }
-    } finally {
-      cleanup();
-    }
-  } catch (error) {
-    throw buildReadError(error);
-  }
+  return queryFirefoxSqlRows(
+    dbPath,
+    sql,
+    (row) => ({
+      name: String(row.name ?? ''),
+      value: String(row.value ?? ''),
+    }),
+  );
 }
 
 // ── Main export ──────────────────────────────────────────────────────────────
@@ -260,26 +397,26 @@ export function extractFirefoxXCookies(profileDir?: string): ChromeCookieResult 
       'This means you are not logged into X in Firefox.\n\n' +
       'Fix:\n' +
       '  1. Open Firefox\n' +
-      '  2. Go to https://x.com and log in\n' +
-      '  3. Re-run this command'
+      '  2. Log into x.com\n' +
+      '  3. Retry: ft sync --browser firefox\n\n' +
+      `Checked profile: ${dir}`
     );
   }
 
-  // Validate cookie values are printable ASCII (same check as Chrome path)
-  const validateCookie = (name: string, value: string): string => {
-    const cleaned = value.trim();
-    if (!cleaned || !/^[\x21-\x7E]+$/.test(cleaned)) {
-      throw new Error(
-        `Firefox ${name} cookie appears invalid.\n` +
-        'Try clearing Firefox cookies for x.com and logging in again.'
-      );
-    }
-    return cleaned;
+  if (!authToken) {
+    throw new Error(
+      'No auth_token cookie found for x.com in Firefox.\n' +
+      'This means Firefox has a partial/expired X session.\n\n' +
+      'Fix:\n' +
+      '  1. Open Firefox\n' +
+      '  2. Log out of x.com and log back in\n' +
+      '  3. Retry: ft sync --browser firefox\n\n' +
+      `Checked profile: ${dir}`
+    );
+  }
+
+  return {
+    cookieHeader: `ct0=${ct0}; auth_token=${authToken}`,
+    csrfToken: ct0,
   };
-
-  const cleanCt0 = validateCookie('ct0', ct0);
-  const cookieParts = [`ct0=${cleanCt0}`];
-  if (authToken) cookieParts.push(`auth_token=${validateCookie('auth_token', authToken)}`);
-
-  return { csrfToken: cleanCt0, cookieHeader: cookieParts.join('; ') };
 }
