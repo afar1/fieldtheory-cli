@@ -177,6 +177,12 @@ function showCachedUpdateNotice(): void {
 // ── What's new ────────────────────────────────────────────────────────────
 
 const WHATS_NEW: Record<string, string[]> = {
+  '1.3.11': [
+    'ft md now exports correct ISO dates in bookmark filenames and frontmatter',
+    'ft sync --rebuild now refreshes existing caches without stopping early',
+    'ft classify-domains is more robust when the model adds bracketed commentary',
+    'Bookmark text now expands visible t.co links using display_url',
+  ],
   '1.3.9': [
     'ft sync now captures full long-form note_tweets (Karpathy-style threads) instead of 275-char previews',
     'ft sync --gaps backfills existing truncated note_tweets via an authenticated GraphQL path',
