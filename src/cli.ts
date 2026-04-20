@@ -32,12 +32,15 @@ import { lintMd, fixLintIssues } from './md-lint.js';
 import { exportBookmarks } from './md-export.js';
 import { renderViz } from './bookmarks-viz.js';
 import { listBrowserIds } from './browsers.js';
+import { configureHttpProxyFromEnv } from './http-proxy.js';
 import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir, bookmarkMediaDir, bookmarkMediaManifestPath } from './paths.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+
+configureHttpProxyFromEnv();
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 

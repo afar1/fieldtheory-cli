@@ -127,6 +127,8 @@ Works with Claude Code, Codex, or any agent with shell access.
 0 7 * * * ft sync --classify
 ```
 
+`ft` respects standard proxy environment variables for network requests: `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, and `NO_PROXY`.
+
 ## Data
 
 All data is stored locally at `~/.ft-bookmarks/`:
