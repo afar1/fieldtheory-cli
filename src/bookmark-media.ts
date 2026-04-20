@@ -63,6 +63,23 @@ interface MediaTargetSource {
   mediaObjects?: BookmarkRecord['mediaObjects'];
 }
 
+interface CachedMediaResult {
+  localPath?: string;
+  contentType?: string;
+  bytes?: number;
+  status: MediaFetchEntry['status'];
+  reason?: string;
+  fetchedAt: string;
+}
+
+function mediaEntryKey(tweetId: string, sourceUrl: string, isProfileImage: boolean): string {
+  return isProfileImage ? `profile::${sourceUrl}` : `${tweetId}::${sourceUrl}`;
+}
+
+function mediaEntryKeyFromEntry(entry: MediaFetchEntry): string {
+  return mediaEntryKey(entry.tweetId, entry.sourceUrl, entry.sourceUrl.includes('/profile_images/'));
+}
+
 function sanitizeExtFromContentType(contentType?: string, sourceUrl?: string): string {
   if (contentType?.includes('jpeg')) return '.jpg';
   if (contentType?.includes('png')) return '.png';
@@ -99,7 +116,7 @@ function pushTarget(
   isProfileImage: boolean,
 ): void {
   if (!sourceUrl) return;
-  const key = isProfileImage ? `profile::${sourceUrl}` : `${base.tweetId}::${sourceUrl}`;
+  const key = mediaEntryKey(base.tweetId, sourceUrl, isProfileImage);
   if (seenKeys.has(key)) return;
   seenKeys.add(key);
   targets.push({
@@ -237,7 +254,8 @@ export async function fetchBookmarkMediaBatch(
     .filter(hasMediaCandidate)
     .filter((bookmark) => hasPendingMediaTarget(bookmark, coveredAssetKeys, coveredProfileImageUrls))
     .slice(0, limit);
-  const entries: MediaFetchEntry[] = previous?.entries ? [...previous.entries] : [];
+  const entriesByKey = new Map((previous?.entries ?? []).map((entry) => [mediaEntryKeyFromEntry(entry), entry]));
+  const cachedResultsBySourceUrl = new Map<string, CachedMediaResult>();
 
   let downloaded = 0;
   let skippedTooLarge = 0;
@@ -255,6 +273,44 @@ export async function fetchBookmarkMediaBatch(
     });
   };
 
+  const upsertEntry = (entry: MediaFetchEntry): void => {
+    entriesByKey.set(mediaEntryKeyFromEntry(entry), entry);
+  };
+
+  const applyCachedResult = (
+    target: MediaFetchTarget,
+    key: string,
+    cached: CachedMediaResult,
+  ): void => {
+    const { bookmarkId, tweetId, tweetUrl, authorHandle, authorName, sourceUrl, isProfileImage } = target;
+    if (isProfileImage) return;
+    upsertEntry({
+      bookmarkId,
+      tweetId,
+      tweetUrl,
+      authorHandle,
+      authorName,
+      sourceUrl,
+      localPath: cached.localPath,
+      contentType: cached.contentType,
+      bytes: cached.bytes,
+      status: cached.status,
+      reason: cached.reason,
+      fetchedAt: cached.fetchedAt,
+    });
+    if (cached.status === 'downloaded') {
+      coveredAssetKeys.add(key);
+      downloaded += 1;
+    } else if (cached.status === 'skipped_too_large') {
+      coveredAssetKeys.add(key);
+      skippedTooLarge += 1;
+    } else {
+      failed += 1;
+    }
+    processed += 1;
+    emitProgress(sourceUrl);
+  };
+
   emitProgress();
 
   for (const bookmark of candidates) {
@@ -262,8 +318,13 @@ export async function fetchBookmarkMediaBatch(
 
     for (const target of mediaTargets) {
       const { bookmarkId, tweetId, tweetUrl, authorHandle, authorName, sourceUrl, isProfileImage } = target;
-      const key = `${tweetId}::${sourceUrl}`;
+      const key = mediaEntryKey(tweetId, sourceUrl, isProfileImage);
       if (!isProfileImage && coveredAssetKeys.has(key)) continue;
+      const cachedResult = cachedResultsBySourceUrl.get(sourceUrl);
+      if (cachedResult) {
+        applyCachedResult(target, key, cachedResult);
+        continue;
+      }
 
       const fetchedAt = new Date().toISOString();
 
@@ -274,7 +335,7 @@ export async function fetchBookmarkMediaBatch(
         const declaredBytes = contentLengthHeader ? Number(contentLengthHeader) : undefined;
 
         if (typeof declaredBytes === 'number' && !Number.isNaN(declaredBytes) && declaredBytes > maxBytes) {
-          entries.push({
+          const entry = {
             bookmarkId,
             tweetId,
             tweetUrl,
@@ -285,6 +346,14 @@ export async function fetchBookmarkMediaBatch(
             bytes: declaredBytes,
             status: 'skipped_too_large',
             reason: `content-length ${declaredBytes} exceeds max ${maxBytes}`,
+            fetchedAt,
+          } satisfies MediaFetchEntry;
+          upsertEntry(entry);
+          cachedResultsBySourceUrl.set(sourceUrl, {
+            contentType,
+            bytes: declaredBytes,
+            status: entry.status,
+            reason: entry.reason,
             fetchedAt,
           });
           skippedTooLarge += 1;
@@ -297,7 +366,7 @@ export async function fetchBookmarkMediaBatch(
 
         const response = await fetch(sourceUrl);
         if (!response.ok) {
-          entries.push({
+          const entry = {
             bookmarkId,
             tweetId,
             tweetUrl,
@@ -306,6 +375,12 @@ export async function fetchBookmarkMediaBatch(
             sourceUrl,
             status: 'failed',
             reason: `HTTP ${response.status}`,
+            fetchedAt,
+          } satisfies MediaFetchEntry;
+          upsertEntry(entry);
+          cachedResultsBySourceUrl.set(sourceUrl, {
+            status: entry.status,
+            reason: entry.reason,
             fetchedAt,
           });
           failed += 1;
@@ -316,7 +391,7 @@ export async function fetchBookmarkMediaBatch(
 
         const buffer = Buffer.from(await response.arrayBuffer());
         if (buffer.byteLength > maxBytes) {
-          entries.push({
+          const entry = {
             bookmarkId,
             tweetId,
             tweetUrl,
@@ -328,8 +403,18 @@ export async function fetchBookmarkMediaBatch(
             status: 'skipped_too_large',
             reason: `downloaded size ${buffer.byteLength} exceeds max ${maxBytes}`,
             fetchedAt,
+          } satisfies MediaFetchEntry;
+          upsertEntry(entry);
+          cachedResultsBySourceUrl.set(sourceUrl, {
+            contentType: entry.contentType,
+            bytes: buffer.byteLength,
+            status: entry.status,
+            reason: entry.reason,
+            fetchedAt,
           });
           skippedTooLarge += 1;
+          if (isProfileImage) coveredProfileImageUrls.add(sourceUrl);
+          else coveredAssetKeys.add(key);
           processed += 1;
           emitProgress(sourceUrl);
           continue;
@@ -345,7 +430,7 @@ export async function fetchBookmarkMediaBatch(
         if (isProfileImage) coveredProfileImageUrls.add(sourceUrl);
         else coveredAssetKeys.add(key);
 
-        entries.push({
+        const entry = {
           bookmarkId,
           tweetId,
           tweetUrl,
@@ -357,12 +442,20 @@ export async function fetchBookmarkMediaBatch(
           bytes: buffer.byteLength,
           status: 'downloaded',
           fetchedAt,
+        } satisfies MediaFetchEntry;
+        upsertEntry(entry);
+        cachedResultsBySourceUrl.set(sourceUrl, {
+          localPath,
+          contentType: entry.contentType,
+          bytes: buffer.byteLength,
+          status: entry.status,
+          fetchedAt,
         });
         downloaded += 1;
         processed += 1;
         emitProgress(sourceUrl);
       } catch (error) {
-        entries.push({
+        const entry = {
           bookmarkId,
           tweetId,
           tweetUrl,
@@ -371,6 +464,12 @@ export async function fetchBookmarkMediaBatch(
           sourceUrl,
           status: 'failed',
           reason: error instanceof Error ? error.message : String(error),
+          fetchedAt,
+        } satisfies MediaFetchEntry;
+        upsertEntry(entry);
+        cachedResultsBySourceUrl.set(sourceUrl, {
+          status: entry.status,
+          reason: entry.reason,
           fetchedAt,
         });
         failed += 1;
@@ -390,7 +489,7 @@ export async function fetchBookmarkMediaBatch(
     downloaded,
     skippedTooLarge,
     failed,
-    entries,
+    entries: Array.from(entriesByKey.values()),
   };
 
   await writeJson(manifestPath, manifest);
