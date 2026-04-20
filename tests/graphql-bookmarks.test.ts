@@ -322,6 +322,54 @@ test('convertTweetToRecord: extracts quoted tweet snapshot', () => {
   assert.equal(result.quotedTweet!.media?.length, 1);
 });
 
+test('convertTweetToRecord: preserves quoted tweet video variants', () => {
+  const tr = makeTweetResult({
+    legacy: { quoted_status_id_str: '9999999' },
+    tweet: {
+      quoted_status_result: {
+        result: {
+          rest_id: '9999999',
+          legacy: {
+            id_str: '9999999',
+            full_text: 'Quoted video tweet',
+            created_at: 'Mon Mar 09 10:00:00 +0000 2026',
+            entities: { urls: [] },
+            extended_entities: {
+              media: [{
+                type: 'video',
+                media_url_https: 'https://pbs.twimg.com/amplify_video_thumb/quoted.jpg',
+                expanded_url: 'https://x.com/quoteduser/status/9999999/video/1',
+                original_info: { width: 1280, height: 720 },
+                ext_alt_text: 'Quoted video poster',
+                video_info: {
+                  variants: [
+                    { content_type: 'video/mp4', bitrate: 832000, url: 'https://video.twimg.com/quoted.mp4' },
+                  ],
+                },
+              }],
+            },
+          },
+          core: {
+            user_results: {
+              result: {
+                rest_id: '6666',
+                core: { screen_name: 'quoteduser', name: 'Quoted User' },
+                avatar: { image_url: 'https://pbs.twimg.com/profile_images/6666/qt.jpg' },
+                legacy: {},
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  const result = convertTweetToRecord(tr, NOW);
+  assert.ok(result?.quotedTweet);
+  assert.equal(result.quotedTweet!.mediaObjects?.[0].type, 'video');
+  assert.equal(result.quotedTweet!.mediaObjects?.[0].altText, 'Quoted video poster');
+  assert.equal(result.quotedTweet!.mediaObjects?.[0].videoVariants?.[0].url, 'https://video.twimg.com/quoted.mp4');
+});
+
 test('convertTweetToRecord: handles missing quoted tweet gracefully', () => {
   const tr = makeTweetResult({
     legacy: { quoted_status_id_str: '7777777' },

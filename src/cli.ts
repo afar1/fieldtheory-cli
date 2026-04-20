@@ -6,7 +6,8 @@ import { runTwitterOAuthFlow } from './xauth.js';
 import { syncBookmarksGraphQL, syncGaps, syncBookmarkFolders } from './graphql-bookmarks.js';
 import type { SyncProgress, GapFillProgress, FolderSyncProgress } from './graphql-bookmarks.js';
 import type { BookmarkFolder } from './types.js';
-import { fetchBookmarkMediaBatch } from './bookmark-media.js';
+import { DEFAULT_MEDIA_MAX_BYTES, fetchBookmarkMediaBatch } from './bookmark-media.js';
+import type { MediaFetchManifest, MediaFetchProgress } from './bookmark-media.js';
 import {
   buildIndex,
   searchBookmarks,
@@ -31,7 +32,7 @@ import { lintMd, fixLintIssues } from './md-lint.js';
 import { exportBookmarks } from './md-export.js';
 import { renderViz } from './bookmarks-viz.js';
 import { listBrowserIds } from './browsers.js';
-import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir } from './paths.js';
+import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir, bookmarkMediaDir, bookmarkMediaManifestPath } from './paths.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import fs from 'node:fs';
@@ -107,6 +108,47 @@ function formatRetryAfter(seconds?: number): string | undefined {
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = seconds % 60;
   return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+}
+
+function printMediaFetchSummary(result: MediaFetchManifest): void {
+  if (result.processed === 0) {
+    console.log('  ✓ No pending media assets found');
+  }
+  console.log(`  ✓ ${result.downloaded} media assets downloaded`);
+  if (result.skippedTooLarge > 0) {
+    console.log(`  ${result.skippedTooLarge} media assets skipped for size`);
+  }
+  if (result.failed > 0) {
+    console.log(`  ${result.failed} media assets failed`);
+  }
+  console.log(`  ✓ Media: ${bookmarkMediaDir()}`);
+  console.log(`  ✓ Manifest: ${bookmarkMediaManifestPath()}`);
+}
+
+async function runMediaFetchWithProgress(options: { limit?: number; maxBytes?: number } = {}): Promise<MediaFetchManifest> {
+  const startTime = Date.now();
+  let lastMedia: MediaFetchProgress = {
+    candidateBookmarks: 0,
+    processed: 0,
+    downloaded: 0,
+    skippedTooLarge: 0,
+    failed: 0,
+  };
+  const spinner = createSpinner(() => {
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
+    return `Fetching media...  ${lastMedia.processed} processed  │  ${lastMedia.downloaded} downloaded  │  ${elapsed}s`;
+  });
+  const result = await runWithSpinner(spinner, () => fetchBookmarkMediaBatch({
+    limit: options.limit,
+    maxBytes: options.maxBytes,
+    onProgress: (progress: MediaFetchProgress) => {
+      lastMedia = progress;
+      spinner.update();
+    },
+  }));
+  console.log('');
+  printMediaFetchSummary(result);
+  return result;
 }
 
 function warnIfEmpty(totalBookmarks: number): void {
@@ -186,6 +228,11 @@ function showCachedUpdateNotice(): void {
 // ── What's new ────────────────────────────────────────────────────────────
 
 const WHATS_NEW: Record<string, string[]> = {
+  '1.3.13': [
+    'ft sync --media now downloads X photos, video posters, capped videos, and quoted-tweet media',
+    'ft fetch-media now backfills missing media across your archive instead of stopping at the first 100 bookmarks',
+    'Media downloads now show live progress and use a 200 MB per-asset cap by default',
+  ],
   '1.3.12': [
     'ft md now exports correct ISO dates in bookmark filenames and frontmatter',
     'ft sync --rebuild now refreshes existing caches without stopping early',
@@ -510,6 +557,8 @@ export function buildCli() {
     .option('--gaps', 'Backfill missing data (quoted tweets, truncated articles, linked article content)', false)
     .option('--yes', 'Skip confirmation prompts', false)
     .option('--classify', 'Classify new bookmarks with LLM after syncing', false)
+    .option('--media', 'Also download media assets for bookmarks after syncing', false)
+    .option('--media-max-bytes <n>', 'Per-asset byte limit for --media (default: 200 MB)', (v: string) => Number(v), DEFAULT_MEDIA_MAX_BYTES)
     .option('--max-pages <n>', 'Max pages to fetch (default: unlimited)', (v: string) => Number(v))
     .option('--target-adds <n>', 'Stop after N new bookmarks', (v: string) => Number(v))
     .option('--delay-ms <n>', 'Delay between requests in ms', (v: string) => Number(v), 600)
@@ -559,6 +608,14 @@ export function buildCli() {
           process.exitCode = 1;
           return;
         }
+        if (options.media && options.gaps) {
+          console.error('  Error: --media cannot be combined with --gaps. Run them separately.');
+          process.exitCode = 1;
+          return;
+        }
+        const mediaMaxBytes = typeof options.mediaMaxBytes === 'number' && !Number.isNaN(options.mediaMaxBytes)
+          ? options.mediaMaxBytes
+          : DEFAULT_MEDIA_MAX_BYTES;
 
         // ── gaps mode: backfill missing data for existing bookmarks ──
         if (options.gaps) {
@@ -667,6 +724,10 @@ export function buildCli() {
           console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
           console.log(`  \u2713 Data: ${dataDir()}\n`);
           warnIfEmpty(result.totalBookmarks);
+          if (options.media) {
+            await runMediaFetchWithProgress({ maxBytes: mediaMaxBytes });
+            console.log('');
+          }
           const newCount = await rebuildIndex();
           if (options.classify && newCount > 0) {
             await classifyNew(engineOverride);
@@ -803,6 +864,11 @@ export function buildCli() {
               console.error(`\n  Folder sync error: ${(err as Error).message}\n`);
               // Continue — main sync already succeeded, folders are bonus
             }
+          }
+
+          if (options.media) {
+            await runMediaFetchWithProgress({ maxBytes: mediaMaxBytes });
+            console.log('');
           }
 
           const newCount = await rebuildIndex();
@@ -1255,16 +1321,17 @@ export function buildCli() {
 
   program
     .command('fetch-media')
-    .description('Download media assets for bookmarks (static images only)')
-    .option('--limit <n>', 'Max bookmarks to process', (v: string) => Number(v), 100)
-    .option('--max-bytes <n>', 'Per-asset byte limit', (v: string) => Number(v), 50 * 1024 * 1024)
+    .description('Download media assets for bookmarks')
+    .option('--limit <n>', 'Max pending bookmarks to process (default: all)', (v: string) => Number(v))
+    .option('--max-bytes <n>', 'Per-asset byte limit (default: 200 MB)', (v: string) => Number(v), DEFAULT_MEDIA_MAX_BYTES)
     .action(safe(async (options) => {
       if (!requireData()) return;
-      const result = await fetchBookmarkMediaBatch({
-        limit: Number(options.limit) || 100,
-        maxBytes: Number(options.maxBytes) || 50 * 1024 * 1024,
+      await runMediaFetchWithProgress({
+        limit: typeof options.limit === 'number' && !Number.isNaN(options.limit) ? options.limit : undefined,
+        maxBytes: typeof options.maxBytes === 'number' && !Number.isNaN(options.maxBytes)
+          ? options.maxBytes
+          : DEFAULT_MEDIA_MAX_BYTES,
       });
-      console.log(JSON.stringify(result, null, 2));
     }));
 
   // ── ft md ── Export bookmarks as markdown files ────────────────────────

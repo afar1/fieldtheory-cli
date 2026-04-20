@@ -42,6 +42,7 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | `ft sync --folders` | Also sync X bookmark folder tags (read-only mirror of X state) |
 | `ft sync --folder <name>` | Sync a single folder by name (exact or unambiguous prefix) |
 | `ft sync --classify` | Sync then classify new bookmarks with LLM |
+| `ft sync --media` | Sync bookmarks, then download X media assets locally (photos, video posters, capped videos) |
 | `ft sync --api` | Sync via OAuth API (cross-platform) |
 | `ft auth` | Set up OAuth for API-based sync (optional) |
 
@@ -94,7 +95,7 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | Command | Description |
 |---------|-------------|
 | `ft index` | Rebuild search index from JSONL cache (preserves classifications) |
-| `ft fetch-media` | Download media assets (static images only) |
+| `ft fetch-media` | Backfill/download X media assets for existing bookmarks (default: all pending bookmarks) |
 | `ft status` | Show sync status and data location |
 | `ft path` | Print data directory path |
 

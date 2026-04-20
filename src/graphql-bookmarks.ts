@@ -316,6 +316,12 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
           expandedUrl: m.expanded_url,
           width: m.original_info?.width,
           height: m.original_info?.height,
+          altText: m.ext_alt_text,
+          videoVariants: Array.isArray(m.video_info?.variants)
+            ? m.video_info.variants
+                .filter((v: any) => v.content_type === 'video/mp4')
+                .map((v: any) => ({ bitrate: v.bitrate, url: v.url }))
+            : undefined,
         })),
         url: `https://x.com/${qtHandle ?? '_'}/status/${qtId}`,
       };

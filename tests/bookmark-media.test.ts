@@ -23,6 +23,7 @@ async function withMediaDataDir(records: any[], fn: () => Promise<void>): Promis
 
 test('fetchBookmarkMediaBatch downloads post media from GraphQL mediaObjects shape', async () => {
   const photoUrl = 'https://pbs.twimg.com/media/example.jpg';
+  const videoPosterUrl = 'https://pbs.twimg.com/amplify_video_thumb/example.jpg';
   const videoUrl = 'https://video.twimg.com/ext_tw_video/example.mp4';
   const profileUrl = 'https://pbs.twimg.com/profile_images/123/avatar_normal.jpg';
   const records = [{
@@ -36,7 +37,7 @@ test('fetchBookmarkMediaBatch downloads post media from GraphQL mediaObjects sha
     syncedAt: '2026-04-09T00:00:00.000Z',
     mediaObjects: [
       { type: 'photo', url: photoUrl },
-      { type: 'video', videoVariants: [{ url: videoUrl, bitrate: 832000 }] },
+      { type: 'video', url: videoPosterUrl, videoVariants: [{ url: videoUrl, bitrate: 832000 }] },
     ],
     links: [],
     tags: [],
@@ -71,8 +72,78 @@ test('fetchBookmarkMediaBatch downloads post media from GraphQL mediaObjects sha
       assert.deepEqual(downloaded, [
         photoUrl,
         profileUrl.replace('_normal.', '_400x400.'),
+        videoPosterUrl,
         videoUrl,
       ].sort());
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchBookmarkMediaBatch downloads quoted tweet media targets', async () => {
+  const quotedPhotoUrl = 'https://pbs.twimg.com/media/quoted-photo.jpg';
+  const quotedPosterUrl = 'https://pbs.twimg.com/amplify_video_thumb/quoted.jpg';
+  const quotedVideoUrl = 'https://video.twimg.com/ext_tw_video/quoted.mp4';
+  const quotedProfileUrl = 'https://pbs.twimg.com/profile_images/456/quoted_normal.jpg';
+  const records = [{
+    id: '1',
+    tweetId: '1',
+    url: 'https://x.com/alice/status/1',
+    text: 'quoted media test',
+    authorHandle: 'alice',
+    authorName: 'Alice',
+    syncedAt: '2026-04-09T00:00:00.000Z',
+    mediaObjects: [],
+    quotedTweet: {
+      id: '99',
+      url: 'https://x.com/bob/status/99',
+      text: 'quoted',
+      authorHandle: 'bob',
+      authorName: 'Bob',
+      authorProfileImageUrl: quotedProfileUrl,
+      media: [quotedPhotoUrl],
+      mediaObjects: [
+        { type: 'photo', url: quotedPhotoUrl },
+        { type: 'video', url: quotedPosterUrl, videoVariants: [{ url: quotedVideoUrl, bitrate: 832000 }] },
+      ],
+    },
+    links: [],
+    tags: [],
+    ingestedVia: 'graphql',
+  }];
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = String(input instanceof Request ? input.url : input);
+    const method = init?.method ?? 'GET';
+    const contentType = url.endsWith('.mp4') ? 'video/mp4' : 'image/jpeg';
+    if (method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': '4', 'content-type': contentType },
+      });
+    }
+    return new Response(Uint8Array.from([1, 2, 3, 4]), {
+      status: 200,
+      headers: { 'content-type': contentType },
+    });
+  };
+
+  try {
+    await withMediaDataDir(records, async () => {
+      const manifest = await fetchBookmarkMediaBatch({ limit: 10, maxBytes: 1024 });
+      const downloaded = manifest.entries
+        .filter((entry) => entry.status === 'downloaded')
+        .map((entry) => ({ tweetId: entry.tweetId, sourceUrl: entry.sourceUrl }))
+        .sort((a, b) => a.sourceUrl.localeCompare(b.sourceUrl));
+
+      assert.deepEqual(downloaded, [
+        { tweetId: '99', sourceUrl: quotedPosterUrl },
+        { tweetId: '99', sourceUrl: quotedPhotoUrl },
+        { tweetId: '99', sourceUrl: quotedProfileUrl.replace('_normal.', '_400x400.') },
+        { tweetId: '99', sourceUrl: quotedVideoUrl },
+      ]);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -288,6 +359,177 @@ test('fetchBookmarkMediaBatch retries failed profile image from previous manifes
 
       assert.equal(profileGetRequests, 2);
       assert.equal(downloadedProfileEntries.length, 1);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchBookmarkMediaBatch reports progress as assets complete', async () => {
+  const photoUrl = 'https://pbs.twimg.com/media/progress.jpg';
+  const records = [{
+    id: '1',
+    tweetId: '1',
+    url: 'https://x.com/alice/status/1',
+    text: 'progress test',
+    authorHandle: 'alice',
+    authorName: 'Alice',
+    syncedAt: '2026-04-09T00:00:00.000Z',
+    mediaObjects: [{ type: 'photo', url: photoUrl }],
+    links: [],
+    tags: [],
+    ingestedVia: 'graphql',
+  }];
+
+  const progressSnapshots: Array<{ processed: number; downloaded: number; candidateBookmarks: number }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const method = init?.method ?? 'GET';
+    if (method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': '4', 'content-type': 'image/jpeg' },
+      });
+    }
+    return new Response(Uint8Array.from([1, 2, 3, 4]), {
+      status: 200,
+      headers: { 'content-type': 'image/jpeg' },
+    });
+  };
+
+  try {
+    await withMediaDataDir(records, async () => {
+      await fetchBookmarkMediaBatch({
+        limit: 10,
+        maxBytes: 1024,
+        onProgress: (progress) => {
+          progressSnapshots.push({
+            processed: progress.processed,
+            downloaded: progress.downloaded,
+            candidateBookmarks: progress.candidateBookmarks,
+          });
+        },
+      });
+    });
+
+    assert.equal(progressSnapshots[0]?.processed, 0);
+    assert.equal(progressSnapshots[0]?.candidateBookmarks, 1);
+    assert.equal(progressSnapshots.at(-1)?.processed, 1);
+    assert.equal(progressSnapshots.at(-1)?.downloaded, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchBookmarkMediaBatch applies limit after filtering out already-downloaded bookmarks', async () => {
+  const firstUrl = 'https://pbs.twimg.com/media/first.jpg';
+  const secondUrl = 'https://pbs.twimg.com/media/second.jpg';
+  const records = [
+    {
+      id: '1',
+      tweetId: '1',
+      url: 'https://x.com/alice/status/1',
+      text: 'first',
+      authorHandle: 'alice',
+      authorName: 'Alice',
+      syncedAt: '2026-04-09T00:00:00.000Z',
+      mediaObjects: [{ type: 'photo', url: firstUrl }],
+      links: [],
+      tags: [],
+      ingestedVia: 'graphql',
+    },
+    {
+      id: '2',
+      tweetId: '2',
+      url: 'https://x.com/alice/status/2',
+      text: 'second',
+      authorHandle: 'alice',
+      authorName: 'Alice',
+      syncedAt: '2026-04-09T00:00:00.000Z',
+      mediaObjects: [{ type: 'photo', url: secondUrl }],
+      links: [],
+      tags: [],
+      ingestedVia: 'graphql',
+    },
+  ];
+
+  const fetchedUrls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = String(input instanceof Request ? input.url : input);
+    const method = init?.method ?? 'GET';
+    if (method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': '4', 'content-type': 'image/jpeg' },
+      });
+    }
+    fetchedUrls.push(url);
+    return new Response(Uint8Array.from([1, 2, 3, 4]), {
+      status: 200,
+      headers: { 'content-type': 'image/jpeg' },
+    });
+  };
+
+  try {
+    await withMediaDataDir(records, async () => {
+      const firstRun = await fetchBookmarkMediaBatch({ limit: 1, maxBytes: 1024 });
+      assert.equal(firstRun.downloaded, 1);
+      assert.equal(fetchedUrls.at(-1), firstUrl);
+
+      const secondRun = await fetchBookmarkMediaBatch({ limit: 1, maxBytes: 1024 });
+      assert.equal(secondRun.downloaded, 1);
+      assert.equal(fetchedUrls.at(-1), secondUrl);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchBookmarkMediaBatch retries failed non-profile media on later runs', async () => {
+  const photoUrl = 'https://pbs.twimg.com/media/retry-photo.jpg';
+  const records = [{
+    id: '1',
+    tweetId: '1',
+    url: 'https://x.com/alice/status/1',
+    text: 'retry test',
+    authorHandle: 'alice',
+    authorName: 'Alice',
+    syncedAt: '2026-04-09T00:00:00.000Z',
+    mediaObjects: [{ type: 'photo', url: photoUrl }],
+    links: [],
+    tags: [],
+    ingestedVia: 'graphql',
+  }];
+
+  let getCalls = 0;
+  const originalFetch = globalThis.fetch;
+
+  try {
+    await withMediaDataDir(records, async () => {
+      globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const method = init?.method ?? 'GET';
+        if (method === 'HEAD') {
+          return new Response(null, {
+            status: 200,
+            headers: { 'content-length': '4', 'content-type': 'image/jpeg' },
+          });
+        }
+        getCalls += 1;
+        return getCalls === 1
+          ? new Response(null, { status: 500 })
+          : new Response(Uint8Array.from([1, 2, 3, 4]), {
+              status: 200,
+              headers: { 'content-type': 'image/jpeg' },
+            });
+      };
+
+      const firstRun = await fetchBookmarkMediaBatch({ maxBytes: 1024 });
+      assert.equal(firstRun.failed, 1);
+
+      const secondRun = await fetchBookmarkMediaBatch({ maxBytes: 1024 });
+      assert.equal(secondRun.downloaded, 1);
+      assert.equal(getCalls, 2);
     });
   } finally {
     globalThis.fetch = originalFetch;
