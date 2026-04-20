@@ -26,6 +26,7 @@ test('listBrowserIds: returns all registered ids', () => {
   const ids = listBrowserIds();
   assert.ok(ids.includes('chrome'));
   assert.ok(ids.includes('brave'));
+  assert.ok(ids.includes('edge'));
   assert.ok(ids.includes('firefox'));
   assert.ok(ids.includes('helium'));
   assert.ok(ids.includes('comet'));
@@ -59,6 +60,13 @@ test('getBrowser: brave has correct keychain entries', () => {
   const browser = getBrowser('brave');
   const services = browser.keychainEntries.map(e => e.service);
   assert.ok(services.some(s => s.includes('Brave')));
+});
+
+test('getBrowser: edge has chromium backend and Microsoft path metadata', () => {
+  const browser = getBrowser('edge');
+  assert.equal(browser.cookieBackend, 'chromium');
+  assert.ok(browser.keychainEntries.some(e => e.service.includes('Edge')));
+  assert.match(browser.winPath!, /AppData[\\/]Local[\\/]Microsoft[\\/]Edge[\\/]User Data/);
 });
 
 test('browserUserDataDir: returns a path for known browsers on this OS', () => {

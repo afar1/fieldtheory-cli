@@ -162,11 +162,22 @@ To remove all data: `rm -rf ~/.ft-bookmarks`
 
 Use `ft classify` for LLM-powered classification that catches what regex misses.
 
+## Windows Notes
+
+In PowerShell, use `fieldtheory` instead of `ft` because `ft` is already a built-in PowerShell alias.
+
+If you want to sync from Microsoft Edge explicitly:
+
+```powershell
+fieldtheory sync --browser edge
+fieldtheory sync --browser edge --chrome-profile-directory "Default"
+```
+
 ## Platform support
 
 | Feature | macOS | Linux | Windows |
 |---------|-------|-------|---------|
-| Session sync (`ft sync`) | Chrome, Chromium, Brave, Helium, Comet, Dia, Firefox | Chrome, Chromium, Brave, Firefox | Chrome, Chromium, Brave, Firefox |
+| Session sync (`ft sync`) | Chrome, Chromium, Brave, Edge, Helium, Comet, Dia, Firefox | Chrome, Chromium, Brave, Edge, Firefox | Chrome, Chromium, Brave, Edge, Firefox |
 | OAuth API sync (`ft sync --api`) | Yes | Yes | Yes |
 | Search, list, classify, viz, wiki | Yes | Yes | Yes |
 
