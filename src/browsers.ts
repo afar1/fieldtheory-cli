@@ -82,6 +82,15 @@ const BROWSERS: BrowserDef[] = [
     macPath: 'Library/Application Support/Comet',
   },
   {
+    id: 'dia',
+    displayName: 'Dia',
+    cookieBackend: 'chromium',
+    keychainEntries: [
+      { service: 'Dia Safe Storage', account: 'Dia' },
+    ],
+    macPath: 'Library/Application Support/Dia/User Data',
+  },
+  {
     id: 'firefox',
     displayName: 'Firefox',
     cookieBackend: 'firefox',

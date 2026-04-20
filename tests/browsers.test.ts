@@ -29,7 +29,16 @@ test('listBrowserIds: returns all registered ids', () => {
   assert.ok(ids.includes('firefox'));
   assert.ok(ids.includes('helium'));
   assert.ok(ids.includes('comet'));
+  assert.ok(ids.includes('dia'));
   assert.ok(ids.includes('chromium'));
+});
+
+test('getBrowser: dia has correct keychain entries and User Data macPath', () => {
+  const browser = getBrowser('dia');
+  assert.equal(browser.cookieBackend, 'chromium');
+  const services = browser.keychainEntries.map(e => e.service);
+  assert.ok(services.includes('Dia Safe Storage'));
+  assert.match(browser.macPath!, /Dia\/User Data$/);
 });
 
 test('getBrowser: firefox has firefox cookieBackend', () => {
