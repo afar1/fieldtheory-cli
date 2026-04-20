@@ -1,5 +1,5 @@
 import { getTwitterBookmarksStatus, latestBookmarkSyncAt } from './bookmarks.js';
-import { buildIndex } from './bookmarks-db.js';
+import { buildIndex, getClassificationProgress } from './bookmarks-db.js';
 import { loadTwitterOAuthToken } from './xauth.js';
 import { syncBookmarksGraphQL, type SyncProgress } from './graphql-bookmarks.js';
 
@@ -14,6 +14,9 @@ export interface BookmarkEnableResult {
 export interface BookmarkStatusView {
   connected: boolean;
   bookmarkCount: number;
+  classificationTotal: number;
+  categoriesDone: number;
+  domainsDone: number;
   lastUpdated: string | null;
   mode: string;
   cachePath: string;
@@ -49,19 +52,30 @@ export async function enableBookmarks(): Promise<BookmarkEnableResult> {
 export async function getBookmarkStatusView(): Promise<BookmarkStatusView> {
   const token = await loadTwitterOAuthToken();
   const status = await getTwitterBookmarksStatus();
+  const progress = await getClassificationProgress();
   return {
     connected: Boolean(token?.access_token),
     bookmarkCount: status.totalBookmarks,
+    classificationTotal: progress.total,
+    categoriesDone: progress.categoriesDone,
+    domainsDone: progress.domainsDone,
     lastUpdated: latestBookmarkSyncAt(status),
     mode: token?.access_token ? 'Incremental by default (GraphQL + API available)' : 'Incremental by default (GraphQL)',
     cachePath: status.cachePath,
   };
 }
 
+function classificationDenominator(view: BookmarkStatusView): number {
+  return Math.max(view.bookmarkCount, view.classificationTotal);
+}
+
 export function formatBookmarkStatus(view: BookmarkStatusView): string {
+  const total = classificationDenominator(view);
   return [
     'Bookmarks',
     `  bookmarks: ${view.bookmarkCount}`,
+    `  categories: ${view.categoriesDone}/${total}`,
+    `  domains: ${view.domainsDone}/${total}`,
     `  last updated: ${view.lastUpdated ?? 'never'}`,
     `  sync mode: ${view.mode}`,
     `  cache: ${view.cachePath}`,
@@ -69,5 +83,6 @@ export function formatBookmarkStatus(view: BookmarkStatusView): string {
 }
 
 export function formatBookmarkSummary(view: BookmarkStatusView): string {
-  return `bookmarks=${view.bookmarkCount} updated=${view.lastUpdated ?? 'never'} mode="${view.mode}"`;
+  const total = classificationDenominator(view);
+  return `bookmarks=${view.bookmarkCount} categories=${view.categoriesDone}/${total} domains=${view.domainsDone}/${total} updated=${view.lastUpdated ?? 'never'} mode="${view.mode}"`;
 }

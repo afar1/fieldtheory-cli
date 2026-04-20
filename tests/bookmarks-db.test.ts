@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, sanitizeFtsQuery, getCategoryCounts, sampleByCategory } from '../src/bookmarks-db.js';
+import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, sanitizeFtsQuery, getCategoryCounts, sampleByCategory, getClassificationProgress } from '../src/bookmarks-db.js';
 import { openDb, saveDb } from '../src/db.js';
 import { twitterBookmarksIndexPath } from '../src/paths.js';
 
@@ -173,6 +173,37 @@ test('getCategoryCounts still returns real categories alongside the exclusion', 
     const counts = await getCategoryCounts();
     assert.equal(counts['tool'], 2, 'real category should be present');
     assert.ok(!('unclassified' in counts), 'unclassified placeholder should still be excluded');
+  });
+});
+
+test('getClassificationProgress returns category and domain completion counts', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+
+    const dbPath = twitterBookmarksIndexPath();
+    const db = await openDb(dbPath);
+    try {
+      db.run(
+        `UPDATE bookmarks
+         SET categories = ?, primary_category = ?, domains = ?, primary_domain = ?
+         WHERE id = '1'`,
+        ['tool', 'tool', 'ai', 'ai'],
+      );
+      db.run(
+        `UPDATE bookmarks
+         SET categories = ?, primary_category = ?
+         WHERE id = '2'`,
+        ['research', 'research'],
+      );
+      saveDb(db, dbPath);
+    } finally {
+      db.close();
+    }
+
+    const progress = await getClassificationProgress();
+    assert.equal(progress.total, 3);
+    assert.equal(progress.categoriesDone, 2);
+    assert.equal(progress.domainsDone, 1);
   });
 });
 

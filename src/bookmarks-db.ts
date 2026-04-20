@@ -69,6 +69,12 @@ export interface BookmarkTimelineFilters {
   offset?: number;
 }
 
+export interface BookmarkClassificationProgress {
+  total: number;
+  categoriesDone: number;
+  domainsDone: number;
+}
+
 function parseJsonArray(value: unknown): string[] {
   if (typeof value !== 'string' || !value.trim()) return [];
   try {
@@ -927,6 +933,37 @@ export async function getCategoryCounts(existingDb?: Database): Promise<Record<s
     return counts;
   } finally {
     if (!existingDb) db.close();
+  }
+}
+
+export async function getClassificationProgress(): Promise<BookmarkClassificationProgress> {
+  const dbPath = twitterBookmarksIndexPath();
+  let db: Database;
+  try {
+    db = await openDb(dbPath);
+  } catch {
+    return { total: 0, categoriesDone: 0, domainsDone: 0 };
+  }
+
+  try {
+    ensureMigrations(db);
+    const row = db.exec(
+      `SELECT
+         COUNT(*) AS total,
+         SUM(CASE WHEN primary_category IS NOT NULL AND primary_category <> '' AND primary_category <> 'unclassified' THEN 1 ELSE 0 END) AS categories_done,
+         SUM(CASE WHEN primary_domain IS NOT NULL AND primary_domain <> '' THEN 1 ELSE 0 END) AS domains_done
+       FROM bookmarks`
+    )[0]?.values?.[0];
+
+    return {
+      total: Number(row?.[0] ?? 0),
+      categoriesDone: Number(row?.[1] ?? 0),
+      domainsDone: Number(row?.[2] ?? 0),
+    };
+  } catch {
+    return { total: 0, categoriesDone: 0, domainsDone: 0 };
+  } finally {
+    db.close();
   }
 }
 
