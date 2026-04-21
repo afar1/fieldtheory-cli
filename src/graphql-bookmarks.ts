@@ -1639,6 +1639,12 @@ const GAP_FILL_FAILURE_REASONS: Record<string, string> = {
   error: 'X GraphQL rejected the request (likely rotated queryId or feature flags)',
 };
 
+const X_ARTICLE_MISSING_REASONS: Record<string, string> = {
+  graphql: 'X GraphQL response did not include article content',
+  syndication: 'X Article body requires authenticated X GraphQL; syndication only returned the tweet preview',
+  unknown: 'X Article body was not returned',
+};
+
 export interface GapFillProgress {
   done: number;
   total: number;
@@ -1895,6 +1901,13 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
         enrichedIds.add(record.id);
         articlesEnriched++;
       }
+    } else if (recordsByXArticleTweetId.has(tweetId) && snapshot) {
+      failed++;
+      failures.push({
+        tweetId,
+        reason: X_ARTICLE_MISSING_REASONS[resultSource ?? 'unknown'],
+        url: `https://x.com/_/status/${tweetId}`,
+      });
     }
 
     options?.onProgress?.({

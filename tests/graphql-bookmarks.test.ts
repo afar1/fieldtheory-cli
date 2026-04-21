@@ -538,6 +538,45 @@ test('syncGaps: enriches X Article bookmarks through TweetResult payload', async
   }, [xArticle]);
 });
 
+test('syncGaps: reports X Article when fallback only returns tweet preview', async () => {
+  const xArticle: BookmarkRecord = {
+    id: '2042685676949270724',
+    tweetId: '2042685676949270724',
+    url: 'https://x.com/danveloper/status/2042685676949270724',
+    text: 'x.com/i/article/2042...',
+    authorHandle: 'danveloper',
+    syncedAt: NOW,
+    postedAt: 'Fri Apr 10 19:26:31 +0000 2026',
+    links: ['http://x.com/i/article/2042676487711584257'],
+    tags: [],
+    ingestedVia: 'graphql',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    const result = await syncGaps({
+      tweetFetcher: async (tweetId) => ({
+        snapshot: {
+          id: tweetId,
+          text: 'x.com/i/article/2042...',
+          url: 'https://x.com/danveloper/status/2042685676949270724',
+        },
+        status: 'ok',
+        source: 'syndication',
+      }),
+    });
+
+    assert.equal(result.articlesEnriched, 0);
+    assert.equal(result.failed, 1);
+    assert.equal(result.failures[0].tweetId, '2042685676949270724');
+    assert.match(result.failures[0].reason, /authenticated X GraphQL/);
+
+    const refreshed = await getBookmarkById('2042685676949270724');
+    assert.ok(refreshed);
+    assert.equal(refreshed.articleText, null);
+  }, [xArticle]);
+});
+
 async function withIsolatedGapFillDataDir(
   fn: () => Promise<void>,
   fixtures: BookmarkRecord[],
