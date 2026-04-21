@@ -10,12 +10,12 @@ Free and open source. Designed for Mac.
 npm install -g fieldtheory
 ```
 
-Requires Node.js 20+. Chrome recommended for session sync; OAuth available for all platforms.
+Requires Node.js 20+. A Chrome-family browser or Firefox is recommended for session sync; OAuth is available for all platforms.
 
 ## Quick start
 
 ```bash
-# 1. Sync your bookmarks (needs Chrome logged into X)
+# 1. Sync your bookmarks (needs a supported browser logged into X)
 ft sync
 
 # 2. Search them
@@ -27,7 +27,7 @@ ft categories
 ft stats
 ```
 
-On first run, `ft sync` extracts your X session from Chrome and downloads your bookmarks into `~/.ft-bookmarks/`.
+On first run, `ft sync` extracts your X session from your browser and downloads your bookmarks into `~/.ft-bookmarks/`.
 
 ## Commands
 
@@ -96,7 +96,7 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 |---------|-------------|
 | `ft index` | Rebuild search index from JSONL cache (preserves classifications) |
 | `ft fetch-media` | Backfill/download X media assets for existing bookmarks (default: all pending bookmarks) |
-| `ft status` | Show sync status and data location |
+| `ft status` | Show sync/classification status and data location |
 | `ft path` | Print data directory path |
 
 ## Agent integration
@@ -166,14 +166,24 @@ Use `ft classify` for LLM-powered classification that catches what regex misses.
 
 ## Windows Notes
 
-In PowerShell, use `fieldtheory` instead of `ft` because `ft` is already a built-in PowerShell alias.
+In PowerShell, use `fieldtheory` or `ft.cmd` instead of `ft` because `ft` is already a built-in alias for `Format-Table`.
 
-If you want to sync from Microsoft Edge explicitly:
+If browser session sync cannot find the right profile, pass the browser and profile explicitly:
 
 ```powershell
-fieldtheory sync --browser edge
+fieldtheory sync --browser chrome --chrome-profile-directory "Default"
 fieldtheory sync --browser edge --chrome-profile-directory "Default"
 ```
+
+For Firefox, if profile detection misses the profile, pass the profile directory explicitly with `--firefox-profile-dir`.
+
+If cookie extraction still fails, close the browser completely and retry. As a last resort, pass cookies manually:
+
+```powershell
+fieldtheory sync --cookies <ct0> <auth_token>
+```
+
+Treat `ct0` and `auth_token` like passwords. Do not paste them into logs, issues, or chat.
 
 ## Platform support
 
