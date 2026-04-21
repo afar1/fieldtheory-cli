@@ -1370,6 +1370,17 @@ const TWEET_RESULT_FEATURES = {
   responsive_web_enhance_cards_enabled: false,
 };
 
+const TWEET_RESULT_FIELD_TOGGLES = {
+  withArticleRichContentState: true,
+  withArticlePlainText: true,
+  withArticleSummaryText: true,
+  withArticleVoiceOver: false,
+  withGrokAnalyze: false,
+  withDisallowedReplyControls: false,
+  withPayments: false,
+  withAuxiliaryUserLabels: false,
+};
+
 export type TweetFetchSource = 'graphql' | 'syndication';
 
 export interface TweetFetchResult {
@@ -1468,7 +1479,7 @@ function articleFromCandidate(candidate: any): ArticleContent | null {
       : '';
 
   let text = '';
-  for (const key of ['articleBody', 'body', 'text', 'description']) {
+  for (const key of ['articleBody', 'plain_text', 'plainText', 'body', 'text', 'description', 'preview_text', 'summary_text']) {
     if (typeof candidate[key] === 'string' && candidate[key].length > text.length) {
       text = candidate[key];
     }
@@ -1479,6 +1490,10 @@ function articleFromCandidate(candidate: any): ArticleContent | null {
       const fromBlocks = candidate[key].map(blockText).filter(Boolean).join('\n\n');
       if (fromBlocks.length > text.length) text = fromBlocks;
     }
+  }
+  if (Array.isArray(candidate.content_state?.blocks)) {
+    const fromRichTextBlocks = candidate.content_state.blocks.map(blockText).filter(Boolean).join('\n\n');
+    if (fromRichTextBlocks.length > text.length) text = fromRichTextBlocks;
   }
 
   text = text.replace(/\s+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
@@ -1516,6 +1531,7 @@ function buildTweetResultByRestIdUrl(tweetId: string): string {
   const params = new URLSearchParams({
     variables: JSON.stringify(variables),
     features: JSON.stringify(TWEET_RESULT_FEATURES),
+    fieldToggles: JSON.stringify(TWEET_RESULT_FIELD_TOGGLES),
   });
   return `https://x.com/i/api/graphql/${TWEET_RESULT_BY_REST_ID_QUERY_ID}/${TWEET_RESULT_BY_REST_ID_OPERATION}?${params}`;
 }

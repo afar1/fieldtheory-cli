@@ -477,6 +477,42 @@ test('parseTweetArticleByRestId: extracts X Article rich-text content', () => {
   assert.match(article.text, /useful body lives in the X Article payload/);
 });
 
+test('parseTweetArticleByRestId: extracts current X Article content_state shape', () => {
+  const fixture = {
+    data: {
+      tweetResult: {
+        result: {
+          rest_id: '2045577435484221722',
+          legacy: {
+            id_str: '2045577435484221722',
+            full_text: 'x.com/i/article/2045...',
+          },
+          article: {
+            article_results: {
+              result: {
+                title: 'Thoughts and Feelings around Claude Design',
+                plain_text: 'I tried Claude Design yesterday and I have a theory for how this whole thing shakes out.',
+                content_state: {
+                  blocks: [
+                    { text: 'I tried Claude Design yesterday and I have a theory for how this whole thing shakes out.' },
+                    { text: 'Figma invented its own primitives to make design systems work: components, styles, variables, and props.' },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const article = parseTweetArticleByRestId(fixture);
+  assert.ok(article);
+  assert.equal(article.title, 'Thoughts and Feelings around Claude Design');
+  assert.match(article.text, /I tried Claude Design yesterday/);
+  assert.match(article.text, /components, styles, variables, and props/);
+});
+
 test('parseTweetResultByRestId: returns null on tombstone / unavailable tweets', () => {
   assert.equal(
     parseTweetResultByRestId({ data: { tweetResult: { result: { __typename: 'TweetTombstone' } } } }, '123'),
