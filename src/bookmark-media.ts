@@ -132,6 +132,7 @@ function appendMediaTargets(
   bookmarkId: string,
   source: MediaTargetSource,
   downloadedProfileImageUrls: Set<string>,
+  skipProfileImages: boolean,
 ): void {
   const base = {
     bookmarkId,
@@ -160,7 +161,7 @@ function appendMediaTargets(
     }
   }
 
-  if (source.authorProfileImageUrl) {
+  if (source.authorProfileImageUrl && !skipProfileImages) {
     const fullUrl = source.authorProfileImageUrl.replace('_normal.', '_400x400.');
     if (!downloadedProfileImageUrls.has(fullUrl)) {
       pushTarget(targets, seenKeys, base, fullUrl, true);
@@ -171,6 +172,7 @@ function appendMediaTargets(
 function resolveMediaTargets(
   bookmark: BookmarkRecord,
   downloadedProfileImageUrls: Set<string>,
+  skipProfileImages: boolean,
 ): MediaFetchTarget[] {
   const targets: MediaFetchTarget[] = [];
   const seenKeys = new Set<string>();
@@ -183,7 +185,7 @@ function resolveMediaTargets(
     authorProfileImageUrl: bookmark.authorProfileImageUrl,
     media: bookmark.media,
     mediaObjects: bookmark.mediaObjects,
-  }, downloadedProfileImageUrls);
+  }, downloadedProfileImageUrls, skipProfileImages);
 
   if (bookmark.quotedTweet) {
     appendMediaTargets(targets, seenKeys, bookmark.id, {
@@ -194,7 +196,7 @@ function resolveMediaTargets(
       authorProfileImageUrl: bookmark.quotedTweet.authorProfileImageUrl,
       media: bookmark.quotedTweet.media,
       mediaObjects: bookmark.quotedTweet.mediaObjects,
-    }, downloadedProfileImageUrls);
+    }, downloadedProfileImageUrls, skipProfileImages);
   }
 
   return targets;
@@ -228,20 +230,22 @@ function hasPendingMediaTarget(
   bookmark: BookmarkRecord,
   coveredAssetKeys: Set<string>,
   coveredProfileImageUrls: Set<string>,
+  skipProfileImages: boolean,
 ): boolean {
-  return resolveMediaTargets(bookmark, coveredProfileImageUrls).some(({ tweetId, sourceUrl, isProfileImage }) => {
+  return resolveMediaTargets(bookmark, coveredProfileImageUrls, skipProfileImages).some(({ tweetId, sourceUrl, isProfileImage }) => {
     if (isProfileImage) return true;
     return !coveredAssetKeys.has(`${tweetId}::${sourceUrl}`);
   });
 }
 
 export async function fetchBookmarkMediaBatch(
-  options: { limit?: number; maxBytes?: number; onProgress?: (progress: MediaFetchProgress) => void } = {}
+  options: { limit?: number; maxBytes?: number; skipProfileImages?: boolean; onProgress?: (progress: MediaFetchProgress) => void } = {}
 ): Promise<MediaFetchManifest> {
   const limit = typeof options.limit === 'number' && !Number.isNaN(options.limit)
     ? Math.max(0, options.limit)
     : Infinity;
   const maxBytes = options.maxBytes ?? DEFAULT_MEDIA_MAX_BYTES;
+  const skipProfileImages = options.skipProfileImages ?? false;
   const mediaDir = bookmarkMediaDir();
   const manifestPath = bookmarkMediaManifestPath();
   await ensureDir(mediaDir);
@@ -252,7 +256,7 @@ export async function fetchBookmarkMediaBatch(
   const bookmarks = await readJsonLines<BookmarkRecord>(twitterBookmarksCachePath());
   const candidates = bookmarks
     .filter(hasMediaCandidate)
-    .filter((bookmark) => hasPendingMediaTarget(bookmark, coveredAssetKeys, coveredProfileImageUrls))
+    .filter((bookmark) => hasPendingMediaTarget(bookmark, coveredAssetKeys, coveredProfileImageUrls, skipProfileImages))
     .slice(0, limit);
   const entriesByKey = new Map((previous?.entries ?? []).map((entry) => [mediaEntryKeyFromEntry(entry), entry]));
   const cachedResultsBySourceUrl = new Map<string, CachedMediaResult>();
@@ -314,7 +318,7 @@ export async function fetchBookmarkMediaBatch(
   emitProgress();
 
   for (const bookmark of candidates) {
-    const mediaTargets = resolveMediaTargets(bookmark, coveredProfileImageUrls);
+    const mediaTargets = resolveMediaTargets(bookmark, coveredProfileImageUrls, skipProfileImages);
 
     for (const target of mediaTargets) {
       const { bookmarkId, tweetId, tweetUrl, authorHandle, authorName, sourceUrl, isProfileImage } = target;

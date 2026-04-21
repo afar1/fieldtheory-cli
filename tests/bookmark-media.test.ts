@@ -599,3 +599,107 @@ test('fetchBookmarkMediaBatch does not retry the same failing asset twice in one
     globalThis.fetch = originalFetch;
   }
 });
+
+test('fetchBookmarkMediaBatch with skipProfileImages skips profile images but downloads post media', async () => {
+  const photoUrl = 'https://pbs.twimg.com/media/skip-pfp-photo.jpg';
+  const quotedPhotoUrl = 'https://pbs.twimg.com/media/skip-pfp-quoted-photo.jpg';
+  const profileUrl = 'https://pbs.twimg.com/profile_images/123/avatar_normal.jpg';
+  const quotedProfileUrl = 'https://pbs.twimg.com/profile_images/456/quoted_normal.jpg';
+  const records = [{
+    id: '1',
+    tweetId: '1',
+    url: 'https://x.com/alice/status/1',
+    text: 'skip pfp test',
+    authorHandle: 'alice',
+    authorName: 'Alice',
+    authorProfileImageUrl: profileUrl,
+    syncedAt: '2026-04-09T00:00:00.000Z',
+    mediaObjects: [{ type: 'photo', url: photoUrl }],
+    quotedTweet: {
+      id: '99',
+      url: 'https://x.com/bob/status/99',
+      text: 'quoted',
+      authorHandle: 'bob',
+      authorName: 'Bob',
+      authorProfileImageUrl: quotedProfileUrl,
+      mediaObjects: [{ type: 'photo', url: quotedPhotoUrl }],
+    },
+    links: [],
+    tags: [],
+    ingestedVia: 'graphql',
+  }];
+
+  const fetchedUrls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = String(input instanceof Request ? input.url : input);
+    const method = init?.method ?? 'GET';
+    if (method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': '4', 'content-type': 'image/jpeg' },
+      });
+    }
+    fetchedUrls.push(url);
+    return new Response(Uint8Array.from([1, 2, 3, 4]), {
+      status: 200,
+      headers: { 'content-type': 'image/jpeg' },
+    });
+  };
+
+  try {
+    await withMediaDataDir(records, async () => {
+      const manifest = await fetchBookmarkMediaBatch({ limit: 10, maxBytes: 1024, skipProfileImages: true });
+
+      assert.equal(manifest.entries.filter((e) => e.sourceUrl.includes('/profile_images/')).length, 0);
+      assert.ok(!fetchedUrls.some((u) => u.includes('/profile_images/')));
+
+      const downloaded = manifest.entries
+        .filter((e) => e.status === 'downloaded')
+        .map((e) => e.sourceUrl)
+        .sort();
+      assert.deepEqual(downloaded, [photoUrl, quotedPhotoUrl].sort());
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchBookmarkMediaBatch with skipProfileImages excludes pfp-only bookmarks from candidates', async () => {
+  const profileUrl = 'https://pbs.twimg.com/profile_images/123/pfp-only_normal.jpg';
+  const records = [{
+    id: '1',
+    tweetId: '1',
+    url: 'https://x.com/alice/status/1',
+    text: 'pfp only bookmark',
+    authorHandle: 'alice',
+    authorName: 'Alice',
+    authorProfileImageUrl: profileUrl,
+    syncedAt: '2026-04-09T00:00:00.000Z',
+    mediaObjects: [],
+    links: [],
+    tags: [],
+    ingestedVia: 'graphql',
+  }];
+
+  let fetchCalled = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (): Promise<Response> => {
+    fetchCalled = true;
+    return new Response(Uint8Array.from([1, 2, 3, 4]), {
+      status: 200,
+      headers: { 'content-type': 'image/jpeg' },
+    });
+  };
+
+  try {
+    await withMediaDataDir(records, async () => {
+      const manifest = await fetchBookmarkMediaBatch({ limit: 10, maxBytes: 1024, skipProfileImages: true });
+      assert.equal(manifest.downloaded, 0);
+      assert.equal(manifest.processed, 0);
+      assert.equal(fetchCalled, false);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
