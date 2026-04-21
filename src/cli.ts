@@ -128,7 +128,7 @@ function printMediaFetchSummary(result: MediaFetchManifest): void {
   console.log(`  ✓ Manifest: ${bookmarkMediaManifestPath()}`);
 }
 
-async function runMediaFetchWithProgress(options: { limit?: number; maxBytes?: number } = {}): Promise<MediaFetchManifest> {
+async function runMediaFetchWithProgress(options: { limit?: number; maxBytes?: number; skipProfileImages?: boolean } = {}): Promise<MediaFetchManifest> {
   const startTime = Date.now();
   let lastMedia: MediaFetchProgress = {
     candidateBookmarks: 0,
@@ -144,6 +144,7 @@ async function runMediaFetchWithProgress(options: { limit?: number; maxBytes?: n
   const result = await runWithSpinner(spinner, () => fetchBookmarkMediaBatch({
     limit: options.limit,
     maxBytes: options.maxBytes,
+    skipProfileImages: options.skipProfileImages,
     onProgress: (progress: MediaFetchProgress) => {
       lastMedia = progress;
       spinner.update();
@@ -559,6 +560,7 @@ export function buildCli() {
     .option('--classify', 'Classify new bookmarks with LLM after syncing', false)
     .option('--media', 'Also download media assets for bookmarks after syncing', false)
     .option('--media-max-bytes <n>', 'Per-asset byte limit for --media (default: 200 MB)', (v: string) => Number(v), DEFAULT_MEDIA_MAX_BYTES)
+    .option('--skip-profile-images', 'Skip downloading author profile images (only applies with --media)', false)
     .option('--max-pages <n>', 'Max pages to fetch (default: unlimited)', (v: string) => Number(v))
     .option('--target-adds <n>', 'Stop after N new bookmarks', (v: string) => Number(v))
     .option('--delay-ms <n>', 'Delay between requests in ms', (v: string) => Number(v), 600)
@@ -725,7 +727,7 @@ export function buildCli() {
           console.log(`  \u2713 Data: ${dataDir()}\n`);
           warnIfEmpty(result.totalBookmarks);
           if (options.media) {
-            await runMediaFetchWithProgress({ maxBytes: mediaMaxBytes });
+            await runMediaFetchWithProgress({ maxBytes: mediaMaxBytes, skipProfileImages: Boolean(options.skipProfileImages) });
             console.log('');
           }
           const newCount = await rebuildIndex();
@@ -867,7 +869,7 @@ export function buildCli() {
           }
 
           if (options.media) {
-            await runMediaFetchWithProgress({ maxBytes: mediaMaxBytes });
+            await runMediaFetchWithProgress({ maxBytes: mediaMaxBytes, skipProfileImages: Boolean(options.skipProfileImages) });
             console.log('');
           }
 
@@ -1324,6 +1326,7 @@ export function buildCli() {
     .description('Download media assets for bookmarks')
     .option('--limit <n>', 'Max pending bookmarks to process (default: all)', (v: string) => Number(v))
     .option('--max-bytes <n>', 'Per-asset byte limit (default: 200 MB)', (v: string) => Number(v), DEFAULT_MEDIA_MAX_BYTES)
+    .option('--skip-profile-images', 'Skip downloading author profile images')
     .action(safe(async (options) => {
       if (!requireData()) return;
       await runMediaFetchWithProgress({
@@ -1331,6 +1334,7 @@ export function buildCli() {
         maxBytes: typeof options.maxBytes === 'number' && !Number.isNaN(options.maxBytes)
           ? options.maxBytes
           : DEFAULT_MEDIA_MAX_BYTES,
+        skipProfileImages: Boolean(options.skipProfileImages),
       });
     }));
 
