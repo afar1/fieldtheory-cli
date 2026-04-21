@@ -76,6 +76,7 @@ On first run, `ft sync` extracts your X session from your browser and downloads 
 | Command | Description |
 |---------|-------------|
 | `ft md` | Export bookmarks as individual markdown files, including enriched article text |
+| `ft md --changed` | Re-export only markdown files whose source bookmark data changed |
 | `ft wiki` | Compile a Karpathy-style interlinked knowledge base |
 | `ft ask <question>` | Ask questions against the knowledge base |
 | `ft ask <question> --save` | Ask and save the answer as a concept page |

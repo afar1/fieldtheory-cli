@@ -1,7 +1,7 @@
 /**
  * Bookmark-to-markdown export.
  *
- * ft md [--force]
+ * ft md [--force|--changed]
  *
  * Exports each bookmark as an individual .md file with YAML frontmatter,
  * full tweet text, and [[wikilinks]] to wiki category/domain/entity pages.
@@ -15,11 +15,12 @@ import path from 'node:path';
 import { ensureDir, writeMd } from './fs.js';
 import { mdDir } from './paths.js';
 import { listBookmarks, countBookmarks, type BookmarkTimelineItem } from './bookmarks-db.js';
-import { toIsoDate } from './date-utils.js';
+import { parseTimestampMs, toIsoDate } from './date-utils.js';
 import { slug } from './md.js';
 
 export interface ExportOptions {
   force?: boolean;
+  changed?: boolean;
   onProgress?: (status: string) => void;
 }
 
@@ -47,6 +48,25 @@ function bookmarkFilename(b: BookmarkTimelineItem): string {
 
 function oneLine(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
+}
+
+function latestSourceUpdateMs(b: BookmarkTimelineItem): number | null {
+  const values = [b.syncedAt, b.enrichedAt]
+    .map((value) => value ? parseTimestampMs(value) : null)
+    .filter((value): value is number => value != null);
+  return values.length > 0 ? Math.max(...values) : null;
+}
+
+function shouldExportBookmark(b: BookmarkTimelineItem, filePath: string, options: ExportOptions): boolean {
+  if (options.force) return true;
+  if (!fs.existsSync(filePath)) return true;
+  if (!options.changed) return false;
+
+  const changedAt = latestSourceUpdateMs(b);
+  if (changedAt == null) return false;
+
+  const fileMtime = fs.statSync(filePath).mtimeMs;
+  return changedAt > fileMtime;
 }
 
 function buildBookmarkMd(b: BookmarkTimelineItem): string {
@@ -135,18 +155,7 @@ export async function exportBookmarks(options: ExportOptions = {}): Promise<Expo
   await ensureDir(bookmarksDir());
 
   const total = await countBookmarks();
-  progress(`Exporting ${total} bookmarks to markdown...`);
-
-  // Track existing files to skip unless --force
-  const existingFiles = new Set<string>();
-  if (!options.force) {
-    try {
-      const files = fs.readdirSync(bookmarksDir());
-      for (const f of files) {
-        if (f.endsWith('.md')) existingFiles.add(f);
-      }
-    } catch { /* dir may not exist yet */ }
-  }
+  progress(options.changed ? `Exporting changed bookmarks to markdown...` : `Exporting ${total} bookmarks to markdown...`);
 
   let exported = 0;
   let skipped = 0;
@@ -159,14 +168,14 @@ export async function exportBookmarks(options: ExportOptions = {}): Promise<Expo
 
     for (const b of bookmarks) {
       const filename = bookmarkFilename(b);
+      const filePath = path.join(bookmarksDir(), filename);
 
-      if (!options.force && existingFiles.has(filename)) {
+      if (!shouldExportBookmark(b, filePath, options)) {
         skipped++;
         continue;
       }
 
       const content = buildBookmarkMd(b);
-      const filePath = path.join(bookmarksDir(), filename);
       await writeMd(filePath, content);
       exported++;
 

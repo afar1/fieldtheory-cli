@@ -38,6 +38,7 @@ export interface BookmarkTimelineItem {
   authorProfileImageUrl?: string;
   postedAt?: string | null;
   bookmarkedAt?: string | null;
+  syncedAt?: string | null;
   categories: string[];
   primaryCategory?: string | null;
   domains: string[];
@@ -47,6 +48,7 @@ export interface BookmarkTimelineItem {
   articleTitle?: string | null;
   articleText?: string | null;
   articleSite?: string | null;
+  enrichedAt?: string | null;
   mediaCount: number;
   linkCount: number;
   likeCount?: number | null;
@@ -151,6 +153,8 @@ function mapTimelineRow(row: unknown[]): BookmarkTimelineItem {
     articleTitle: (row[25] as string) ?? null,
     articleText: (row[26] as string) ?? null,
     articleSite: (row[27] as string) ?? null,
+    syncedAt: (row[28] as string) ?? null,
+    enrichedAt: (row[29] as string) ?? null,
   };
 }
 
@@ -640,7 +644,9 @@ export async function listBookmarks(
         b.folder_names,
         b.article_title,
         b.article_text,
-        b.article_site
+        b.article_site,
+        b.synced_at,
+        b.enriched_at
       FROM bookmarks b
       ${where}
       ${bookmarkSortClause(filters.sort)}
@@ -784,7 +790,9 @@ export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem 
         b.folder_names,
         b.article_title,
         b.article_text,
-        b.article_site
+        b.article_site,
+        b.synced_at,
+        b.enriched_at
       FROM bookmarks b
       WHERE b.id = ?
       LIMIT 1`,

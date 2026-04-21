@@ -1340,19 +1340,27 @@ export function buildCli() {
     .command('md')
     .description('Export bookmarks as individual markdown files')
     .option('--force', 'Re-export all bookmarks (overwrite existing files)')
+    .option('--changed', 'Re-export bookmarks whose source data changed since markdown was written')
     .action(safe(async (options) => {
       if (!requireIndex()) return;
+      if (options.force && options.changed) {
+        console.error('  Error: --force and --changed cannot be used together.');
+        process.exitCode = 1;
+        return;
+      }
       let lastLine = '';
       const spinner = createSpinner(() => lastLine);
       const result = await exportBookmarks({
         force: options.force,
+        changed: options.changed,
         onProgress: (s) => {
           lastLine = s;
           spinner.update();
         },
       });
       spinner.stop();
-      const skippedNote = result.skipped > 0 ? ` (${result.skipped} already existed)` : '';
+      const skippedReason = options.changed ? 'up to date' : 'already existed';
+      const skippedNote = result.skipped > 0 ? ` (${result.skipped} ${skippedReason})` : '';
       console.log(`Exported ${result.exported}/${result.total} bookmarks${skippedNote}`);
       console.log(`  ${result.elapsed}s elapsed`);
       console.log(`\n  Open in your markdown viewer:\n  ${mdDir()}`);
