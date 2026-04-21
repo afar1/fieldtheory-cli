@@ -45,6 +45,10 @@ function bookmarkFilename(b: BookmarkTimelineItem): string {
   return `${date}-${author}-${textSlug}.md`;
 }
 
+function oneLine(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
 function buildBookmarkMd(b: BookmarkTimelineItem): string {
   const lines: string[] = [];
 
@@ -76,6 +80,21 @@ function buildBookmarkMd(b: BookmarkTimelineItem): string {
   // ── Body ────────────────────────────────────────────────────────────
   lines.push(b.text);
   lines.push('');
+
+  // ── Enriched article content ───────────────────────────────────────
+  if (b.articleText) {
+    lines.push('## Article');
+    if (b.articleTitle) {
+      lines.push(`### ${oneLine(b.articleTitle)}`);
+      lines.push('');
+    }
+    if (b.articleSite) {
+      lines.push(`Source: ${oneLine(b.articleSite)}`);
+      lines.push('');
+    }
+    lines.push(b.articleText.trim());
+    lines.push('');
+  }
 
   // ── Links ───────────────────────────────────────────────────────────
   if (b.links.length > 0) {

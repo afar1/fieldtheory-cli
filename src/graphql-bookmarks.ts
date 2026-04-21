@@ -8,6 +8,7 @@ import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkFolder, Bookmark
 import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText, updateArticleContent } from './bookmarks-db.js';
 import type { ArticleUpdate } from './bookmarks-db.js';
 import { fetchArticle, resolveTcoLink } from './bookmark-enrich.js';
+import type { ArticleContent } from './bookmark-enrich.js';
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
 
@@ -1373,6 +1374,7 @@ export type TweetFetchSource = 'graphql' | 'syndication';
 
 export interface TweetFetchResult {
   snapshot: QuotedTweetSnapshot | null;
+  article?: ArticleContent | null;
   status: 'ok' | 'empty' | 'not_found' | 'forbidden' | 'rate_limited' | 'server_error' | 'error';
   httpStatus?: number;
   /**
@@ -1422,6 +1424,88 @@ export function parseTweetResultByRestId(json: any, tweetId: string): QuotedTwee
   };
 }
 
+function unwrapGraphqlResult(value: any): any {
+  return value?.result?.tweet ?? value?.result ?? value?.tweet ?? value;
+}
+
+function collectArticleCandidates(value: any, depth = 0): any[] {
+  if (!value || typeof value !== 'object' || depth > 8) return [];
+  const candidates: any[] = [];
+  for (const [key, child] of Object.entries(value)) {
+    if (!child || typeof child !== 'object') continue;
+    if (key.toLowerCase().includes('article')) {
+      candidates.push(unwrapGraphqlResult(child));
+    }
+    candidates.push(...collectArticleCandidates(child, depth + 1));
+  }
+  return candidates;
+}
+
+function blockText(block: any): string {
+  if (!block) return '';
+  if (typeof block === 'string') return block;
+  if (typeof block !== 'object') return '';
+
+  const direct = block.text ?? block.value ?? block.content ?? block.body;
+  if (typeof direct === 'string') return direct;
+
+  for (const key of ['children', 'items', 'spans', 'contents']) {
+    if (Array.isArray(block[key])) {
+      return block[key].map(blockText).filter(Boolean).join(' ');
+    }
+  }
+
+  return '';
+}
+
+function articleFromCandidate(candidate: any): ArticleContent | null {
+  if (!candidate || typeof candidate !== 'object') return null;
+
+  const title = typeof candidate.title === 'string'
+    ? candidate.title
+    : typeof candidate.headline === 'string'
+      ? candidate.headline
+      : '';
+
+  let text = '';
+  for (const key of ['articleBody', 'body', 'text', 'description']) {
+    if (typeof candidate[key] === 'string' && candidate[key].length > text.length) {
+      text = candidate[key];
+    }
+  }
+
+  for (const key of ['contents', 'content', 'blocks']) {
+    if (Array.isArray(candidate[key])) {
+      const fromBlocks = candidate[key].map(blockText).filter(Boolean).join('\n\n');
+      if (fromBlocks.length > text.length) text = fromBlocks;
+    }
+  }
+
+  text = text.replace(/\s+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (text.length < 50) return null;
+
+  const siteName = typeof candidate.siteName === 'string'
+    ? candidate.siteName
+    : typeof candidate.site_name === 'string'
+      ? candidate.site_name
+      : undefined;
+
+  return { title, text, siteName };
+}
+
+export function parseTweetArticleByRestId(json: any): ArticleContent | null {
+  const result = json?.data?.tweetResult?.result;
+  if (!result) return null;
+  const tweet = result.tweet ?? result;
+
+  for (const candidate of collectArticleCandidates(tweet)) {
+    const article = articleFromCandidate(candidate);
+    if (article) return article;
+  }
+
+  return null;
+}
+
 function buildTweetResultByRestIdUrl(tweetId: string): string {
   const variables = {
     tweetId,
@@ -1467,8 +1551,9 @@ export async function fetchTweetByIdViaGraphQL(
         return { snapshot: null, status: 'not_found', source: 'graphql' };
       }
       const snapshot = parseTweetResultByRestId(json, tweetId);
-      if (!snapshot) return { snapshot: null, status: 'empty', source: 'graphql' };
-      return { snapshot, status: 'ok', source: 'graphql' };
+      const article = parseTweetArticleByRestId(json);
+      if (!snapshot) return { snapshot: null, article, status: article ? 'ok' : 'empty', source: 'graphql' };
+      return { snapshot, article, status: 'ok', source: 'graphql' };
     }
 
     if (response.status === 429) {
@@ -1543,6 +1628,7 @@ async function fetchTweetViaSyndication(tweetId: string): Promise<TweetFetchResu
 
 // Text >= 275 chars may be truncated by Twitter's legacy.full_text limit
 const TRUNCATION_THRESHOLD = 275;
+const LINK_ONLY_THRESHOLD = 80;
 
 const GAP_FILL_FAILURE_REASONS: Record<string, string> = {
   empty: 'tweet exists but has no text content',
@@ -1623,6 +1709,39 @@ function resolveGapFillCookies(options: SyncGapsOptions): { csrfToken?: string; 
   }
 }
 
+function textWithoutUrls(text: string): string {
+  return text.replace(/https?:\/\/\S+/g, '').trim();
+}
+
+function isLinkOnlyBookmark(record: BookmarkRecord): boolean {
+  if (!record.links?.length) return false;
+  return textWithoutUrls(record.text ?? '').length < LINK_ONLY_THRESHOLD;
+}
+
+function isXArticleUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    return (host === 'x.com' || host === 'twitter.com') && url.pathname.startsWith('/i/article/');
+  } catch {
+    return false;
+  }
+}
+
+async function readEnrichedBookmarkIds(): Promise<Set<string>> {
+  const enrichedIds = new Set<string>();
+  try {
+    const { openDb } = await import('./db.js');
+    const { twitterBookmarksIndexPath } = await import('./paths.js');
+    const db = await openDb(twitterBookmarksIndexPath());
+    try {
+      const rows = db.exec('SELECT id FROM bookmarks WHERE enriched_at IS NOT NULL');
+      for (const row of rows[0]?.values ?? []) enrichedIds.add(row[0] as string);
+    } finally { db.close(); }
+  } catch { /* DB may not exist yet */ }
+  return enrichedIds;
+}
+
 export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillResult> {
   const delayMs = options.delayMs ?? 300;
   const cachePath = twitterBookmarksCachePath();
@@ -1643,6 +1762,7 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
       }
       return fetchTweetViaSyndication(tweetId);
     });
+  const enrichedIds = await readEnrichedBookmarkIds();
 
   // Gap 1: missing quoted tweets. Skip records where a previous gap-fill run
   // already tried and failed — otherwise dead tweets get re-fetched forever.
@@ -1654,6 +1774,13 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
   // that's already full-length won't be re-fetched on every run.
   const maybeTruncated = records.filter((r) => (r.text?.length ?? 0) >= TRUNCATION_THRESHOLD && !r.textExpandedAt);
   const truncatedIds = new Set(maybeTruncated.map((r) => r.tweetId));
+
+  // Gap 3a: X Article bookmarks can look short ("x.com/i/article/…") even
+  // when the useful body exists in the authenticated TweetResult payload.
+  const needsXArticle = records.filter((r) =>
+    !enrichedIds.has(r.id) && isLinkOnlyBookmark(r) && (r.links ?? []).some(isXArticleUrl)
+  );
+  const xArticleIds = new Set(needsXArticle.map((r) => r.tweetId));
 
   // Build lookup indexes for applying results
   const recordsByQuotedId = new Map<string, BookmarkRecord[]>();
@@ -1668,31 +1795,41 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
     list.push(r);
     recordsByTweetId.set(r.tweetId, list);
   }
+  const recordsByXArticleTweetId = new Map<string, BookmarkRecord[]>();
+  for (const r of needsXArticle) {
+    const list = recordsByXArticleTweetId.get(r.tweetId) ?? [];
+    list.push(r);
+    recordsByXArticleTweetId.set(r.tweetId, list);
+  }
 
   // Combine all IDs to fetch — deduplicated
-  const allFetchIds = [...new Set([...quotedIds, ...truncatedIds])];
+  const allFetchIds = [...new Set([...quotedIds, ...truncatedIds, ...xArticleIds])];
   const total = allFetchIds.length;
 
   let quotedFetched = 0;
   let textExpanded = 0;
+  let articlesEnriched = 0;
   let failed = 0;
   const failures: GapFillFailure[] = [];
   const dbQuotedUpdates: Array<{ id: string; quotedTweet: QuotedTweetSnapshot }> = [];
   const dbTextUpdates: Array<{ id: string; text: string }> = [];
+  const articleDbUpdates: ArticleUpdate[] = [];
 
   // Fetch and apply incrementally
   for (let i = 0; i < allFetchIds.length; i++) {
     const tweetId = allFetchIds[i];
     const now = new Date().toISOString();
     let snapshot: QuotedTweetSnapshot | null = null;
+    let article: ArticleContent | null | undefined;
     let resultStatus: TweetFetchResult['status'] = 'error';
     let resultSource: TweetFetchSource | undefined;
     try {
       const result = await fetcher(tweetId);
       snapshot = result.snapshot;
+      article = result.article;
       resultStatus = result.status;
       resultSource = result.source;
-      if (!snapshot) {
+      if (!snapshot && !article) {
         failed++;
         failures.push({
           tweetId,
@@ -1746,12 +1883,26 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
       }
     }
 
+    if (article) {
+      for (const record of recordsByXArticleTweetId.get(tweetId) ?? []) {
+        if (enrichedIds.has(record.id)) continue;
+        articleDbUpdates.push({
+          id: record.id,
+          articleTitle: article.title,
+          articleText: article.text,
+          articleSite: article.siteName,
+        });
+        enrichedIds.add(record.id);
+        articlesEnriched++;
+      }
+    }
+
     options?.onProgress?.({
       done: i + 1,
       total,
       quotedFetched,
       textExpanded,
-      articlesEnriched: 0,
+      articlesEnriched,
       failed,
     });
 
@@ -1773,33 +1924,16 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
   if (dbQuotedUpdates.length > 0) await updateQuotedTweets(dbQuotedUpdates);
   if (dbTextUpdates.length > 0) await updateBookmarkText(dbTextUpdates);
 
-  // ── Gap 3: Article enrichment for link-only bookmarks ───────────────────
+  // ── Gap 3b: Article enrichment for ordinary link-only bookmarks ─────────
   // Bookmarks with < 80 chars of text after stripping URLs are "link-only"
   // and invisible to search. Fetch the linked article to make them searchable.
   // Article content goes directly to SQLite (not JSONL) to avoid memory bloat.
 
-  const LINK_ONLY_THRESHOLD = 80;
-  const articleDbUpdates: ArticleUpdate[] = [];
-  let articlesEnriched = 0;
-
-  // Read enriched_at from DB to skip already-enriched bookmarks
-  const enrichedIds = new Set<string>();
-  try {
-    const { openDb } = await import('./db.js');
-    const { twitterBookmarksIndexPath } = await import('./paths.js');
-    const db = await openDb(twitterBookmarksIndexPath());
-    try {
-      const rows = db.exec('SELECT id FROM bookmarks WHERE enriched_at IS NOT NULL');
-      for (const row of rows[0]?.values ?? []) enrichedIds.add(row[0] as string);
-    } finally { db.close(); }
-  } catch { /* DB may not exist yet */ }
-
   // Filter to link-only bookmarks not yet enriched
-  const textWithoutUrls = (text: string) => text.replace(/https?:\/\/\S+/g, '').trim();
   const needsEnrichment = records.filter((r) => {
     if (enrichedIds.has(r.id)) return false;
-    if (!r.links?.length) return false;
-    return textWithoutUrls(r.text ?? '').length < LINK_ONLY_THRESHOLD;
+    if ((r.links ?? []).some(isXArticleUrl)) return false;
+    return isLinkOnlyBookmark(r);
   });
 
   const articleTotal = Math.min(needsEnrichment.length, 50); // cap per run

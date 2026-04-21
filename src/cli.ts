@@ -336,6 +336,7 @@ export function showWelcome(): void {
 
 export async function showDashboard(): Promise<void> {
   console.log(logo());
+  showWhatsNew();
   try {
     const view = await getBookmarkStatusView();
     const ago = view.lastUpdated ? timeAgo(view.lastUpdated) : 'never';
@@ -543,11 +544,7 @@ export function buildCli() {
     .name('ft')
     .description('Self-custody for your X/Twitter bookmarks. Sync, search, classify, and explore locally.')
     .version(getLocalVersion())
-    .showHelpAfterError()
-    .hook('preAction', () => {
-      console.log(logo());
-      showWhatsNew();
-    });
+    .showHelpAfterError();
 
   // ── sync ────────────────────────────────────────────────────────────────
 

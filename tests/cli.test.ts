@@ -4,6 +4,27 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { compareVersions, runWithSpinner, buildCli } from '../src/cli.js';
+import { dataDir } from '../src/paths.js';
+import { skillWithFrontmatter } from '../src/skill.js';
+
+async function captureStdout(fn: () => Promise<void>): Promise<string> {
+  const chunks: string[] = [];
+  const origWrite = process.stdout.write;
+  process.stdout.write = ((chunk: any, encodingOrCb?: any, cb?: any) => {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk.toString('utf-8') : String(chunk));
+    if (typeof encodingOrCb === 'function') encodingOrCb();
+    if (typeof cb === 'function') cb();
+    return true;
+  }) as typeof process.stdout.write;
+
+  try {
+    await fn();
+  } finally {
+    process.stdout.write = origWrite;
+  }
+
+  return chunks.join('');
+}
 
 test('showDashboard: prints update notice when cache is newer than local', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-dashboard-'));
@@ -48,6 +69,30 @@ test('ft wiki: description mentions engine prerequisite', () => {
   assert.ok(wikiCmd);
   const desc = wikiCmd.description().toLowerCase();
   assert.ok(desc.includes('claude') && desc.includes('codex'));
+});
+
+test('ft path: prints only the data directory', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-path-'));
+  const origEnv = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = tmpDir;
+
+  try {
+    const output = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'path']);
+    });
+    assert.equal(output, `${dataDir()}\n`);
+  } finally {
+    process.env.FT_DATA_DIR = origEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ft skill show: prints only skill content', async () => {
+  const output = await captureStdout(async () => {
+    await buildCli().parseAsync(['node', 'ft', 'skill', 'show']);
+  });
+
+  assert.equal(output, skillWithFrontmatter());
 });
 
 test('compareVersions: equal versions return 0', () => {

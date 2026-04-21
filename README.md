@@ -38,7 +38,7 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | `ft sync` | Download and sync bookmarks (no API required) |
 | `ft sync --rebuild` | Full re-crawl of all bookmarks |
 | `ft sync --continue` | Resume a paused or interrupted sync from the saved cursor |
-| `ft sync --gaps` | Backfill quoted tweets, expand truncated articles, enrich linked article content |
+| `ft sync --gaps` | Backfill quoted tweets, expand truncated/X Article text, enrich linked article content |
 | `ft sync --folders` | Also sync X bookmark folder tags (read-only mirror of X state) |
 | `ft sync --folder <name>` | Sync a single folder by name (exact or unambiguous prefix) |
 | `ft sync --classify` | Sync then classify new bookmarks with LLM |
@@ -75,7 +75,7 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 
 | Command | Description |
 |---------|-------------|
-| `ft md` | Export bookmarks as individual markdown files |
+| `ft md` | Export bookmarks as individual markdown files, including enriched article text |
 | `ft wiki` | Compile a Karpathy-style interlinked knowledge base |
 | `ft ask <question>` | Ask questions against the knowledge base |
 | `ft ask <question> --save` | Ask and save the answer as a concept page |

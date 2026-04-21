@@ -1,6 +1,6 @@
 {
   "name": "fieldtheory",
-  "version": "1.3.13",
+  "version": "1.3.14",
   "description": "Field Theory CLI. Self-custody for your X/Twitter bookmarks. Local sync, full-text search, classification, and terminal dashboards.",
   "type": "module",
   "bin": {

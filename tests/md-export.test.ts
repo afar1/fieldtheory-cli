@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildIndex } from '../src/bookmarks-db.js';
+import { buildIndex, updateArticleContent } from '../src/bookmarks-db.js';
 import { exportBookmarks } from '../src/md-export.js';
 
 async function withIsolatedDataDir(fn: (dir: string) => Promise<void>, fixtures: any[]): Promise<void> {
@@ -55,5 +55,50 @@ test('exportBookmarks: writes ISO dates for legacy postedAt in filenames and fro
     const content = await readFile(path.join(bookmarksDir, files[0]), 'utf8');
     assert.match(content, /^posted_at: 2026-04-04$/m);
     assert.match(content, /^bookmarked_at: 2026-04-17$/m);
+  }, fixtures);
+});
+
+test('exportBookmarks: includes enriched article content for X Article bookmarks', async () => {
+  const fixtures = [
+    {
+      id: '2042685676949270724',
+      tweetId: '2042685676949270724',
+      url: 'https://x.com/danveloper/status/2042685676949270724',
+      text: 'x.com/i/article/2042...',
+      authorHandle: 'danveloper',
+      authorName: 'Dan Woods',
+      syncedAt: '2026-04-20T00:00:00.000Z',
+      postedAt: 'Fri Apr 10 19:26:31 +0000 2026',
+      mediaObjects: [],
+      links: ['http://x.com/i/article/2042676487711584257'],
+      tags: [],
+      ingestedVia: 'graphql',
+    },
+  ];
+
+  await withIsolatedDataDir(async (dir) => {
+    await buildIndex();
+    await updateArticleContent([
+      {
+        id: '2042685676949270724',
+        articleTitle: 'How agents should use context',
+        articleText: 'The article body is the useful content. It should not be lost behind an X Article link.',
+        articleSite: 'X Articles',
+      },
+    ]);
+
+    const result = await exportBookmarks({ force: true });
+    assert.equal(result.exported, 1);
+
+    const bookmarksDir = path.join(dir, 'md', 'bookmarks');
+    const files = await readdir(bookmarksDir);
+    assert.equal(files.length, 1);
+
+    const content = await readFile(path.join(bookmarksDir, files[0]), 'utf8');
+    assert.match(content, /x\.com\/i\/article\/2042\.\.\./);
+    assert.match(content, /## Article/);
+    assert.match(content, /### How agents should use context/);
+    assert.match(content, /The article body is the useful content/);
+    assert.match(content, /## Links\n- http:\/\/x\.com\/i\/article\/2042676487711584257/);
   }, fixtures);
 });

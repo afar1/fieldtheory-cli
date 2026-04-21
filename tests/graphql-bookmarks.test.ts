@@ -9,6 +9,7 @@ import {
   convertTweetToRecord,
   parseBookmarksResponse,
   parseFolderTimelineResponse,
+  parseTweetArticleByRestId,
   parseTweetResultByRestId,
   sanitizeBookmarkedAt,
   scoreRecord,
@@ -445,11 +446,96 @@ test('parseTweetResultByRestId: extracts note_tweet body from live TweetResultBy
   assert.ok(snapshot.text.startsWith('LLM Knowledge Bases'));
 });
 
+test('parseTweetArticleByRestId: extracts X Article rich-text content', () => {
+  const fixture = {
+    data: {
+      tweetResult: {
+        result: {
+          rest_id: '2042685676949270724',
+          legacy: {
+            id_str: '2042685676949270724',
+            full_text: 'x.com/i/article/2042...',
+          },
+          article_results: {
+            result: {
+              title: 'How agents should use context',
+              contents: [
+                { type: 'header-two', text: 'Context discipline' },
+                { type: 'unstyled', text: 'The useful body lives in the X Article payload, not in the tweet preview.' },
+              ],
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const article = parseTweetArticleByRestId(fixture);
+  assert.ok(article);
+  assert.equal(article.title, 'How agents should use context');
+  assert.match(article.text, /Context discipline/);
+  assert.match(article.text, /useful body lives in the X Article payload/);
+});
+
 test('parseTweetResultByRestId: returns null on tombstone / unavailable tweets', () => {
   assert.equal(
     parseTweetResultByRestId({ data: { tweetResult: { result: { __typename: 'TweetTombstone' } } } }, '123'),
     null,
   );
+});
+
+test('syncGaps: enriches X Article bookmarks through TweetResult payload', async () => {
+  const xArticle: BookmarkRecord = {
+    id: '2042685676949270724',
+    tweetId: '2042685676949270724',
+    url: 'https://x.com/danveloper/status/2042685676949270724',
+    text: 'x.com/i/article/2042...',
+    authorHandle: 'danveloper',
+    syncedAt: NOW,
+    postedAt: 'Fri Apr 10 19:26:31 +0000 2026',
+    links: ['http://x.com/i/article/2042676487711584257'],
+    tags: [],
+    ingestedVia: 'graphql',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    let fetchCalls = 0;
+    const result = await syncGaps({
+      tweetFetcher: async (tweetId) => {
+        fetchCalls += 1;
+        assert.equal(tweetId, '2042685676949270724');
+        return {
+          snapshot: {
+            id: tweetId,
+            text: 'x.com/i/article/2042...',
+            url: 'https://x.com/danveloper/status/2042685676949270724',
+          },
+          article: {
+            title: 'How agents should use context',
+            text: 'The article body is the useful content. It should not be lost behind an X Article link.',
+            siteName: 'X Articles',
+          },
+          status: 'ok',
+          source: 'graphql',
+        };
+      },
+    });
+
+    assert.equal(fetchCalls, 1);
+    assert.equal(result.articlesEnriched, 1);
+    assert.equal(result.failed, 0);
+
+    const refreshed = await getBookmarkById('2042685676949270724');
+    assert.ok(refreshed);
+    assert.equal(refreshed.text, 'x.com/i/article/2042...');
+    assert.equal(refreshed.articleTitle, 'How agents should use context');
+    assert.match(refreshed.articleText ?? '', /useful content/);
+
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+    assert.equal(stored.text, 'x.com/i/article/2042...');
+  }, [xArticle]);
 });
 
 async function withIsolatedGapFillDataDir(
