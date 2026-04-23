@@ -33,9 +33,12 @@ import { exportBookmarks } from './md-export.js';
 import { renderViz } from './bookmarks-viz.js';
 import { listBrowserIds } from './browsers.js';
 import { configureHttpProxyFromEnv } from './http-proxy.js';
-import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir, bookmarkMediaDir, bookmarkMediaManifestPath } from './paths.js';
+import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir, bookmarkMediaDir, bookmarkMediaManifestPath, migrateDefaultDataDir } from './paths.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
+import { registerContactsCommand } from './commands/contacts.js';
+import { registerShareCommand } from './commands/share.js';
+import { registerWhoamiCommand } from './commands/whoami.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -1296,6 +1299,10 @@ export function buildCli() {
     .description('Print the data directory path')
     .action(() => { console.log(dataDir()); });
 
+  registerWhoamiCommand(program);
+  registerContactsCommand(program);
+  registerShareCommand(program);
+
   // ── sample ──────────────────────────────────────────────────────────────
 
   program
@@ -1571,6 +1578,7 @@ export function buildCli() {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  migrateDefaultDataDir();
   const program = buildCli();
   program.hook('postAction', async () => { await checkForUpdate(); });
   await program.parseAsync(process.argv);
