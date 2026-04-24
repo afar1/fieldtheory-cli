@@ -479,7 +479,7 @@ sleep 30
 // ── Secret redaction ──────────────────────────────────────────────────
 //
 // Defense-in-depth: child stderr can in principle contain a secret, and we
-// write stderr tails to ~/.ft-bookmarks/md/log.md. Redact high-confidence
+// write stderr tails to ~/.fieldtheory/library/log.md. Redact high-confidence
 // shapes before they're stored on EngineInvocationError or logged.
 
 test('redactSecrets: masks provider-prefixed API keys', async () => {

@@ -5,7 +5,24 @@ import fs from 'node:fs';
 export function dataDir(): string {
   const override = process.env.FT_DATA_DIR;
   if (override) return override;
-  return path.join(os.homedir(), '.ft-bookmarks');
+  const canonical = path.join(os.homedir(), '.fieldtheory', 'bookmarks');
+  const legacy = path.join(os.homedir(), '.ft-bookmarks');
+  if (fs.existsSync(canonical) || !fs.existsSync(legacy)) return canonical;
+  return legacy;
+}
+
+export function libraryDir(): string {
+  const override = process.env.FT_LIBRARY_DIR;
+  if (override) return override;
+  if (process.env.FT_DATA_DIR) return path.join(process.env.FT_DATA_DIR, 'md');
+  const canonical = path.join(os.homedir(), '.fieldtheory', 'library');
+  const legacy = path.join(os.homedir(), '.ft-bookmarks', 'md');
+  if (fs.existsSync(canonical) || !fs.existsSync(legacy)) return canonical;
+  return legacy;
+}
+
+export function commandsDir(): string {
+  return process.env.FT_COMMANDS_DIR ?? path.join(os.homedir(), '.fieldtheory', 'commands');
 }
 
 function ensureDirSync(dir: string): void {
@@ -59,7 +76,7 @@ export function isFirstRun(): boolean {
 // ── Markdown wiki paths ──────────────────────────────────────────────────
 
 export function mdDir(): string {
-  return path.join(dataDir(), 'md');
+  return libraryDir();
 }
 
 export function mdIndexPath(): string {
@@ -75,7 +92,7 @@ export function mdStatePath(): string {
 }
 
 export function mdSchemaPath(): string {
-  return path.join(dataDir(), 'schema.md');
+  return path.join(mdDir(), 'schema.md');
 }
 
 export function mdCategoriesDir(): string {

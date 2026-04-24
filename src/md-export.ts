@@ -7,7 +7,7 @@
  * full tweet text, and [[wikilinks]] to wiki category/domain/entity pages.
  * No LLM required — fast, deterministic, portable.
  *
- * Output: ~/.ft-bookmarks/md/bookmarks/<date>-<author>-<slug>.md
+ * Output: ~/.fieldtheory/library/bookmarks/<date>-<author>-<slug>.md
  */
 
 import fs from 'node:fs';

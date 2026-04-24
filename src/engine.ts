@@ -2,7 +2,7 @@
  * LLM engine detection, selection, and invocation.
  *
  * Knows how to call `claude` and `codex` out of the box.
- * Remembers the user's choice in ~/.ft-bookmarks/.preferences.
+ * Remembers the user's choice in the bookmark data directory's .preferences file.
  */
 
 import { spawn, spawnSync } from 'node:child_process';
@@ -250,7 +250,7 @@ function tailString(buf: Buffer, bytes: number): string {
  *
  * `claude` / `codex` don't currently echo secrets to stderr, but this is
  * defense-in-depth: if an engine ever does, we don't want the raw token in
- * `~/.ft-bookmarks/md/log.md` forever.
+ * `~/.fieldtheory/library/log.md` forever.
  */
 export function redactSecrets(s: string): string {
   return s

@@ -4,7 +4,7 @@
  * ft md [--full]
  *
  * Builds/updates a Karpathy-style LLM wiki from the bookmarks database.
- * Output lives in ~/.ft-bookmarks/md/ as plain markdown with [[wikilinks]],
+ * Output lives in ~/.fieldtheory/library/ as plain markdown with [[wikilinks]],
  * compatible with Atomic and other markdown knowledge graph tools.
  *
  * Incremental by default: only pages whose source bookmark count changed are
@@ -135,7 +135,7 @@ Edit it to evolve how the LLM maintains wiki pages.
 ## Directory Structure
 
 \`\`\`
-~/.ft-bookmarks/md/
+~/.fieldtheory/library/
 ├── index.md          # Content catalog (auto-generated, do not edit)
 ├── log.md            # Append-only compile + query log
 ├── md-state.json     # Internal compilation state

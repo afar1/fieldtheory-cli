@@ -27,7 +27,7 @@ ft categories
 ft stats
 ```
 
-On first run, `ft sync` extracts your X session from your browser and downloads your bookmarks into `~/.ft-bookmarks/`.
+On first run, `ft sync` extracts your X session from your browser and downloads your bookmarks into `~/.fieldtheory/bookmarks/`.
 
 ## Commands
 
@@ -134,24 +134,27 @@ Works with Claude Code, Codex, or any agent with shell access.
 
 ## Data
 
-All data is stored locally at `~/.ft-bookmarks/`:
+Data is stored locally under `~/.fieldtheory/`:
 
 ```
-~/.ft-bookmarks/
+~/.fieldtheory/bookmarks/
   bookmarks.jsonl         # raw bookmark cache (one per line)
   bookmarks.db            # SQLite FTS5 search index
   bookmarks-meta.json     # sync metadata
   oauth-token.json        # OAuth token (if using API mode, chmod 600)
-  md/                     # markdown knowledge base (ft wiki / ft md)
+
+~/.fieldtheory/library/
+  index.md                # markdown knowledge base (ft wiki / ft md)
 ```
 
-Override the location with `FT_DATA_DIR`:
+Override locations with `FT_DATA_DIR` and `FT_LIBRARY_DIR`:
 
 ```bash
 export FT_DATA_DIR=/path/to/custom/dir
+export FT_LIBRARY_DIR=/path/to/custom/library
 ```
 
-To remove all data: `rm -rf ~/.ft-bookmarks`
+To remove all data: `rm -rf ~/.fieldtheory/bookmarks ~/.fieldtheory/library`
 
 ## Categories
 
@@ -204,7 +207,7 @@ Session sync extracts cookies from your browser's local database. Use `ft sync -
 
 **Chrome session sync** reads cookies from Chrome's local database, uses them for the sync request, and discards them. Cookies are never stored separately.
 
-**OAuth tokens** are stored with `chmod 600` (owner-only). Treat `~/.ft-bookmarks/oauth-token.json` like a password.
+**OAuth tokens** are stored with `chmod 600` (owner-only). Treat `~/.fieldtheory/bookmarks/oauth-token.json` like a password.
 
 **The default sync uses X's internal GraphQL API**, the same API that x.com uses in your browser. For the official v2 API, use `ft auth` + `ft sync --api`.
 
