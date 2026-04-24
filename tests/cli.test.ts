@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { compareVersions, runWithSpinner, buildCli } from '../src/cli.js';
+import { compareVersions, runWithSpinner, buildCli, parseCookieOption } from '../src/cli.js';
 import { dataDir } from '../src/paths.js';
 import { skillWithFrontmatter } from '../src/skill.js';
 
@@ -63,6 +63,19 @@ test('ft wiki: --engine option is registered', () => {
   assert.ok(opts.includes('--engine'), `expected --engine among ${opts.join(', ')}`);
 });
 
+test('ft sync: media is on by default and exposes --no-media', () => {
+  const program = buildCli();
+  const syncCmd = program.commands.find((c: any) => c.name() === 'sync');
+  assert.ok(syncCmd, 'sync command should be registered');
+
+  assert.equal(syncCmd.opts().media, true, 'sync should default to downloading media');
+
+  const mediaOption = syncCmd.options.find((o: any) => o.attributeName() === 'media');
+  assert.ok(mediaOption, 'a media option must be registered');
+  assert.equal(mediaOption.negate, true, 'the media option must be --no-media (negated)');
+  assert.equal(mediaOption.long, '--no-media');
+});
+
 test('ft wiki: description mentions engine prerequisite', () => {
   const program = buildCli();
   const wikiCmd = program.commands.find((c: any) => c.name() === 'wiki');
@@ -117,6 +130,30 @@ test('compareVersions: major beats minor', () => {
 
 test('compareVersions: handles double-digit segments', () => {
   assert.ok(compareVersions('1.10.0', '1.9.0') > 0);
+});
+
+test('parseCookieOption: returns empty when no --cookies passed', () => {
+  assert.deepEqual(parseCookieOption(undefined), {});
+  assert.deepEqual(parseCookieOption([]), {});
+  assert.deepEqual(parseCookieOption('not-an-array'), {});
+});
+
+test('parseCookieOption: with only ct0, builds ct0-only header', () => {
+  const parsed = parseCookieOption(['abc123']);
+  assert.equal(parsed.csrfToken, 'abc123');
+  assert.equal(parsed.cookieHeader, 'ct0=abc123');
+});
+
+test('parseCookieOption: with ct0 and auth_token, joins both', () => {
+  const parsed = parseCookieOption(['abc123', 'auth_xyz']);
+  assert.equal(parsed.csrfToken, 'abc123');
+  assert.equal(parsed.cookieHeader, 'ct0=abc123; auth_token=auth_xyz');
+});
+
+test('parseCookieOption: coerces non-string array elements to strings', () => {
+  const parsed = parseCookieOption([42, true]);
+  assert.equal(parsed.csrfToken, '42');
+  assert.equal(parsed.cookieHeader, 'ct0=42; auth_token=true');
 });
 
 test('runWithSpinner: stops spinner after success', async () => {

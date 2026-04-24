@@ -35,15 +35,15 @@ On first run, `ft sync` extracts your X session from your browser and downloads 
 
 | Command | Description |
 |---------|-------------|
-| `ft sync` | Download and sync bookmarks (no API required) |
+| `ft sync` | Download and sync bookmarks, then fetch any missing media (photos, video posters, capped videos). No API required. |
+| `ft sync --no-media` | Sync bookmarks only; skip the media download pass |
+| `ft sync --skip-profile-images` | Sync bookmarks and post media but skip author profile images |
 | `ft sync --rebuild` | Full re-crawl of all bookmarks |
 | `ft sync --continue` | Resume a paused or interrupted sync from the saved cursor |
-| `ft sync --gaps` | Backfill quoted tweets, expand truncated/X Article text, enrich linked article content |
+| `ft sync --gaps` | Backfill quoted tweets, expand truncated/X Article text, enrich linked articles, and fill any media gaps |
 | `ft sync --folders` | Also sync X bookmark folder tags (read-only mirror of X state) |
 | `ft sync --folder <name>` | Sync a single folder by name (exact or unambiguous prefix) |
 | `ft sync --classify` | Sync then classify new bookmarks with LLM |
-| `ft sync --media` | Sync bookmarks, then download X media assets locally (photos, video posters, capped videos) |
-| `ft sync --media --skip-profile-images` | Download post media without author profile images |
 | `ft sync --api` | Sync via OAuth API (cross-platform) |
 | `ft auth` | Set up OAuth for API-based sync (optional) |
 

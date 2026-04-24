@@ -155,6 +155,20 @@ async function runMediaFetchWithProgress(options: { limit?: number; maxBytes?: n
   return result;
 }
 
+/**
+ * Parse the `--cookies <ct0> [auth_token]` variadic option into the shape
+ * syncBookmarksGraphQL and syncGaps expect. Returns undefined fields when
+ * the flag wasn't passed, so callers can fall through to browser extraction.
+ */
+export function parseCookieOption(cookies: unknown): { csrfToken?: string; cookieHeader?: string } {
+  if (!cookies || !Array.isArray(cookies) || cookies.length === 0) return {};
+  const csrfToken = String(cookies[0]);
+  const authToken = cookies.length > 1 ? String(cookies[1]) : undefined;
+  const parts = [`ct0=${csrfToken}`];
+  if (authToken) parts.push(`auth_token=${authToken}`);
+  return { csrfToken, cookieHeader: parts.join('; ') };
+}
+
 function warnIfEmpty(totalBookmarks: number): void {
   if (totalBookmarks > 0) return;
   console.log(`  \u26a0 No bookmarks were found. This usually means:`);
@@ -232,6 +246,10 @@ function showCachedUpdateNotice(): void {
 // ── What's new ────────────────────────────────────────────────────────────
 
 const WHATS_NEW: Record<string, string[]> = {
+  '1.3.18': [
+    'ft sync now downloads media by default; pass --no-media to skip',
+    'ft sync --gaps now also fills media gaps in the same pass',
+  ],
   '1.3.13': [
     'ft sync --media now downloads X photos, video posters, capped videos, and quoted-tweet media',
     'ft fetch-media now backfills missing media across your archive instead of stopping at the first 100 bookmarks',
@@ -558,9 +576,9 @@ export function buildCli() {
     .option('--gaps', 'Backfill missing data (quoted tweets, truncated articles, linked article content)', false)
     .option('--yes', 'Skip confirmation prompts', false)
     .option('--classify', 'Classify new bookmarks with LLM after syncing', false)
-    .option('--media', 'Also download media assets for bookmarks after syncing', false)
-    .option('--media-max-bytes <n>', 'Per-asset byte limit for --media (default: 200 MB)', (v: string) => Number(v), DEFAULT_MEDIA_MAX_BYTES)
-    .option('--skip-profile-images', 'Skip downloading author profile images (only applies with --media)', false)
+    .option('--no-media', 'Skip downloading media assets after syncing (default: media is downloaded)')
+    .option('--media-max-bytes <n>', 'Per-asset byte limit for media downloads (default: 200 MB)', (v: string) => Number(v), DEFAULT_MEDIA_MAX_BYTES)
+    .option('--skip-profile-images', 'Skip downloading author profile images', false)
     .option('--max-pages <n>', 'Max pages to fetch (default: unlimited)', (v: string) => Number(v))
     .option('--target-adds <n>', 'Stop after N new bookmarks', (v: string) => Number(v))
     .option('--delay-ms <n>', 'Delay between requests in ms', (v: string) => Number(v), 600)
@@ -610,19 +628,25 @@ export function buildCli() {
           process.exitCode = 1;
           return;
         }
-        if (options.media && options.gaps) {
-          console.error('  Error: --media cannot be combined with --gaps. Run them separately.');
-          process.exitCode = 1;
-          return;
-        }
+        // Commander sets options.media=false when --no-media is passed;
+        // otherwise it's true by default.
+        const downloadMedia = options.media !== false;
         const mediaMaxBytes = typeof options.mediaMaxBytes === 'number' && !Number.isNaN(options.mediaMaxBytes)
           ? options.mediaMaxBytes
           : DEFAULT_MEDIA_MAX_BYTES;
+        const postSyncMediaFetch = async (): Promise<void> => {
+          if (!downloadMedia) return;
+          await runMediaFetchWithProgress({ maxBytes: mediaMaxBytes, skipProfileImages: Boolean(options.skipProfileImages) });
+          console.log('');
+        };
 
         // ── gaps mode: backfill missing data for existing bookmarks ──
         if (options.gaps) {
           const startTime = Date.now();
-          process.stderr.write('  Filling gaps (quoted tweets, truncated text, articles)...\n');
+          const opening = downloadMedia
+            ? '  Filling gaps (quoted tweets, truncated text, articles, media)...\n'
+            : '  Filling gaps (quoted tweets, truncated text, articles)...\n';
+          process.stderr.write(opening);
           let lastProgress: GapFillProgress = { done: 0, total: 0, quotedFetched: 0, textExpanded: 0, articlesEnriched: 0, failed: 0 };
           const spinner = createSpinner(() => {
             const p = lastProgress;
@@ -636,16 +660,7 @@ export function buildCli() {
             parts.push(`${elapsed}s`);
             return parts.join(' \u2502 ');
           });
-          // Parse --cookies <ct0> [auth_token] — variadic, gives us an array
-          let gapCsrfToken: string | undefined;
-          let gapCookieHeader: string | undefined;
-          if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
-            gapCsrfToken = String(options.cookies[0]);
-            const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
-            const parts = [`ct0=${gapCsrfToken}`];
-            if (authToken) parts.push(`auth_token=${authToken}`);
-            gapCookieHeader = parts.join('; ');
-          }
+          const { csrfToken: gapCsrfToken, cookieHeader: gapCookieHeader } = parseCookieOption(options.cookies);
           const result = await runWithSpinner(spinner, () => syncGaps({
             delayMs: Number(options.delayMs) || 300,
             browser: options.browser ? String(options.browser) : undefined,
@@ -688,6 +703,7 @@ export function buildCli() {
               console.log(`  ${result.bookmarkedAtMissing} bookmarks missing a reliable bookmark date`);
             }
           }
+          await postSyncMediaFetch();
           return;
         }
 
@@ -726,10 +742,7 @@ export function buildCli() {
           console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
           console.log(`  \u2713 Data: ${dataDir()}\n`);
           warnIfEmpty(result.totalBookmarks);
-          if (options.media) {
-            await runMediaFetchWithProgress({ maxBytes: mediaMaxBytes, skipProfileImages: Boolean(options.skipProfileImages) });
-            console.log('');
-          }
+          await postSyncMediaFetch();
           const newCount = await rebuildIndex();
           if (options.classify && newCount > 0) {
             await classifyNew(engineOverride);
@@ -744,16 +757,7 @@ export function buildCli() {
             }
             return `Syncing bookmarks...  ${lastSync.newAdded} new  \u2502  page ${lastSync.page}  \u2502  ${elapsed}s`;
           });
-          // Parse --cookies <ct0> [auth_token] — variadic, gives us an array
-          let csrfToken: string | undefined;
-          let cookieHeader: string | undefined;
-          if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
-            csrfToken = String(options.cookies[0]);
-            const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
-            const parts = [`ct0=${csrfToken}`];
-            if (authToken) parts.push(`auth_token=${authToken}`);
-            cookieHeader = parts.join('; ');
-          }
+          const { csrfToken, cookieHeader } = parseCookieOption(options.cookies);
 
           // Load saved cursor for --continue mode
           let resumeCursor: string | undefined;
@@ -868,10 +872,7 @@ export function buildCli() {
             }
           }
 
-          if (options.media) {
-            await runMediaFetchWithProgress({ maxBytes: mediaMaxBytes, skipProfileImages: Boolean(options.skipProfileImages) });
-            console.log('');
-          }
+          await postSyncMediaFetch();
 
           const newCount = await rebuildIndex();
           if (options.classify && newCount > 0) {
