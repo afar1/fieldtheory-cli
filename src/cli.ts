@@ -783,7 +783,7 @@ export function buildCli() {
           const result = await runWithSpinner(spinner, () => syncBookmarksGraphQL({
             incremental: !Boolean(options.rebuild) && !Boolean(options.continue),
             resumeCursor,
-            stalePageLimit: continueWithoutCursor ? Infinity : undefined,
+            stalePageLimit: continueWithoutCursor ? 20 : undefined, // Provide a generous but finite safety net
             maxPages: options.maxPages != null ? Number(options.maxPages) : undefined,
             targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
             delayMs: Number(options.delayMs) || 600,
