@@ -486,9 +486,34 @@ export function scoreRecord(record: BookmarkRecord): number {
 
 export function mergeBookmarkRecord(existing: BookmarkRecord | undefined, incoming: BookmarkRecord): BookmarkRecord {
   if (!existing) return incoming;
-  return scoreRecord(incoming) >= scoreRecord(existing)
+  
+  const base = scoreRecord(incoming) >= scoreRecord(existing)
     ? { ...existing, ...incoming }
     : { ...incoming, ...existing };
+
+  // Explicitly preserve hard-earned gap-fill data if the incoming payload dropped it.
+  if (existing.quotedStatusId && !incoming.quotedStatusId) {
+    base.quotedStatusId = existing.quotedStatusId;
+    base.quotedTweet = existing.quotedTweet;
+    base.quotedTweetFailedAt = existing.quotedTweetFailedAt;
+  }
+  if (existing.textExpandedAt && !incoming.textExpandedAt) {
+    base.textExpandedAt = existing.textExpandedAt;
+    // Don't regress to truncated text
+    if (existing.text.length > incoming.text.length) {
+      base.text = existing.text;
+    }
+  }
+  if (existing.articleText && !incoming.articleText) {
+    base.articleText = existing.articleText;
+    base.articleTitle = existing.articleTitle;
+    base.articleSite = existing.articleSite;
+  }
+  if (existing.enrichedAt && !incoming.enrichedAt) {
+    base.enrichedAt = existing.enrichedAt;
+  }
+
+  return base;
 }
 
 export function mergeRecords(

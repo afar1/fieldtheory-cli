@@ -1153,6 +1153,25 @@ test('mergeBookmarkRecord: sparser incoming does not clobber richer existing', (
   assert.ok(result.author);
 });
 
+test('mergeBookmarkRecord: sparser incoming does not clobber existing quoted tweet data', () => {
+  const existing = makeRecord({
+    text: 'Check this out',
+    quotedStatusId: '555',
+    quotedTweet: { id: '555', text: 'Original tweet' } as any
+  });
+  const incoming = makeRecord({ 
+    text: 'Check this out',
+    quotedStatusId: undefined, // X sometimes drops this in subsequent fetches
+    quotedTweet: undefined
+  });
+  
+  // We expect the merge to PRESERVE the quoted data because the existing is "richer"
+  // or at least because we shouldn't lose hard-earned backfill data.
+  const result = mergeBookmarkRecord(existing, incoming);
+  assert.equal(result.quotedStatusId, '555');
+  assert.ok(result.quotedTweet);
+});
+
 test('mergeBookmarkRecord: equal scores prefer incoming (>=)', () => {
   const existing = makeRecord({ text: 'Old', postedAt: '2026-01-01' });
   const incoming = makeRecord({ text: 'New', postedAt: '2026-02-01' });
