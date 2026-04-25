@@ -59,6 +59,8 @@ export interface BookmarkTimelineItem {
   viewCount?: number | null;
   folderIds: string[];
   folderNames: string[];
+  quotedStatusId?: string | null;
+  quotedTweet?: any | null;
 }
 
 export interface BookmarkTimelineFilters {
@@ -155,6 +157,8 @@ function mapTimelineRow(row: unknown[]): BookmarkTimelineItem {
     articleSite: (row[27] as string) ?? null,
     syncedAt: (row[28] as string) ?? null,
     enrichedAt: (row[29] as string) ?? null,
+    quotedStatusId: (row[30] as string) ?? null,
+    quotedTweet: row[31] ? JSON.parse(row[31] as string) : null,
   };
 }
 
@@ -646,7 +650,9 @@ export async function listBookmarks(
         b.article_text,
         b.article_site,
         b.synced_at,
-        b.enriched_at
+        b.enriched_at,
+        b.quoted_status_id,
+        b.quoted_tweet_json
       FROM bookmarks b
       ${where}
       ${bookmarkSortClause(filters.sort)}
@@ -792,7 +798,9 @@ export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem 
         b.article_text,
         b.article_site,
         b.synced_at,
-        b.enriched_at
+        b.enriched_at,
+        b.quoted_status_id,
+        b.quoted_tweet_json
       FROM bookmarks b
       WHERE b.id = ?
       LIMIT 1`,

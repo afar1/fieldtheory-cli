@@ -1028,8 +1028,15 @@ export function buildCli() {
       console.log(`${item.id} \u00b7 ${item.authorHandle ? `@${item.authorHandle}` : '@?'}`);
       console.log(item.url);
       console.log(item.text);
-      if (item.links.length) console.log(`links: ${item.links.join(', ')}`);
-      if (item.categories) console.log(`categories: ${item.categories}`);
+      
+      if (item.quotedTweet) {
+        console.log(`\n  \u250c\u2500 Quoted: @${item.quotedTweet.authorHandle}`);
+        console.log(`  \u2502 ${item.quotedTweet.text.split('\n').join('\n  \u2502 ')}`);
+        console.log(`  \u2514\u2500 ${item.quotedTweet.url ?? `https://x.com/i/status/${item.quotedTweet.id}`}`);
+      }
+      
+      if (item.links.length) console.log(`\nlinks: ${item.links.join(', ')}`);
+      if (item.categories.length) console.log(`categories: ${item.categories.join(', ')}`);
       if (item.domains) console.log(`domains: ${item.domains}`);
     }));
 
