@@ -100,6 +100,17 @@ On first run, `ft sync` extracts your X session from your browser and downloads 
 | `ft commands new <name>` | Create a reusable portable command |
 | `ft commands validate [name]` | Check command shape and guardrails |
 
+`ft library open` targets the packaged Field Theory app by bundle id (`com.fieldtheory.app`) instead of trusting the system-wide `fieldtheory://` handler. That avoids accidentally opening a generic Electron development app when another checkout registered the same URL scheme.
+
+For local Field Theory app development, point the CLI at the dev checkout:
+
+```bash
+export FT_APP_DEV_DIR=/Users/you/dev/fieldtheory/mac-app
+ft library open notes/example.md
+```
+
+Packaged variants can override the bundle id with `FT_APP_BUNDLE_ID`. Advanced development launchers can set `FT_APP_OPEN_COMMAND` to an executable that receives the deep-link URL as its first argument.
+
 ### Agent integration
 
 | Command | Description |

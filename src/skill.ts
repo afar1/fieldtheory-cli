@@ -75,6 +75,7 @@ Combine filters: \`ft list --category tool --domain ai --limit 10\`
 - Don't dump raw output; summarize and connect findings to the user's current work
 - Cross-reference multiple queries to build a complete picture
 - For updates, use \`--expected-sha256\` from a prior \`show --json\` result or pass \`--force\` only when explicitly appropriate
+- In local app development, set \`FT_APP_DEV_DIR\` before \`ft library open\` so the CLI targets the Field Theory dev checkout instead of a generic Electron URL handler
 - Deletes move local files to Trash; the Mac app owns Library sync and remote tombstones
 `;
 

@@ -182,9 +182,9 @@ export function registerCompanionCommands(program: Command, safe: SafeAction): v
     .option('--json', 'JSON output')
     .action(safe(async (targetPath: string, options) => {
       const target = buildFieldTheoryOpenTarget(targetPath, 'library');
-      if (options.launch !== false) openFieldTheoryTarget(target);
+      const launch = options.launch !== false ? openFieldTheoryTarget(target) : undefined;
       if (options.json) {
-        printJson(target);
+        printJson(launch ? { ...target, launch } : target);
         return;
       }
       console.log(target.url ?? target.path);
@@ -343,9 +343,9 @@ export function registerCompanionCommands(program: Command, safe: SafeAction): v
     .action(safe(async (targetPath: string, options) => {
       const kind = parseOpenKind(options.kind) ?? inferOpenKind(targetPath) ?? undefined;
       const target = buildFieldTheoryOpenTarget(targetPath, kind);
-      if (options.launch !== false) openFieldTheoryTarget(target);
+      const launch = options.launch !== false ? openFieldTheoryTarget(target) : undefined;
       if (options.json) {
-        printJson(target);
+        printJson(launch ? { ...target, launch } : target);
         return;
       }
       if (target.url) console.log(target.url);
