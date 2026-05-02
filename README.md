@@ -99,6 +99,7 @@ On first run, `ft sync` extracts your X session from your browser and downloads 
 | `ft commands list` | List portable commands under `~/.fieldtheory/commands` |
 | `ft commands new <name>` | Create a reusable portable command |
 | `ft commands validate [name]` | Check command shape and guardrails |
+| `ft install app` | Download and install the latest Field Theory Mac app from `afar1/field-releases` |
 
 `ft library open` targets the packaged Field Theory app by bundle id (`com.fieldtheory.app`) instead of trusting the system-wide `fieldtheory://` handler. That avoids accidentally opening a generic Electron development app when another checkout registered the same URL scheme.
 

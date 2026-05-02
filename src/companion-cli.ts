@@ -1,5 +1,6 @@
 import type { Command } from 'commander';
 import { buildFieldTheoryOpenTarget, inferOpenKind, openFieldTheoryTarget, type FieldTheoryOpenKind } from './app-open.js';
+import { installFieldTheoryApp } from './app-install.js';
 import {
   createCommandDocument,
   deleteCommandDocument,
@@ -353,5 +354,28 @@ export function registerCompanionCommands(program: Command, safe: SafeAction): v
         console.log(target.note ?? 'No app deep link available for this target.');
         console.log(target.path);
       }
+    }));
+
+  const install = program
+    .command('install')
+    .description('Install Field Theory components');
+
+  install
+    .command('app')
+    .description('Download and install the latest Field Theory Mac app')
+    .option('--install-dir <path>', 'Directory to install the app into', '/Applications')
+    .option('--open', 'Open Field Theory after installing')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const result = await installFieldTheoryApp({
+        installDir: String(options.installDir),
+        open: Boolean(options.open),
+        onProgress: options.json ? undefined : (message) => console.log(message),
+      });
+      if (options.json) {
+        printJson(result);
+        return;
+      }
+      console.log(`Installed Field Theory ${result.release}: ${result.appPath}`);
     }));
 }

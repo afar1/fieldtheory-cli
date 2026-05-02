@@ -73,11 +73,23 @@ test('ft search, stats, and status expose --json', () => {
   }
 });
 
-test('ft paths, library, commands, and app command groups are registered', () => {
+test('ft paths, library, commands, app, and install command groups are registered', () => {
   const program = buildCli();
-  for (const name of ['paths', 'library', 'commands', 'app']) {
+  for (const name of ['paths', 'library', 'commands', 'app', 'install']) {
     assert.ok(program.commands.find((c: any) => c.name() === name), `${name} command should be registered`);
   }
+});
+
+test('ft install app command is registered', () => {
+  const program = buildCli();
+  const installCmd = program.commands.find((c: any) => c.name() === 'install');
+  assert.ok(installCmd, 'install command should be registered');
+  const appCmd = installCmd.commands.find((c: any) => c.name() === 'app');
+  assert.ok(appCmd, 'install app command should be registered');
+  const opts = appCmd.options.map((o: any) => o.long);
+  assert.ok(opts.includes('--install-dir'));
+  assert.ok(opts.includes('--open'));
+  assert.ok(opts.includes('--json'));
 });
 
 test('ft sync: media is on by default and exposes --no-media', () => {
