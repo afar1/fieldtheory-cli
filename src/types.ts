@@ -71,6 +71,10 @@ export interface BookmarkRecord {
   inReplyToUserId?: string;
   quotedStatusId?: string;
   quotedTweet?: QuotedTweetSnapshot;
+  articleTitle?: string | null;
+  articleText?: string | null;
+  articleSite?: string | null;
+  enrichedAt?: string | null;
   language?: string;
   sourceApp?: string;
   possiblySensitive?: boolean;

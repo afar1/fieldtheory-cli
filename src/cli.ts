@@ -5,7 +5,7 @@ import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service
 import { runTwitterOAuthFlow } from './xauth.js';
 import { syncBookmarksGraphQL, syncGaps, syncBookmarkFolders } from './graphql-bookmarks.js';
 import type { SyncProgress, GapFillProgress, FolderSyncProgress } from './graphql-bookmarks.js';
-import type { BookmarkFolder } from './types.js';
+import type { BookmarkFolder, QuotedTweetSnapshot } from './types.js';
 import { DEFAULT_MEDIA_MAX_BYTES, fetchBookmarkMediaBatch } from './bookmark-media.js';
 import type { MediaFetchManifest, MediaFetchProgress } from './bookmark-media.js';
 import {
@@ -462,6 +462,19 @@ export function sanitizeForDisplay(value: string): string {
   return value.replace(/[\x00-\x1f\x7f-\x9f]/g, '?');
 }
 
+function formatQuotedTweetLines(quoted: QuotedTweetSnapshot): string[] {
+  const author = quoted.authorHandle ? `@${quoted.authorHandle}` : (quoted.authorName ?? 'quoted tweet');
+  const date = quoted.postedAt ? ` · ${quoted.postedAt.slice(0, 10)}` : '';
+  const text = quoted.text.split(/\r?\n/).map((line) => `  | ${sanitizeForDisplay(line)}`);
+  return [
+    '',
+    'quoted tweet',
+    `  | ${sanitizeForDisplay(author)}${date}`,
+    ...text,
+    `  | ${quoted.url}`,
+  ];
+}
+
 export function formatFolderMirrorStats(stats: { added: number; tagged: number; untagged: number; unchanged: number }): string {
   const parts: string[] = [];
   if (stats.added > 0) parts.push(`${stats.added} new`);
@@ -774,16 +787,15 @@ export function buildCli() {
             }
           }
 
-          // When continuing without a cursor, disable stale page limit so we can
-          // page through all existing bookmarks to reach the ones beyond the old cap.
-          // With a saved cursor we skip straight to where we left off, so the normal
-          // stale limit is fine.
+          // When continuing without a cursor, give the scan enough runway to
+          // pass small local gaps, but still stop if every fetched page is old.
           const continueWithoutCursor = Boolean(options.continue) && !resumeCursor;
 
           const result = await runWithSpinner(spinner, () => syncBookmarksGraphQL({
             incremental: !Boolean(options.rebuild) && !Boolean(options.continue),
             resumeCursor,
-            stalePageLimit: continueWithoutCursor ? Infinity : undefined,
+            stalePageLimit: continueWithoutCursor ? 20 : undefined,
+            staleWhenNoNewRecords: continueWithoutCursor,
             maxPages: options.maxPages != null ? Number(options.maxPages) : undefined,
             targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
             delayMs: Number(options.delayMs) || 600,
@@ -1028,6 +1040,9 @@ export function buildCli() {
       console.log(`${item.id} \u00b7 ${item.authorHandle ? `@${item.authorHandle}` : '@?'}`);
       console.log(item.url);
       console.log(item.text);
+      if (item.quotedTweet) {
+        console.log(formatQuotedTweetLines(item.quotedTweet).join('\n'));
+      }
       if (item.links.length) console.log(`links: ${item.links.join(', ')}`);
       if (item.categories) console.log(`categories: ${item.categories}`);
       if (item.domains) console.log(`domains: ${item.domains}`);

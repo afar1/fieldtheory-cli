@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, sanitizeFtsQuery, getCategoryCounts, sampleByCategory, getClassificationProgress } from '../src/bookmarks-db.js';
+import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, listBookmarks, sanitizeFtsQuery, getCategoryCounts, sampleByCategory, getClassificationProgress } from '../src/bookmarks-db.js';
 import { openDb, saveDb } from '../src/db.js';
 import { twitterBookmarksIndexPath } from '../src/paths.js';
 
@@ -80,6 +80,32 @@ test('buildIndex refreshes existing rows without dropping classifications', asyn
     assert.equal(bookmark.primaryDomain, 'example.com');
     assert.deepEqual(bookmark.githubUrls, ['https://github.com/openai/test']);
   });
+});
+
+test('getBookmarkById and listBookmarks hydrate quoted tweets', async () => {
+  const fixtures = [{
+    ...FIXTURES[0],
+    quotedStatusId: '55',
+    quotedTweet: {
+      id: '55',
+      text: 'Quoted tweet body',
+      authorHandle: 'quoted',
+      postedAt: '2026-01-01T10:00:00.000Z',
+      url: 'https://x.com/quoted/status/55',
+    },
+  }];
+
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+
+    const byId = await getBookmarkById('1');
+    assert.equal(byId?.quotedStatusId, '55');
+    assert.equal(byId?.quotedTweet?.text, 'Quoted tweet body');
+
+    const listed = await listBookmarks({ limit: 1 });
+    assert.equal(listed[0]?.quotedStatusId, '55');
+    assert.equal(listed[0]?.quotedTweet?.authorHandle, 'quoted');
+  }, fixtures);
 });
 
 test('searchBookmarks: full-text search returns matching results', async () => {

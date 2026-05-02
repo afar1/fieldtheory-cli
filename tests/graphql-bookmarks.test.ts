@@ -875,6 +875,48 @@ test('syncBookmarksGraphQL: rebuild mode does not treat merged-only pages as sta
   }, existing);
 });
 
+test('syncBookmarksGraphQL: continue scans stop when old pages add no local records', async () => {
+  const oldPage = makeGraphQLResponse([makeTweetResult()], 'cursor-2');
+  const existing = [
+    makeRecord({
+      id: '1234567890',
+      tweetId: '1234567890',
+      text: 'Existing bookmark',
+      postedAt: 'Tue Mar 10 12:00:00 +0000 2026',
+    }),
+  ];
+
+  await withIsolatedGapFillDataDir(async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return new Response(JSON.stringify(oldPage), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    try {
+      const result = await syncBookmarksGraphQL({
+        incremental: false,
+        csrfToken: 'ct0',
+        cookieHeader: 'ct0=ct0; auth_token=auth',
+        delayMs: 0,
+        stalePageLimit: 1,
+        staleWhenNoNewRecords: true,
+      });
+
+      assert.equal(fetchCalls, 1);
+      assert.equal(result.pages, 1);
+      assert.equal(result.added, 0);
+      assert.equal(result.stopReason, 'no new bookmarks (stale)');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }, existing);
+});
+
 test('syncBookmarksGraphQL: rate limit stops cleanly and saves cursor for continue', async () => {
   const page1 = makeGraphQLResponse([makeTweetResult()], 'cursor-2');
 
@@ -1151,6 +1193,49 @@ test('mergeBookmarkRecord: sparser incoming does not clobber richer existing', (
   const result = mergeBookmarkRecord(existing, incoming);
   assert.equal(result.text, 'Rich');
   assert.ok(result.author);
+});
+
+test('mergeBookmarkRecord: sparse incoming preserves expensive gap-filled fields', () => {
+  const existing = makeRecord({
+    text: 'Expanded text from gap fill with much more context',
+    quotedStatusId: '555',
+    quotedTweet: { id: '555', text: 'Quoted context', url: 'https://x.com/quoted/status/555' },
+    textExpandedAt: '2026-04-14T00:00:00.000Z',
+    articleTitle: 'Deep dive',
+    articleText: 'Article body fetched during gap fill',
+    articleSite: 'Example',
+    enrichedAt: '2026-04-14T00:00:00.000Z',
+    mediaObjects: [{ type: 'video', url: 'https://pbs.twimg.com/amplify_video_thumb/example.jpg' }],
+  });
+  const incoming = makeRecord({
+    text: 'Sparse',
+    engagement: { likeCount: 100 },
+  });
+
+  const result = mergeBookmarkRecord(existing, incoming);
+  assert.equal(result.quotedStatusId, '555');
+  assert.equal(result.quotedTweet?.text, 'Quoted context');
+  assert.equal(result.textExpandedAt, '2026-04-14T00:00:00.000Z');
+  assert.equal(result.text, existing.text);
+  assert.equal(result.articleText, existing.articleText);
+  assert.equal(result.enrichedAt, existing.enrichedAt);
+  assert.equal(result.mediaObjects?.[0]?.url, existing.mediaObjects?.[0]?.url);
+  assert.equal(result.engagement?.likeCount, 100);
+});
+
+test('mergeBookmarkRecord: changed quote id does not keep stale quoted tweet', () => {
+  const existing = makeRecord({
+    quotedStatusId: '555',
+    quotedTweet: { id: '555', text: 'Old quoted context', url: 'https://x.com/quoted/status/555' },
+  });
+  const incoming = makeRecord({
+    quotedStatusId: '777',
+    engagement: { likeCount: 100 },
+  });
+
+  const result = mergeBookmarkRecord(existing, incoming);
+  assert.equal(result.quotedStatusId, '777');
+  assert.equal(result.quotedTweet, undefined);
 });
 
 test('mergeBookmarkRecord: equal scores prefer incoming (>=)', () => {

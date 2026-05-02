@@ -74,6 +74,8 @@ export interface SyncOptions {
   maxMinutes?: number;
   /** Consecutive pages with 0 new bookmarks before stopping. Default: 3 */
   stalePageLimit?: number;
+  /** Count old pages as stale when they add no new local records. */
+  staleWhenNoNewRecords?: boolean;
   /** Bookmarks per page (1–100). Default: 20 */
   pageSize?: number;
   /** Browser id (e.g. 'chrome', 'firefox', 'brave'). */
@@ -486,9 +488,48 @@ export function scoreRecord(record: BookmarkRecord): number {
 
 export function mergeBookmarkRecord(existing: BookmarkRecord | undefined, incoming: BookmarkRecord): BookmarkRecord {
   if (!existing) return incoming;
-  return scoreRecord(incoming) >= scoreRecord(existing)
+  const merged = scoreRecord(incoming) >= scoreRecord(existing)
     ? { ...existing, ...incoming }
     : { ...incoming, ...existing };
+
+  if (existing.quotedStatusId && !incoming.quotedStatusId) {
+    merged.quotedStatusId = existing.quotedStatusId;
+  }
+  if (incoming.quotedStatusId && incoming.quotedStatusId !== existing.quotedStatusId && !incoming.quotedTweet) {
+    delete merged.quotedTweet;
+  }
+  if (
+    existing.quotedTweet &&
+    !incoming.quotedTweet &&
+    (!incoming.quotedStatusId || incoming.quotedStatusId === existing.quotedStatusId)
+  ) {
+    merged.quotedTweet = existing.quotedTweet;
+  }
+  if (existing.quotedTweetFailedAt && !incoming.quotedTweetFailedAt) {
+    merged.quotedTweetFailedAt = existing.quotedTweetFailedAt;
+  }
+  if (existing.textExpandedAt && !incoming.textExpandedAt) {
+    merged.textExpandedAt = existing.textExpandedAt;
+    if ((existing.text?.length ?? 0) > (incoming.text?.length ?? 0)) {
+      merged.text = existing.text;
+    }
+  }
+  if (existing.articleText && !incoming.articleText) {
+    merged.articleTitle = existing.articleTitle;
+    merged.articleText = existing.articleText;
+    merged.articleSite = existing.articleSite;
+  }
+  if (existing.enrichedAt && !incoming.enrichedAt) {
+    merged.enrichedAt = existing.enrichedAt;
+  }
+  if ((existing.mediaObjects?.length ?? 0) > 0 && (incoming.mediaObjects?.length ?? 0) === 0) {
+    merged.mediaObjects = existing.mediaObjects;
+  }
+  if ((existing.media?.length ?? 0) > 0 && (incoming.media?.length ?? 0) === 0) {
+    merged.media = existing.media;
+  }
+
+  return merged;
 }
 
 export function mergeRecords(
@@ -629,7 +670,11 @@ export async function syncBookmarksGraphQL(
     result.records.forEach((r) => allSeenIds.push(r.id));
     const reachedLatestStored = Boolean(newestKnownId) && result.records.some((record) => record.id === newestKnownId);
 
-    stalePages = (incremental ? added === 0 : result.records.length === 0) ? stalePages + 1 : 0;
+    const noNewLocalRecords = added === 0;
+    const noRemoteRecords = result.records.length === 0;
+    stalePages = (incremental || options.staleWhenNoNewRecords ? noNewLocalRecords : noRemoteRecords)
+      ? stalePages + 1
+      : 0;
 
     options.onProgress?.({
       page,

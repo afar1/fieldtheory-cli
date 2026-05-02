@@ -49,6 +49,8 @@ export interface BookmarkTimelineItem {
   articleText?: string | null;
   articleSite?: string | null;
   enrichedAt?: string | null;
+  quotedStatusId?: string | null;
+  quotedTweet?: QuotedTweetSnapshot | null;
   mediaCount: number;
   linkCount: number;
   likeCount?: number | null;
@@ -87,6 +89,18 @@ function parseJsonArray(value: unknown): string[] {
     return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === 'string') : [];
   } catch {
     return [];
+  }
+}
+
+function parseQuotedTweet(value: unknown): QuotedTweetSnapshot | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<QuotedTweetSnapshot>;
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (typeof parsed.id !== 'string' || typeof parsed.text !== 'string' || typeof parsed.url !== 'string') return null;
+    return parsed as QuotedTweetSnapshot;
+  } catch {
+    return null;
   }
 }
 
@@ -155,6 +169,8 @@ function mapTimelineRow(row: unknown[]): BookmarkTimelineItem {
     articleSite: (row[27] as string) ?? null,
     syncedAt: (row[28] as string) ?? null,
     enrichedAt: (row[29] as string) ?? null,
+    quotedStatusId: (row[30] as string) ?? null,
+    quotedTweet: parseQuotedTweet(row[31]),
   };
 }
 
@@ -646,7 +662,9 @@ export async function listBookmarks(
         b.article_text,
         b.article_site,
         b.synced_at,
-        b.enriched_at
+        b.enriched_at,
+        b.quoted_status_id,
+        b.quoted_tweet_json
       FROM bookmarks b
       ${where}
       ${bookmarkSortClause(filters.sort)}
@@ -792,7 +810,9 @@ export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem 
         b.article_text,
         b.article_site,
         b.synced_at,
-        b.enriched_at
+        b.enriched_at,
+        b.quoted_status_id,
+        b.quoted_tweet_json
       FROM bookmarks b
       WHERE b.id = ?
       LIMIT 1`,
