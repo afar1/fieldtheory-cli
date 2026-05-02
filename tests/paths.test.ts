@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
-import { dataDir, libraryDir, mdDir, commandsDir, mdSchemaPath } from '../src/paths.js';
+import { canonicalCommandsDir, canonicalDataDir, canonicalLibraryDir, dataDir, libraryDir, mdDir, commandsDir, mdSchemaPath } from '../src/paths.js';
 
 function withEnv(env: Record<string, string | undefined>, fn: () => void): void {
   const previous: Record<string, string | undefined> = {};
@@ -31,6 +31,9 @@ test('paths: env overrides split data, library, and commands roots', () => {
     assert.equal(libraryDir(), '/tmp/ft-library');
     assert.equal(mdDir(), '/tmp/ft-library');
     assert.equal(commandsDir(), '/tmp/ft-commands');
+    assert.equal(canonicalDataDir(), '/tmp/ft-data');
+    assert.equal(canonicalLibraryDir(), '/tmp/ft-library');
+    assert.equal(canonicalCommandsDir(), '/tmp/ft-commands');
     assert.equal(mdSchemaPath(), path.join('/tmp/ft-library', 'schema.md'));
   });
 });

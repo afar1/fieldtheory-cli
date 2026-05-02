@@ -84,6 +84,22 @@ On first run, `ft sync` extracts your X session from your browser and downloads 
 | `ft lint` | Health-check the wiki for broken links and missing pages |
 | `ft lint --fix` | Auto-fix fixable wiki issues |
 
+### Field Theory app companion
+
+| Command | Description |
+|---------|-------------|
+| `ft paths --json` | Show canonical bookmarks, Library, Commands, and compatibility paths |
+| `ft status --json` | Show bookmark/classification status plus Field Theory paths |
+| `ft library search <query>` | Search local Field Theory Library markdown |
+| `ft library show <path>` | Print a Library page and its version metadata with `--json` |
+| `ft library create <path> --stdin` | Create a new Library page under `~/.fieldtheory/library` |
+| `ft library update <path> --stdin --expected-sha256 <hash>` | Replace a Library page with conflict protection |
+| `ft library delete <path>` | Move a Library page to Trash; the Mac app owns remote sync tombstones |
+| `ft library open <path>` | Open a Library page in the Field Theory Mac app |
+| `ft commands list` | List portable commands under `~/.fieldtheory/commands` |
+| `ft commands new <name>` | Create a reusable portable command |
+| `ft commands validate [name]` | Check command shape and guardrails |
+
 ### Agent integration
 
 | Command | Description |
@@ -145,16 +161,20 @@ Data is stored locally under `~/.fieldtheory/`:
 
 ~/.fieldtheory/library/
   index.md                # markdown knowledge base (ft wiki / ft md)
+
+~/.fieldtheory/commands/
+  *.md                    # portable commands used by Field Theory and agents
 ```
 
-Override locations with `FT_DATA_DIR` and `FT_LIBRARY_DIR`:
+Override locations with `FT_DATA_DIR`, `FT_LIBRARY_DIR`, and `FT_COMMANDS_DIR`:
 
 ```bash
 export FT_DATA_DIR=/path/to/custom/dir
 export FT_LIBRARY_DIR=/path/to/custom/library
+export FT_COMMANDS_DIR=/path/to/custom/commands
 ```
 
-To remove all data: `rm -rf ~/.fieldtheory/bookmarks ~/.fieldtheory/library`
+To remove bookmark and Library data: `rm -rf ~/.fieldtheory/bookmarks ~/.fieldtheory/library`
 
 ## Categories
 

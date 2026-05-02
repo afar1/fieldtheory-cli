@@ -20,10 +20,16 @@ describe('skill content', () => {
 
   it('both versions include key commands', () => {
     for (const content of [skillWithFrontmatter(), skillBody()]) {
+      assert.ok(content.includes('ft paths --json'));
+      assert.ok(content.includes('ft status --json'));
       assert.ok(content.includes('ft search'));
       assert.ok(content.includes('ft list'));
       assert.ok(content.includes('ft stats'));
       assert.ok(content.includes('ft show'));
+      assert.ok(content.includes('ft library search'));
+      assert.ok(content.includes('ft library show'));
+      assert.ok(content.includes('ft commands list'));
+      assert.ok(content.includes('ft commands validate'));
     }
   });
 

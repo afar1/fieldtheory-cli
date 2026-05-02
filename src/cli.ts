@@ -36,6 +36,8 @@ import { configureHttpProxyFromEnv } from './http-proxy.js';
 import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir, bookmarkMediaDir, bookmarkMediaManifestPath } from './paths.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
+import { registerCompanionCommands } from './companion-cli.js';
+import { getPathReport } from './field-status.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -176,6 +178,10 @@ function warnIfEmpty(totalBookmarks: number): void {
   console.log(`    \u2022 Keychain/keyring access was denied`);
   console.log(`    \u2022 You may be logged into a different profile than the one with X/Twitter`);
   console.log(`    \u2022 Try: ft sync --cookies <ct0> <auth_token>  (paste from DevTools)\n`);
+}
+
+function printJson(value: unknown): void {
+  console.log(JSON.stringify(value, null, 2));
 }
 
 // ── Update checker ────────────────────────────────────────────────────────
@@ -936,6 +942,7 @@ export function buildCli() {
     .option('--after <date>', 'Bookmarks posted after this date (YYYY-MM-DD)')
     .option('--before <date>', 'Bookmarks posted before this date (YYYY-MM-DD)')
     .option('--limit <n>', 'Max results', (v: string) => Number(v), 20)
+    .option('--json', 'JSON output')
     .action(safe(async (query: string, options) => {
       if (!requireIndex()) return;
       const results = await searchBookmarks({
@@ -945,6 +952,10 @@ export function buildCli() {
         before: options.before ? String(options.before) : undefined,
         limit: Number(options.limit) || 20,
       });
+      if (options.json) {
+        printJson(results);
+        return;
+      }
       console.log(formatSearchResults(results));
     }));
 
@@ -1038,9 +1049,14 @@ export function buildCli() {
   program
     .command('stats')
     .description('Aggregate statistics from your bookmarks')
-    .action(safe(async () => {
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
       if (!requireIndex()) return;
       const stats = await getStats();
+      if (options.json) {
+        printJson(stats);
+        return;
+      }
       console.log(`Bookmarks: ${stats.totalBookmarks}`);
       console.log(`Unique authors: ${stats.uniqueAuthors}`);
       console.log(`Date range: ${stats.dateRange.earliest?.slice(0, 10) ?? '?'} to ${stats.dateRange.latest?.slice(0, 10) ?? '?'}`);
@@ -1284,9 +1300,16 @@ export function buildCli() {
   program
     .command('status')
     .description('Show sync status and data location')
-    .action(safe(async () => {
-      if (!requireData()) return;
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
       const view = await getBookmarkStatusView();
+      if (options.json) {
+        printJson({
+          bookmarks: view,
+          paths: getPathReport(),
+        });
+        return;
+      }
       console.log(formatBookmarkStatus(view));
     }));
 
@@ -1296,6 +1319,8 @@ export function buildCli() {
     .command('path')
     .description('Print the data directory path')
     .action(() => { console.log(dataDir()); });
+
+  registerCompanionCommands(program, safe);
 
   // ── sample ──────────────────────────────────────────────────────────────
 

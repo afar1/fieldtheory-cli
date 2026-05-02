@@ -63,6 +63,23 @@ test('ft wiki: --engine option is registered', () => {
   assert.ok(opts.includes('--engine'), `expected --engine among ${opts.join(', ')}`);
 });
 
+test('ft search, stats, and status expose --json', () => {
+  const program = buildCli();
+  for (const name of ['search', 'stats', 'status']) {
+    const cmd = program.commands.find((c: any) => c.name() === name);
+    assert.ok(cmd, `${name} command should be registered`);
+    const opts = cmd.options.map((o: any) => o.long);
+    assert.ok(opts.includes('--json'), `expected --json on ft ${name}`);
+  }
+});
+
+test('ft paths, library, commands, and app command groups are registered', () => {
+  const program = buildCli();
+  for (const name of ['paths', 'library', 'commands', 'app']) {
+    assert.ok(program.commands.find((c: any) => c.name() === name), `${name} command should be registered`);
+  }
+});
+
 test('ft sync: media is on by default and exposes --no-media', () => {
   const program = buildCli();
   const syncCmd = program.commands.find((c: any) => c.name() === 'sync');
@@ -96,6 +113,36 @@ test('ft path: prints only the data directory', async () => {
     assert.equal(output, `${dataDir()}\n`);
   } finally {
     process.env.FT_DATA_DIR = origEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ft paths --json prints canonical roots', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-paths-'));
+  const origEnv = {
+    FT_DATA_DIR: process.env.FT_DATA_DIR,
+    FT_LIBRARY_DIR: process.env.FT_LIBRARY_DIR,
+    FT_COMMANDS_DIR: process.env.FT_COMMANDS_DIR,
+  };
+  process.env.FT_DATA_DIR = path.join(tmpDir, 'bookmarks');
+  process.env.FT_LIBRARY_DIR = path.join(tmpDir, 'library');
+  process.env.FT_COMMANDS_DIR = path.join(tmpDir, 'commands');
+  fs.mkdirSync(process.env.FT_DATA_DIR, { recursive: true });
+  fs.writeFileSync(path.join(process.env.FT_DATA_DIR, '.update-check'), '0.0.0');
+
+  try {
+    const output = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'paths', '--json']);
+    });
+    const parsed = JSON.parse(output);
+    assert.equal(parsed.canonical.bookmarksDir, process.env.FT_DATA_DIR);
+    assert.equal(parsed.canonical.libraryDir, process.env.FT_LIBRARY_DIR);
+    assert.equal(parsed.canonical.commandsDir, process.env.FT_COMMANDS_DIR);
+  } finally {
+    for (const [key, value] of Object.entries(origEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
