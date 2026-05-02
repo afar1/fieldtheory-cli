@@ -1231,7 +1231,8 @@ export function formatSearchResults(results: SearchResult[]): string {
       const author = r.authorHandle ? `@${r.authorHandle}` : 'unknown';
       const date = r.postedAt ? r.postedAt.slice(0, 10) : '?';
       const text = r.text.length > 140 ? r.text.slice(0, 140) + '...' : r.text;
-      return `${i + 1}. [${date}] ${author}\n   ${text}\n   ${r.url}`;
+      const id = r.id;
+      return `${i + 1}. [${date}] ${author} (ID: ${id})\n   ${text}\n   ${r.url}`;
     })
     .join('\n\n');
 }

@@ -100,8 +100,13 @@ const FRIENDLY_STOP_REASONS: Record<string, string> = {
   'target additions reached': 'Reached target bookmark count.',
 };
 
-function friendlyStopReason(raw?: string): string {
+function friendlyStopReason(raw?: string, addedCount: number = 0): string {
   if (!raw) return 'Sync complete.';
+  if (raw === 'caught up to newest stored bookmark') {
+    return addedCount > 0
+      ? 'Sync complete \u2014 caught up to previously stored bookmarks.'
+      : 'All caught up \u2014 no new bookmarks since last sync.';
+  }
   return FRIENDLY_STOP_REASONS[raw] ?? `Sync complete \u2014 ${raw}`;
 }
 
@@ -813,7 +818,7 @@ export function buildCli() {
           }));
 
           console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
-          console.log(`  ${friendlyStopReason(result.stopReason)}`);
+          console.log(`  ${friendlyStopReason(result.stopReason, result.added)}`);
           if (result.stopReason === 'rate limited') {
             const retryAfter = formatRetryAfter(result.retryAfterSec);
             if (retryAfter) {
