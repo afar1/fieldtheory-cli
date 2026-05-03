@@ -87,7 +87,7 @@ export async function readJsonLines<T>(filePath: string): Promise<T[]> {
 
 export async function writeMd(filePath: string, content: string): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, content, 'utf8');
+  await writeFileDurable(filePath, content, 0o644);
 }
 
 export async function readMd(filePath: string): Promise<string> {

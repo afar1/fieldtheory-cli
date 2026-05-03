@@ -1,9 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   convertTweetToRecord,
   parseBookmarksResponse,
   parseFolderTimelineResponse,
+  parseTweetArticleByRestId,
+  parseTweetResultByRestId,
   sanitizeBookmarkedAt,
   scoreRecord,
   mergeBookmarkRecord,
@@ -11,9 +18,17 @@ import {
   applyFolderMirror,
   clearFolderEverywhere,
   formatSyncResult,
+  syncBookmarksGraphQL,
+  syncGaps,
 } from '../src/graphql-bookmarks.js';
+import { buildIndex, getBookmarkById } from '../src/bookmarks-db.js';
 import { resolveFolder, formatFolderMirrorStats } from '../src/cli.js';
 import type { BookmarkFolder, BookmarkRecord } from '../src/types.js';
+
+const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
+function loadFixture(name: string): any {
+  return JSON.parse(readFileSync(path.join(FIXTURES_DIR, name), 'utf8'));
+}
 
 const NOW = '2026-03-28T00:00:00.000Z';
 
@@ -178,6 +193,22 @@ test('convertTweetToRecord: extracts links, filtering out t.co', () => {
   assert.equal(result.links![0], 'https://example.com/article');
 });
 
+test('convertTweetToRecord: expands t.co links in visible text using display_url', () => {
+  const result = convertTweetToRecord(makeTweetResult({
+    legacy: {
+      full_text: 'Check this: https://t.co/abc and this: https://t.co/def',
+      entities: {
+        urls: [
+          { expanded_url: 'https://example.com/article', url: 'https://t.co/abc', display_url: 'example.com/foo' },
+          { expanded_url: 'https://tools.exec.security', url: 'https://t.co/def', display_url: 'tools.exec.security' },
+        ],
+      },
+    },
+  }), NOW)!;
+
+  assert.equal(result.text, 'Check this: example.com/foo and this: tools.exec.security');
+});
+
 test('convertTweetToRecord: handles location as object', () => {
   const tr = makeTweetResult({
     userResult: {
@@ -292,6 +323,54 @@ test('convertTweetToRecord: extracts quoted tweet snapshot', () => {
   assert.equal(result.quotedTweet!.media?.length, 1);
 });
 
+test('convertTweetToRecord: preserves quoted tweet video variants', () => {
+  const tr = makeTweetResult({
+    legacy: { quoted_status_id_str: '9999999' },
+    tweet: {
+      quoted_status_result: {
+        result: {
+          rest_id: '9999999',
+          legacy: {
+            id_str: '9999999',
+            full_text: 'Quoted video tweet',
+            created_at: 'Mon Mar 09 10:00:00 +0000 2026',
+            entities: { urls: [] },
+            extended_entities: {
+              media: [{
+                type: 'video',
+                media_url_https: 'https://pbs.twimg.com/amplify_video_thumb/quoted.jpg',
+                expanded_url: 'https://x.com/quoteduser/status/9999999/video/1',
+                original_info: { width: 1280, height: 720 },
+                ext_alt_text: 'Quoted video poster',
+                video_info: {
+                  variants: [
+                    { content_type: 'video/mp4', bitrate: 832000, url: 'https://video.twimg.com/quoted.mp4' },
+                  ],
+                },
+              }],
+            },
+          },
+          core: {
+            user_results: {
+              result: {
+                rest_id: '6666',
+                core: { screen_name: 'quoteduser', name: 'Quoted User' },
+                avatar: { image_url: 'https://pbs.twimg.com/profile_images/6666/qt.jpg' },
+                legacy: {},
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  const result = convertTweetToRecord(tr, NOW);
+  assert.ok(result?.quotedTweet);
+  assert.equal(result.quotedTweet!.mediaObjects?.[0].type, 'video');
+  assert.equal(result.quotedTweet!.mediaObjects?.[0].altText, 'Quoted video poster');
+  assert.equal(result.quotedTweet!.mediaObjects?.[0].videoVariants?.[0].url, 'https://video.twimg.com/quoted.mp4');
+});
+
 test('convertTweetToRecord: handles missing quoted tweet gracefully', () => {
   const tr = makeTweetResult({
     legacy: { quoted_status_id_str: '7777777' },
@@ -300,6 +379,650 @@ test('convertTweetToRecord: handles missing quoted tweet gracefully', () => {
   assert.ok(result);
   assert.equal(result.quotedStatusId, '7777777');
   assert.equal(result.quotedTweet, undefined);
+});
+
+test('convertTweetToRecord: quoted tweet prefers note_tweet body over legacy full_text', () => {
+  const tr = makeTweetResult({
+    legacy: { quoted_status_id_str: '8888888' },
+    tweet: {
+      quoted_status_result: {
+        result: {
+          rest_id: '8888888',
+          note_tweet: {
+            note_tweet_results: {
+              result: {
+                text: 'Full long-form quoted body that would be truncated in legacy.full_text',
+              },
+            },
+          },
+          legacy: {
+            id_str: '8888888',
+            full_text: 'Full long-form quoted body that would be truncated in',
+            created_at: 'Mon Apr 13 10:00:00 +0000 2026',
+            entities: { urls: [] },
+          },
+          core: {
+            user_results: {
+              result: {
+                rest_id: '9999',
+                core: { screen_name: 'longform', name: 'Long Form' },
+                legacy: {},
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  const result = convertTweetToRecord(tr, NOW);
+  assert.ok(result);
+  assert.equal(
+    result.quotedTweet!.text,
+    'Full long-form quoted body that would be truncated in legacy.full_text',
+  );
+});
+
+test('parseBookmarksResponse: captures full note_tweet body from live bookmarks-feed fixture', () => {
+  const fixture = loadFixture('bookmark-feed-note-tweet.json');
+  const { records } = parseBookmarksResponse(fixture, NOW);
+  assert.equal(records.length, 1);
+  const record = records[0];
+  assert.equal(record.tweetId, '2039805659525644595');
+  assert.equal(record.authorHandle, 'karpathy');
+  // The whole point of the feature-flag fix: a long note_tweet must land in
+  // `text` as the full body, not the 275-char preview from legacy.full_text.
+  assert.equal(record.text.length, 3447);
+  assert.ok(record.text.startsWith('LLM Knowledge Bases'));
+  assert.ok(record.text.endsWith('hacky collection of scripts.'));
+});
+
+test('parseTweetResultByRestId: extracts note_tweet body from live TweetResultByRestId fixture', () => {
+  const fixture = loadFixture('tweet-result-by-rest-id-note-tweet.json');
+  const snapshot = parseTweetResultByRestId(fixture, '2039805659525644595');
+  assert.ok(snapshot);
+  assert.equal(snapshot.id, '2039805659525644595');
+  assert.equal(snapshot.authorHandle, 'karpathy');
+  assert.equal(snapshot.text.length, 3447);
+  assert.ok(snapshot.text.startsWith('LLM Knowledge Bases'));
+});
+
+test('parseTweetArticleByRestId: extracts X Article rich-text content', () => {
+  const fixture = {
+    data: {
+      tweetResult: {
+        result: {
+          rest_id: '2042685676949270724',
+          legacy: {
+            id_str: '2042685676949270724',
+            full_text: 'x.com/i/article/2042...',
+          },
+          article_results: {
+            result: {
+              title: 'How agents should use context',
+              contents: [
+                { type: 'header-two', text: 'Context discipline' },
+                { type: 'unstyled', text: 'The useful body lives in the X Article payload, not in the tweet preview.' },
+              ],
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const article = parseTweetArticleByRestId(fixture);
+  assert.ok(article);
+  assert.equal(article.title, 'How agents should use context');
+  assert.match(article.text, /Context discipline/);
+  assert.match(article.text, /useful body lives in the X Article payload/);
+});
+
+test('parseTweetArticleByRestId: extracts current X Article content_state shape', () => {
+  const fixture = {
+    data: {
+      tweetResult: {
+        result: {
+          rest_id: '2045577435484221722',
+          legacy: {
+            id_str: '2045577435484221722',
+            full_text: 'x.com/i/article/2045...',
+          },
+          article: {
+            article_results: {
+              result: {
+                title: 'Thoughts and Feelings around Claude Design',
+                plain_text: 'I tried Claude Design yesterday and I have a theory for how this whole thing shakes out.',
+                content_state: {
+                  blocks: [
+                    { text: 'I tried Claude Design yesterday and I have a theory for how this whole thing shakes out.' },
+                    { text: 'Figma invented its own primitives to make design systems work: components, styles, variables, and props.' },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const article = parseTweetArticleByRestId(fixture);
+  assert.ok(article);
+  assert.equal(article.title, 'Thoughts and Feelings around Claude Design');
+  assert.match(article.text, /I tried Claude Design yesterday/);
+  assert.match(article.text, /components, styles, variables, and props/);
+});
+
+test('parseTweetResultByRestId: returns null on tombstone / unavailable tweets', () => {
+  assert.equal(
+    parseTweetResultByRestId({ data: { tweetResult: { result: { __typename: 'TweetTombstone' } } } }, '123'),
+    null,
+  );
+});
+
+test('syncGaps: enriches X Article bookmarks through TweetResult payload', async () => {
+  const xArticle: BookmarkRecord = {
+    id: '2042685676949270724',
+    tweetId: '2042685676949270724',
+    url: 'https://x.com/danveloper/status/2042685676949270724',
+    text: 'x.com/i/article/2042...',
+    authorHandle: 'danveloper',
+    syncedAt: NOW,
+    postedAt: 'Fri Apr 10 19:26:31 +0000 2026',
+    links: ['http://x.com/i/article/2042676487711584257'],
+    tags: [],
+    ingestedVia: 'graphql',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    let fetchCalls = 0;
+    const result = await syncGaps({
+      tweetFetcher: async (tweetId) => {
+        fetchCalls += 1;
+        assert.equal(tweetId, '2042685676949270724');
+        return {
+          snapshot: {
+            id: tweetId,
+            text: 'x.com/i/article/2042...',
+            url: 'https://x.com/danveloper/status/2042685676949270724',
+          },
+          article: {
+            title: 'How agents should use context',
+            text: 'The article body is the useful content. It should not be lost behind an X Article link.',
+            siteName: 'X Articles',
+          },
+          status: 'ok',
+          source: 'graphql',
+        };
+      },
+    });
+
+    assert.equal(fetchCalls, 1);
+    assert.equal(result.articlesEnriched, 1);
+    assert.equal(result.failed, 0);
+
+    const refreshed = await getBookmarkById('2042685676949270724');
+    assert.ok(refreshed);
+    assert.equal(refreshed.text, 'x.com/i/article/2042...');
+    assert.equal(refreshed.articleTitle, 'How agents should use context');
+    assert.match(refreshed.articleText ?? '', /useful content/);
+
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+    assert.equal(stored.text, 'x.com/i/article/2042...');
+  }, [xArticle]);
+});
+
+test('syncGaps: reports X Article when fallback only returns tweet preview', async () => {
+  const xArticle: BookmarkRecord = {
+    id: '2042685676949270724',
+    tweetId: '2042685676949270724',
+    url: 'https://x.com/danveloper/status/2042685676949270724',
+    text: 'x.com/i/article/2042...',
+    authorHandle: 'danveloper',
+    syncedAt: NOW,
+    postedAt: 'Fri Apr 10 19:26:31 +0000 2026',
+    links: ['http://x.com/i/article/2042676487711584257'],
+    tags: [],
+    ingestedVia: 'graphql',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    const result = await syncGaps({
+      tweetFetcher: async (tweetId) => ({
+        snapshot: {
+          id: tweetId,
+          text: 'x.com/i/article/2042...',
+          url: 'https://x.com/danveloper/status/2042685676949270724',
+        },
+        status: 'ok',
+        source: 'syndication',
+      }),
+    });
+
+    assert.equal(result.articlesEnriched, 0);
+    assert.equal(result.failed, 1);
+    assert.equal(result.failures[0].tweetId, '2042685676949270724');
+    assert.match(result.failures[0].reason, /authenticated X GraphQL/);
+
+    const refreshed = await getBookmarkById('2042685676949270724');
+    assert.ok(refreshed);
+    assert.equal(refreshed.articleText, null);
+  }, [xArticle]);
+});
+
+async function withIsolatedGapFillDataDir(
+  fn: () => Promise<void>,
+  fixtures: BookmarkRecord[],
+): Promise<void> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ft-gaps-test-'));
+  const jsonl = fixtures.map((r) => JSON.stringify(r)).join('\n') + '\n';
+  await writeFile(path.join(dir, 'bookmarks.jsonl'), jsonl);
+  const savedDataDir = process.env.FT_DATA_DIR;
+  const savedChromeDir = process.env.FT_CHROME_USER_DATA_DIR;
+  process.env.FT_DATA_DIR = dir;
+  // Point Chrome extraction at an empty path so resolveGapFillCookies fails
+  // fast and the fetcher falls back cleanly when we aren't injecting one.
+  process.env.FT_CHROME_USER_DATA_DIR = path.join(dir, '__no_chrome__');
+  try {
+    await fn();
+  } finally {
+    if (savedDataDir !== undefined) process.env.FT_DATA_DIR = savedDataDir;
+    else delete process.env.FT_DATA_DIR;
+    if (savedChromeDir !== undefined) process.env.FT_CHROME_USER_DATA_DIR = savedChromeDir;
+    else delete process.env.FT_CHROME_USER_DATA_DIR;
+  }
+}
+
+test('syncGaps: expands truncated note_tweet and stamps textExpandedAt', async () => {
+  const fixture = loadFixture('tweet-result-by-rest-id-note-tweet.json');
+  const legacyPreview: string = fixture.data.tweetResult.result.legacy.full_text;
+  const fullBody: string = fixture.data.tweetResult.result.note_tweet.note_tweet_results.result.text;
+
+  const truncated: BookmarkRecord = {
+    id: '2039805659525644595',
+    tweetId: '2039805659525644595',
+    url: 'https://x.com/karpathy/status/2039805659525644595',
+    text: legacyPreview,
+    authorHandle: 'karpathy',
+    syncedAt: NOW,
+    postedAt: '2026-04-02T20:42:21.000Z',
+    language: 'en',
+    tags: [],
+    ingestedVia: 'graphql',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    let fetchCalls = 0;
+    const result = await syncGaps({
+      tweetFetcher: async (tweetId) => {
+        fetchCalls += 1;
+        assert.equal(tweetId, '2039805659525644595');
+        return { snapshot: parseTweetResultByRestId(fixture, tweetId), status: 'ok', source: 'graphql' };
+      },
+    });
+
+    assert.equal(fetchCalls, 1);
+    assert.equal(result.textExpanded, 1);
+    assert.equal(result.failed, 0);
+
+    const refreshed = await getBookmarkById('2039805659525644595');
+    assert.ok(refreshed);
+    assert.equal(refreshed.text.length, fullBody.length);
+    assert.ok(refreshed.text.startsWith('LLM Knowledge Bases'));
+
+    // Marker should land in the JSONL so the next run skips this record.
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+    assert.ok(stored.textExpandedAt, 'textExpandedAt should be set after expansion');
+    assert.equal(stored.text.length, fullBody.length);
+  }, [truncated]);
+});
+
+test('syncGaps: skips records that already have textExpandedAt set', async () => {
+  const alreadyChecked: BookmarkRecord = {
+    id: '111',
+    tweetId: '111',
+    url: 'https://x.com/user/status/111',
+    text: 'x'.repeat(280),
+    syncedAt: NOW,
+    tags: [],
+    ingestedVia: 'graphql',
+    textExpandedAt: '2026-04-14T00:00:00.000Z',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    let fetchCalls = 0;
+    const result = await syncGaps({
+      tweetFetcher: async () => {
+        fetchCalls += 1;
+        return { snapshot: null, status: 'ok' };
+      },
+    });
+    assert.equal(fetchCalls, 0, 'fetcher should not run when all records are already marked');
+    assert.equal(result.textExpanded, 0);
+    assert.equal(result.failed, 0);
+    assert.equal(result.total, 0, 'empty gap-fill should report total=0 so CLI prints "No gaps found"');
+  }, [alreadyChecked]);
+});
+
+test('syncGaps: syndication "ok" with truncated preview does NOT stamp textExpandedAt', async () => {
+  // Regression for the bug where a user with expired cookies (graphql falls
+  // through to syndication) would have every long note_tweet permanently
+  // marked as checked even though syndication can't see note_tweet bodies.
+  const truncated: BookmarkRecord = {
+    id: '444',
+    tweetId: '444',
+    url: 'https://x.com/user/status/444',
+    text: 'z'.repeat(280),
+    syncedAt: NOW,
+    tags: [],
+    ingestedVia: 'graphql',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    const result = await syncGaps({
+      tweetFetcher: async () => ({
+        snapshot: {
+          id: '444',
+          text: 'z'.repeat(280),
+          url: 'https://x.com/user/status/444',
+        },
+        status: 'ok',
+        source: 'syndication',
+      }),
+    });
+    assert.equal(result.textExpanded, 0);
+
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+    assert.equal(
+      stored.textExpandedAt,
+      undefined,
+      'syndication cannot settle Gap 2 — record must remain unmarked so graphql can try next run',
+    );
+  }, [truncated]);
+});
+
+test('syncGaps: syndication snapshot with genuinely longer text still expands and stamps', async () => {
+  // Defensive corner: if syndication somehow returns a longer text than what
+  // we had cached (non-note_tweet edge case), that IS real new information —
+  // apply it and mark checked.
+  const stale: BookmarkRecord = {
+    id: '555',
+    tweetId: '555',
+    url: 'https://x.com/user/status/555',
+    text: 'short cached preview that is exactly 275 characters long '.repeat(5).slice(0, 275),
+    syncedAt: NOW,
+    tags: [],
+    ingestedVia: 'graphql',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    const longer = 'x'.repeat(400);
+    const result = await syncGaps({
+      tweetFetcher: async () => ({
+        snapshot: { id: '555', text: longer, url: 'https://x.com/user/status/555' },
+        status: 'ok',
+        source: 'syndication',
+      }),
+    });
+    assert.equal(result.textExpanded, 1);
+
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+    assert.equal(stored.text.length, 400);
+    assert.ok(stored.textExpandedAt);
+  }, [stale]);
+});
+
+test('syncGaps: transient failure does NOT stamp textExpandedAt so next run retries', async () => {
+  const truncated: BookmarkRecord = {
+    id: '333',
+    tweetId: '333',
+    url: 'https://x.com/user/status/333',
+    text: 'y'.repeat(300),
+    syncedAt: NOW,
+    tags: [],
+    ingestedVia: 'graphql',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    const result = await syncGaps({
+      tweetFetcher: async () => ({ snapshot: null, status: 'rate_limited' }),
+    });
+    assert.equal(result.failed, 1);
+
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+    assert.equal(
+      stored.textExpandedAt,
+      undefined,
+      'transient failures must not mark the record so the next run can retry',
+    );
+  }, [truncated]);
+});
+
+test('syncBookmarksGraphQL: rebuild mode does not treat merged-only pages as stale', async () => {
+  const page1 = makeGraphQLResponse([
+    makeTweetResult({
+      rest_id: '1',
+      legacy: {
+        id_str: '1',
+        full_text: 'First existing bookmark',
+        created_at: 'Tue Mar 11 12:00:00 +0000 2026',
+      },
+    }),
+  ], 'cursor-2');
+  const page2 = makeGraphQLResponse([
+    makeTweetResult({
+      rest_id: '2',
+      legacy: {
+        id_str: '2',
+        full_text: 'Second existing bookmark',
+        created_at: 'Tue Mar 10 12:00:00 +0000 2026',
+      },
+    }),
+  ]);
+
+  const existing = [
+    makeRecord({
+      id: '1',
+      tweetId: '1',
+      text: 'First existing bookmark',
+      postedAt: 'Tue Mar 11 12:00:00 +0000 2026',
+    }),
+    makeRecord({
+      id: '2',
+      tweetId: '2',
+      text: 'Second existing bookmark',
+      postedAt: 'Tue Mar 10 12:00:00 +0000 2026',
+    }),
+  ];
+
+  await withIsolatedGapFillDataDir(async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      const body = fetchCalls === 0 ? page1 : page2;
+      fetchCalls += 1;
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    try {
+      const result = await syncBookmarksGraphQL({
+        incremental: false,
+        csrfToken: 'ct0',
+        cookieHeader: 'ct0=ct0; auth_token=auth',
+        delayMs: 0,
+        stalePageLimit: 1,
+      });
+
+      assert.equal(fetchCalls, 2);
+      assert.equal(result.pages, 2);
+      assert.equal(result.added, 0);
+      assert.equal(result.stopReason, 'end of bookmarks');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }, existing);
+});
+
+test('syncBookmarksGraphQL: continue scans stop when old pages add no local records', async () => {
+  const oldPage = makeGraphQLResponse([makeTweetResult()], 'cursor-2');
+  const existing = [
+    makeRecord({
+      id: '1234567890',
+      tweetId: '1234567890',
+      text: 'Existing bookmark',
+      postedAt: 'Tue Mar 10 12:00:00 +0000 2026',
+    }),
+  ];
+
+  await withIsolatedGapFillDataDir(async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return new Response(JSON.stringify(oldPage), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    try {
+      const result = await syncBookmarksGraphQL({
+        incremental: false,
+        csrfToken: 'ct0',
+        cookieHeader: 'ct0=ct0; auth_token=auth',
+        delayMs: 0,
+        stalePageLimit: 1,
+        staleWhenNoNewRecords: true,
+      });
+
+      assert.equal(fetchCalls, 1);
+      assert.equal(result.pages, 1);
+      assert.equal(result.added, 0);
+      assert.equal(result.stopReason, 'no new bookmarks (stale)');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }, existing);
+});
+
+test('syncBookmarksGraphQL: rate limit stops cleanly and saves cursor for continue', async () => {
+  const page1 = makeGraphQLResponse([makeTweetResult()], 'cursor-2');
+
+  const existing = [
+    makeRecord({
+      id: '1234567890',
+      tweetId: '1234567890',
+      text: 'Existing bookmark',
+      postedAt: 'Tue Mar 10 12:00:00 +0000 2026',
+    }),
+  ];
+
+  await withIsolatedGapFillDataDir(async () => {
+    const originalFetch = globalThis.fetch;
+    const originalSetTimeout = globalThis.setTimeout;
+    let fetchCalls = 0;
+    await writeFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks-meta.json'), JSON.stringify({
+      provider: 'twitter',
+      schemaVersion: 1,
+      lastFullSyncAt: '2026-04-18T12:00:00.000Z',
+      totalBookmarks: existing.length,
+    }));
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      if (fetchCalls === 1) {
+        return new Response(JSON.stringify(page1), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('', {
+        status: 429,
+        headers: { 'retry-after': '1' },
+      });
+    }) as typeof fetch;
+    globalThis.setTimeout = (((handler: TimerHandler, _timeout?: number, ...args: any[]) => {
+      if (typeof handler === 'function') handler(...args);
+      return 0 as any;
+    }) as typeof setTimeout);
+
+    try {
+      const result = await syncBookmarksGraphQL({
+        incremental: false,
+        csrfToken: 'ct0',
+        cookieHeader: 'ct0=ct0; auth_token=auth',
+        delayMs: 0,
+        stalePageLimit: 1,
+      });
+
+      assert.equal(fetchCalls, 5);
+      assert.equal(result.pages, 1);
+      assert.equal(result.added, 0);
+      assert.equal(result.stopReason, 'rate limited');
+      assert.equal(result.retryAfterSec, 1);
+
+      const state = JSON.parse(await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks-backfill-state.json'), 'utf8'));
+      assert.equal(state.stopReason, 'rate limited');
+      assert.equal(state.lastCursor, 'cursor-2');
+
+      const meta = JSON.parse(await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks-meta.json'), 'utf8'));
+      assert.equal(meta.lastFullSyncAt, '2026-04-18T12:00:00.000Z');
+    } finally {
+      globalThis.fetch = originalFetch;
+      globalThis.setTimeout = originalSetTimeout;
+    }
+  }, existing);
+});
+
+test('syncGaps: permanent quoted-tweet failure stamps quotedTweetFailedAt so reruns skip it', async () => {
+  const deadQuoted: BookmarkRecord = {
+    id: '222',
+    tweetId: '222',
+    url: 'https://x.com/user/status/222',
+    text: 'Check out this tweet',
+    syncedAt: NOW,
+    tags: [],
+    ingestedVia: 'graphql',
+    quotedStatusId: '999999999',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    let fetchCalls = 0;
+    const firstRun = await syncGaps({
+      tweetFetcher: async () => {
+        fetchCalls += 1;
+        return { snapshot: null, status: 'not_found' };
+      },
+    });
+    assert.equal(fetchCalls, 1);
+    assert.equal(firstRun.failed, 1);
+
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+    assert.ok(stored.quotedTweetFailedAt, 'quotedTweetFailedAt should be set after permanent failure');
+
+    // Second run should not touch the fetcher for this record.
+    const secondCalls = { n: 0 };
+    const secondRun = await syncGaps({
+      tweetFetcher: async () => {
+        secondCalls.n += 1;
+        return { snapshot: null, status: 'not_found' };
+      },
+    });
+    assert.equal(secondCalls.n, 0, 'second run must not retry permanent failures');
+    assert.equal(secondRun.total, 0);
+  }, [deadQuoted]);
 });
 
 test('parseBookmarksResponse: preserves sortIndex for bookmark ordering without fabricating bookmarkedAt', () => {
@@ -470,6 +1193,49 @@ test('mergeBookmarkRecord: sparser incoming does not clobber richer existing', (
   const result = mergeBookmarkRecord(existing, incoming);
   assert.equal(result.text, 'Rich');
   assert.ok(result.author);
+});
+
+test('mergeBookmarkRecord: sparse incoming preserves expensive gap-filled fields', () => {
+  const existing = makeRecord({
+    text: 'Expanded text from gap fill with much more context',
+    quotedStatusId: '555',
+    quotedTweet: { id: '555', text: 'Quoted context', url: 'https://x.com/quoted/status/555' },
+    textExpandedAt: '2026-04-14T00:00:00.000Z',
+    articleTitle: 'Deep dive',
+    articleText: 'Article body fetched during gap fill',
+    articleSite: 'Example',
+    enrichedAt: '2026-04-14T00:00:00.000Z',
+    mediaObjects: [{ type: 'video', url: 'https://pbs.twimg.com/amplify_video_thumb/example.jpg' }],
+  });
+  const incoming = makeRecord({
+    text: 'Sparse',
+    engagement: { likeCount: 100 },
+  });
+
+  const result = mergeBookmarkRecord(existing, incoming);
+  assert.equal(result.quotedStatusId, '555');
+  assert.equal(result.quotedTweet?.text, 'Quoted context');
+  assert.equal(result.textExpandedAt, '2026-04-14T00:00:00.000Z');
+  assert.equal(result.text, existing.text);
+  assert.equal(result.articleText, existing.articleText);
+  assert.equal(result.enrichedAt, existing.enrichedAt);
+  assert.equal(result.mediaObjects?.[0]?.url, existing.mediaObjects?.[0]?.url);
+  assert.equal(result.engagement?.likeCount, 100);
+});
+
+test('mergeBookmarkRecord: changed quote id does not keep stale quoted tweet', () => {
+  const existing = makeRecord({
+    quotedStatusId: '555',
+    quotedTweet: { id: '555', text: 'Old quoted context', url: 'https://x.com/quoted/status/555' },
+  });
+  const incoming = makeRecord({
+    quotedStatusId: '777',
+    engagement: { likeCount: 100 },
+  });
+
+  const result = mergeBookmarkRecord(existing, incoming);
+  assert.equal(result.quotedStatusId, '777');
+  assert.equal(result.quotedTweet, undefined);
 });
 
 test('mergeBookmarkRecord: equal scores prefer incoming (>=)', () => {

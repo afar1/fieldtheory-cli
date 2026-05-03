@@ -13,14 +13,14 @@ npm run start        # Run compiled dist/cli.js
 
 ## Architecture
 
-Single CLI application built with Commander.js. All data stored in `~/.ft-bookmarks/`.
+Single CLI application built with Commander.js. Bookmark data is stored in `~/.fieldtheory/bookmarks/`; markdown library output is stored in `~/.fieldtheory/library/`.
 
 ### Key files
 
 | File | Purpose |
 |------|---------|
 | `src/cli.ts` | Command definitions, progress bar, first-run UX |
-| `src/paths.ts` | Data directory resolution (`~/.ft-bookmarks/`) |
+| `src/paths.ts` | Data, library, and commands path resolution |
 | `src/graphql-bookmarks.ts` | GraphQL sync engine (Chrome session cookies) |
 | `src/bookmarks.ts` | OAuth API sync |
 | `src/bookmarks-db.ts` | SQLite FTS5 index, search, list, stats |

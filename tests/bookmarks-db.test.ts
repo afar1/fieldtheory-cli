@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, sanitizeFtsQuery } from '../src/bookmarks-db.js';
+import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, listBookmarks, sanitizeFtsQuery, getCategoryCounts, sampleByCategory, getClassificationProgress } from '../src/bookmarks-db.js';
 import { openDb, saveDb } from '../src/db.js';
 import { twitterBookmarksIndexPath } from '../src/paths.js';
 
@@ -82,6 +82,32 @@ test('buildIndex refreshes existing rows without dropping classifications', asyn
   });
 });
 
+test('getBookmarkById and listBookmarks hydrate quoted tweets', async () => {
+  const fixtures = [{
+    ...FIXTURES[0],
+    quotedStatusId: '55',
+    quotedTweet: {
+      id: '55',
+      text: 'Quoted tweet body',
+      authorHandle: 'quoted',
+      postedAt: '2026-01-01T10:00:00.000Z',
+      url: 'https://x.com/quoted/status/55',
+    },
+  }];
+
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+
+    const byId = await getBookmarkById('1');
+    assert.equal(byId?.quotedStatusId, '55');
+    assert.equal(byId?.quotedTweet?.text, 'Quoted tweet body');
+
+    const listed = await listBookmarks({ limit: 1 });
+    assert.equal(listed[0]?.quotedStatusId, '55');
+    assert.equal(listed[0]?.quotedTweet?.authorHandle, 'quoted');
+  }, fixtures);
+});
+
 test('searchBookmarks: full-text search returns matching results', async () => {
   await withIsolatedDataDir(async () => {
     await buildIndex();
@@ -127,6 +153,83 @@ test('getStats returns correct aggregate data', async () => {
     assert.equal(stats.topAuthors[0].count, 2);
     assert.equal(stats.languageBreakdown[0].language, 'en');
     assert.equal(stats.languageBreakdown[0].count, 3);
+  });
+});
+
+// Regression: buildIndex writes primary_category='unclassified' as a
+// placeholder for bookmarks that haven't been classified. getCategoryCounts
+// must NOT surface that placeholder — if it does, ft wiki's scan phase
+// queues an "unclassified" page whose sample set is always empty (the
+// sampler reads the `categories` column, which is NULL on unclassified
+// rows) and burns the LLM timeout on every compile. See
+// claude/fix-claude-auth-errors-at0Oi.
+test('getCategoryCounts excludes unclassified placeholder', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+
+    // Fresh index: every row is primary_category='unclassified', categories=NULL.
+    const counts = await getCategoryCounts();
+    assert.ok(!('unclassified' in counts),
+      `getCategoryCounts should not return 'unclassified', got keys: ${JSON.stringify(Object.keys(counts))}`);
+
+    // Sanity: unclassified sampling is still empty (consistent with the
+    // column-mismatch we're working around, not something this fix changes).
+    const samples = await sampleByCategory('unclassified', 50);
+    assert.equal(samples.length, 0);
+  });
+});
+
+test('getCategoryCounts still returns real categories alongside the exclusion', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+
+    // Classify two rows as 'tool' and leave the third as unclassified.
+    const dbPath = twitterBookmarksIndexPath();
+    const db = await openDb(dbPath);
+    try {
+      db.run(
+        `UPDATE bookmarks SET categories = ?, primary_category = ? WHERE id IN ('1', '2')`,
+        ['tool', 'tool'],
+      );
+      saveDb(db, dbPath);
+    } finally {
+      db.close();
+    }
+
+    const counts = await getCategoryCounts();
+    assert.equal(counts['tool'], 2, 'real category should be present');
+    assert.ok(!('unclassified' in counts), 'unclassified placeholder should still be excluded');
+  });
+});
+
+test('getClassificationProgress returns category and domain completion counts', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+
+    const dbPath = twitterBookmarksIndexPath();
+    const db = await openDb(dbPath);
+    try {
+      db.run(
+        `UPDATE bookmarks
+         SET categories = ?, primary_category = ?, domains = ?, primary_domain = ?
+         WHERE id = '1'`,
+        ['tool', 'tool', 'ai', 'ai'],
+      );
+      db.run(
+        `UPDATE bookmarks
+         SET categories = ?, primary_category = ?
+         WHERE id = '2'`,
+        ['research', 'research'],
+      );
+      saveDb(db, dbPath);
+    } finally {
+      db.close();
+    }
+
+    const progress = await getClassificationProgress();
+    assert.equal(progress.total, 3);
+    assert.equal(progress.categoriesDone, 2);
+    assert.equal(progress.domainsDone, 1);
   });
 });
 

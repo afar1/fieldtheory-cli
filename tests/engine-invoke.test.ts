@@ -41,7 +41,7 @@ test('invokeEngineAsync: rejects with stderr folded into the error message on no
     ),
     (err) => {
       const msg = (err as Error).message;
-      assert.match(msg, /Command failed/, 'message should start with the "Command failed" prefix');
+      assert.match(msg, /failed/, 'message should identify the engine failure');
       assert.match(msg, /exit 2/, 'message should name the exit code');
       assert.match(msg, /actual error context/, 'message should include the child stderr');
       return true;

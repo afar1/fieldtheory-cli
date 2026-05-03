@@ -7,31 +7,39 @@ import { promptText } from './prompt.js';
 
 const FRONTMATTER = `---
 name: fieldtheory
-description: Search the user's local X/Twitter bookmarks and turn bookmark groups into repo-aware roadmap grids. Trigger when the user mentions bookmarks, saved tweets, seeds, ft possible, 2x2 grids, roadmap ideas, or asks what to do next across projects.
+description: Use the user's local Field Theory data, Library markdown, portable commands, and X/Twitter bookmarks; turn bookmark groups into repo-aware roadmap grids when asked. Trigger when the user mentions Field Theory, bookmarks, saved tweets, Library notes, wiki pages, commands, seeds, ft possible, 2x2 grids, roadmap ideas, or what to do next across projects.
 ---`;
 
 const BODY = `
-# Field Theory - Bookmark Search And Possible Roadmaps
+# Field Theory - Local Context And Possible Roadmaps
 
-Use the Field Theory CLI (\`ft\`) to search the user's local X/Twitter bookmark archive and, when asked, turn a bookmark group into a repo-aware roadmap plotted on a 2x2 grid.
+Use the Field Theory CLI to inspect and work with the user's local context.
+
+Field Theory has three main local surfaces:
+
+- bookmarks: raw synced X/Twitter bookmark data
+- library: readable markdown knowledge and authored notes
+- commands: portable markdown actions in \`~/.fieldtheory/commands\`
 
 ## When to trigger
 
+- User mentions Field Theory, the Library, wiki pages, portable commands, or reusable workflows
 - User mentions bookmarks, saved tweets, or X/Twitter content they saved
 - User asks to find something they bookmarked ("find that tweet about...")
 - User asks a question their bookmarks could answer ("what AI tools have I been looking at?")
-- User wants bookmark stats, patterns, or insights
-- Starting a task where the user's reading history adds context
+- User wants prior notes, local decisions, command files, bookmark stats, patterns, or insights
+- Starting non-trivial work where local history or reading history may add context
 - User asks for a roadmap, grid, seed, node, dot, debate, or "what should I do next" across projects
 - User says something like: "your goal is to look at XYZ type of bookmarks and debate / come up with a roadmap plotted in the grid of what I should do next across these projects"
 
 ## Search Workflow
 
-1. Look at what the user is working on (conversation, open files, branch name)
-2. Generate 2-3 targeted search queries
-3. Run \`ft search <query>\` for each
-4. Narrow with filters if needed
-5. Summarize what you found — highlight relevant bookmarks, note patterns
+1. Check paths and status when setup matters: \`ft paths --json\`, \`ft status --json\`
+2. Search durable notes first when prior project knowledge matters: \`ft library search <query> --json\`
+3. Search bookmarks when reading history or saved X/Twitter posts matter: \`ft search <query> --json\`
+4. Inspect exact files or bookmarks with \`ft library show <path> --json\`, \`ft show <id> --json\`, or \`ft commands show <name> --json\`
+5. Create or update durable Library notes and portable commands only when the user asks for a saved artifact
+6. Open useful Library pages in the Mac app with \`ft library open <path>\`
 
 ## Possible Roadmap Workflow
 
@@ -76,6 +84,9 @@ If the user says "debate", use the existing \`ft possible\` pipeline as generate
 ## Commands
 
 \`\`\`bash
+ft paths --json                # Canonical bookmarks, library, commands paths
+ft status --json               # Bookmark/classification status plus paths
+
 ft search <query>              # Full-text BM25 search ("exact phrase", AND, OR, NOT)
 ft list --category <cat>       # tool, technique, research, opinion, launch, security, commerce
 ft list --domain <dom>         # ai, web-dev, startups, finance, design, devops, marketing, etc.
@@ -91,18 +102,33 @@ ft possible grid latest
 ft possible dots latest
 ft possible prompt <node-id>
 ft possible nightly install --time 02:00 --defaults
+
+ft library search <query>      # Search Field Theory Library markdown
+ft library show <path>         # Read one Library page
+ft library create <path>       # Create a Library page
+ft library update <path>       # Replace a Library page with --stdin/--file plus guard
+ft library open <path>         # Open a Library page in the Mac app
+
+ft commands list               # List portable command markdown files
+ft commands show <name>        # Read one command
+ft commands new <name>         # Create a new command
+ft commands validate [name]    # Check command shape
 \`\`\`
 
 Combine filters: \`ft list --category tool --domain ai --limit 10\`
 
 ## Guidelines
 
-- Start broad, narrow with filters
-- Don't dump raw output — summarize and connect findings to the user's current work
+- Prefer JSON output when you need to inspect or cite exact fields
+- Start with Library pages for durable project knowledge, then search bookmarks for source material
+- Don't dump raw output; summarize and connect findings to the user's current work
 - Cross-reference multiple queries to build a complete picture
 - Look for recurring authors, topic clusters, and connections between bookmarks
 - Ground roadmap work in actual bookmark-backed seeds
 - Lead roadmap reports with the plotted grid and concrete next actions, not just prose
+- For updates, use \`--expected-sha256\` from a prior \`show --json\` result or pass \`--force\` only when explicitly appropriate
+- In local app development, set \`FT_APP_DEV_DIR\` before \`ft library open\` so the CLI targets the Field Theory dev checkout instead of a generic Electron URL handler
+- Deletes move local files to Trash; the Mac app owns Library sync and remote tombstones
 `;
 
 /** Full skill file with YAML frontmatter (for Claude Code commands). */

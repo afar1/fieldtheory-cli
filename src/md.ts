@@ -4,7 +4,7 @@
  * ft md [--full]
  *
  * Builds/updates a Karpathy-style LLM wiki from the bookmarks database.
- * Output lives in ~/.ft-bookmarks/md/ as plain markdown with [[wikilinks]],
+ * Output lives in ~/.fieldtheory/library/ as plain markdown with [[wikilinks]],
  * compatible with Atomic and other markdown knowledge graph tools.
  *
  * Incremental by default: only pages whose source bookmark count changed are
@@ -23,16 +23,21 @@ import {
   getCategoryCounts, getDomainCounts, sampleByCategory, sampleByDomain,
   sampleByAuthor, getTopAuthorHandles, openBookmarksDb, type CategorySample,
 } from './bookmarks-db.js';
-import { resolveEngine, invokeEngineAsync, type ResolvedEngine } from './engine.js';
+import { resolveEngine, invokeEngineAsync, EngineInvocationError, type ResolvedEngine } from './engine.js';
 import {
   buildCategoryPagePrompt, buildDomainPagePrompt, buildEntityPagePrompt,
   type MdBookmark,
 } from './md-prompts.js';
+import { stripLlmMarkdownFence } from './md-fence.js';
 
 const MIN_CATEGORY_COUNT = 5;
 const MIN_DOMAIN_COUNT   = 5;
 const MIN_ENTITY_COUNT   = 10;
 const MAX_SAMPLE_SIZE    = 50;
+
+/** Abort the compile after this many consecutive page failures — catches
+ * auth expiry and rate-limit cascades before they waste hours. */
+export const MAX_CONSECUTIVE_FAILURES = 5;
 
 /** Scale timeout by sample count — large categories need more time. */
 function llmOpts(sampleCount: number) {
@@ -51,6 +56,7 @@ export interface MdState {
 export interface CompileOptions {
   full?: boolean;
   only?: string[];
+  engineOverride?: string;
   onProgress?: (status: string) => void;
 }
 
@@ -62,6 +68,7 @@ export interface CompileResult {
   pagesFailed: number;
   totalPages: number;
   elapsed: number;
+  aborted: boolean;
 }
 
 function sha256(text: string): string {
@@ -128,7 +135,7 @@ Edit it to evolve how the LLM maintains wiki pages.
 ## Directory Structure
 
 \`\`\`
-~/.ft-bookmarks/md/
+~/.fieldtheory/library/
 ├── index.md          # Content catalog (auto-generated, do not edit)
 ├── log.md            # Append-only compile + query log
 ├── md-state.json     # Internal compilation state
@@ -227,6 +234,48 @@ export function logEntry(type: string, detail: string): string {
   return `## [${ts}] ${type} | ${detail}`;
 }
 
+/** Short log label from an EngineInvocationError reason. */
+function reasonLabel(reason: EngineInvocationError['reason']): string {
+  switch (reason) {
+    case 'timeout':   return 'TIMEOUT';
+    case 'maxbuffer': return 'OVERFLOW';
+    case 'spawn':     return 'SPAWN-FAIL';
+    case 'exit':      return 'ERROR';
+  }
+}
+
+/** Build the log detail from a structured engine failure. Prefers stderr,
+ *  falls back to the reason-shaped message — never the raw prompt. */
+function formatFailureDetail(err: EngineInvocationError): string {
+  // For spawn failures (ENOENT etc) the message IS the useful content.
+  if (err.reason === 'spawn') return err.message;
+  const stderrLine = err.stderr.trim().split(/\r?\n/).filter(Boolean).pop();
+  if (stderrLine) {
+    return err.reason === 'timeout'
+      ? `${err.message} [stderr: ${stderrLine}]`
+      : stderrLine;
+  }
+  return err.message;
+}
+
+/** Reason-aware advice line shown when the breaker fires. */
+function engineFailureHint(engineName: string, err: EngineInvocationError | null): string {
+  if (err?.reason === 'timeout') {
+    return `${engineName} ran to the full timeout on every page — usually a hung child, not auth. ` +
+           `Upgrade ${engineName} (\`${engineName} --version\`) and retry with \`ft wiki\`.`;
+  }
+  if (err?.reason === 'spawn') {
+    return `Could not spawn \`${engineName}\`. Check that it's installed and on PATH, then rerun \`ft wiki\`.`;
+  }
+  if (err?.stderr && /rate.?limit|quota|429/i.test(err.stderr)) {
+    return `${engineName} is rate-limited. Wait a bit, then rerun \`ft wiki\`.`;
+  }
+  if (err?.stderr && /auth|login|unauthor|invalid.*token|expired/i.test(err.stderr)) {
+    return `${engineName} reports an auth problem — re-authenticate (e.g. \`${engineName} /login\`) and rerun \`ft wiki\`.`;
+  }
+  return `Check that \`${engineName}\` is authenticated and not rate-limited, then rerun \`ft wiki\`.`;
+}
+
 export async function compileMd(options: CompileOptions = {}): Promise<CompileResult> {
   const progress  = options.onProgress ?? ((s: string) => fs.writeSync(2, s + '\n'));
   const startTime = Date.now();
@@ -242,7 +291,7 @@ export async function compileMd(options: CompileOptions = {}): Promise<CompileRe
     let alive = false;
     try { process.kill(Number(existingPid), 0); alive = true; } catch { /* not running */ }
     if (alive) {
-      throw new Error(`Another ft md is already running (pid ${existingPid}). Wait for it to finish or remove ${lockPath}`);
+      throw new Error(`Another ft wiki is already running (pid ${existingPid}). Wait for it to finish or remove ${lockPath}`);
     }
     // Stale lock from a crashed run — take over
     fs.writeFileSync(lockPath, String(process.pid));
@@ -261,7 +310,8 @@ async function doCompile(
   startTime: number,
   onlySet: Set<string> | null,
 ): Promise<CompileResult> {
-  const engine = await resolveEngine();
+  const engine = await resolveEngine({ override: options.engineOverride });
+  progress(`Using ${engine.name}`);
 
   progress('Initializing md directories...');
   await ensureDir(mdDir());
@@ -279,6 +329,7 @@ async function doCompile(
   let pagesUpdated = 0;
   let pagesSkipped = 0;
   let pagesFailed  = 0;
+  let aborted      = false;
 
   const db = await openBookmarksDb();
 
@@ -324,16 +375,30 @@ async function doCompile(
 
     pagesSkipped = skipCount;
 
+    // Per-event line: echo to the terminal and append to log.md so the
+    // user can `tail -f` the log from another shell while a compile runs.
+    const logLine = async (msg: string): Promise<void> => {
+      progress(msg);
+      try { await appendLine(mdLogPath(), logEntry('compile', msg)); } catch { /* best effort */ }
+    };
+
     if (toGenerate.length === 0) {
       progress('Nothing to compile — all pages up to date.');
     } else {
       const est = toGenerate.length > 3 ? ` (~${toGenerate.length}–${toGenerate.length * 2} min)` : '';
       progress(`\nGenerating ${toGenerate.length} pages with ${engine.name}${est}`);
       if (skipCount > 0) progress(`  ${skipCount} pages unchanged, skipping`);
+      progress(`  Follow live: tail -f ${mdLogPath()}`);
       progress('');
+      await appendLine(
+        mdLogPath(),
+        logEntry('compile', `start — ${toGenerate.length} pages, engine=${engine.name}`),
+      );
     }
 
     // ── Generate each page ───────────────────────────────────────────────
+    let consecutiveFailures = 0;
+    let firstFailureMsg = '';
     for (let i = 0; i < toGenerate.length; i++) {
       const item = toGenerate[i];
       const tag = `[${i + 1}/${toGenerate.length}]`;
@@ -352,16 +417,35 @@ async function doCompile(
       }
 
       const opts = llmOpts(samples.length);
-      progress(`${tag} ${item.key} (${samples.length} sampled, ${Math.round(opts.timeout / 1000)}s timeout)...`);
+      await logLine(`${tag} ${item.key} (${samples.length} sampled, ${Math.round(opts.timeout / 1000)}s timeout)...`);
 
       let content: string;
       try {
-        content = await invokeEngineAsync(engine, prompt, opts);
+        const raw = await invokeEngineAsync(engine, prompt, opts);
+        content = stripLlmMarkdownFence(raw);
       } catch (err) {
-        const msg = (err as Error).message ?? String(err);
-        const isTimeout = msg.includes('ETIMEDOUT') || msg.includes('timed out');
-        progress(`${tag} ${item.key} — ${isTimeout ? 'TIMEOUT' : 'ERROR'}: ${msg.slice(0, 120)}`);
+        // Prefer the structured EngineInvocationError fields over err.message.
+        // err.message used to be the execFile-formatted "Command failed: claude
+        // -p --output-format text <FULL PROMPT>", which consumed the entire
+        // log budget with prompt bytes and hid the real signal. We now log a
+        // short label derived from the failure reason plus the tail of stderr,
+        // which is usually where claude/codex put "auth expired" / "rate limit"
+        // / "model not available".
+        const eie = err instanceof EngineInvocationError ? err : null;
+        const label = eie ? reasonLabel(eie.reason) : 'ERROR';
+        const detail = eie ? formatFailureDetail(eie) : (err as Error).message ?? String(err);
+        await logLine(`${tag} ${item.key} — ${label}: ${detail.slice(0, 200)}`);
         pagesFailed++;
+        consecutiveFailures++;
+        if (!firstFailureMsg) firstFailureMsg = eie?.message ?? (err as Error).message ?? String(err);
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          aborted = true;
+          await logLine(
+            `Aborted after ${MAX_CONSECUTIVE_FAILURES} consecutive failures — first error: ${firstFailureMsg.slice(0, 300)}`,
+          );
+          await logLine(engineFailureHint(engine.name, eie));
+          break;
+        }
         continue;
       }
 
@@ -379,7 +463,8 @@ async function doCompile(
       // Save state after each page so Ctrl-C resumes where we left off
       await writeJson(mdStatePath(), state);
 
-      progress(`${tag} ${item.key} → ${outcome}`);
+      await logLine(`${tag} ${item.key} → ${outcome}`);
+      consecutiveFailures = 0;
     }
   } finally {
     db.close();
@@ -395,7 +480,7 @@ async function doCompile(
   const totalPages = pagesCreated + pagesUpdated;
   await appendLine(
     mdLogPath(),
-    logEntry('compile', `engine=${engine.name} created=${pagesCreated} updated=${pagesUpdated} skipped=${pagesSkipped} failed=${pagesFailed} elapsed=${elapsed}s`),
+    logEntry('compile', `${aborted ? 'aborted ' : ''}engine=${engine.name} created=${pagesCreated} updated=${pagesUpdated} skipped=${pagesSkipped} failed=${pagesFailed} elapsed=${elapsed}s`),
   );
 
   // ── Save state ───────────────────────────────────────────────────────────
@@ -403,5 +488,5 @@ async function doCompile(
   state.totalCompiles  = (state.totalCompiles ?? 0) + 1;
   await writeJson(mdStatePath(), state);
 
-  return { engine: engine.name, pagesCreated, pagesUpdated, pagesSkipped, pagesFailed, totalPages, elapsed };
+  return { engine: engine.name, pagesCreated, pagesUpdated, pagesSkipped, pagesFailed, totalPages, elapsed, aborted };
 }

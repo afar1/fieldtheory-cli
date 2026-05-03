@@ -64,6 +64,18 @@ const BROWSERS: BrowserDef[] = [
     winPath: 'AppData/Local/BraveSoftware/Brave-Browser/User Data',
   },
   {
+    id: 'edge',
+    displayName: 'Microsoft Edge',
+    cookieBackend: 'chromium',
+    keychainEntries: [
+      { service: 'Microsoft Edge Safe Storage', account: 'Microsoft Edge' },
+      { service: 'Edge Safe Storage', account: 'Microsoft Edge' },
+    ],
+    macPath: 'Library/Application Support/Microsoft Edge',
+    linuxPath: '.config/microsoft-edge',
+    winPath: 'AppData/Local/Microsoft/Edge/User Data',
+  },
+  {
     id: 'helium',
     displayName: 'Helium',
     cookieBackend: 'chromium',
@@ -80,6 +92,15 @@ const BROWSERS: BrowserDef[] = [
       { service: 'Comet Safe Storage', account: 'Comet' },
     ],
     macPath: 'Library/Application Support/Comet',
+  },
+  {
+    id: 'dia',
+    displayName: 'Dia',
+    cookieBackend: 'chromium',
+    keychainEntries: [
+      { service: 'Dia Safe Storage', account: 'Dia' },
+    ],
+    macPath: 'Library/Application Support/Dia/User Data',
   },
   {
     id: 'firefox',
