@@ -5,10 +5,13 @@ import type { IdeasSeed } from '../src/ideas-seeds.js';
 import type { Frame } from '../src/adjacent/types.js';
 import {
   parseIndex,
+  parseModelProfileAnswer,
   parseRepoList,
   runPossibleWizard,
   stepPickDepth,
   stepPickFrame,
+  stepPickModelProfile,
+  stepPickNodeTarget,
   stepPickRepos,
   stepPickSeed,
 } from '../src/possible-wizard.js';
@@ -83,6 +86,24 @@ test('parseRepoList: splits on whitespace, trims, drops empties', () => {
   assert.deepEqual(parseRepoList('/a\t/b\n/c'), ['/a', '/b', '/c']);
   assert.deepEqual(parseRepoList(''), []);
   assert.deepEqual(parseRepoList('   '), []);
+});
+
+test('parseModelProfileAnswer: supports default, effort-only, and engine/model/effort', () => {
+  assert.deepEqual(parseModelProfileAnswer(''), {});
+  assert.deepEqual(parseModelProfileAnswer('medium'), { effort: 'medium' });
+  assert.deepEqual(parseModelProfileAnswer('opus medium'), { model: 'opus', effort: 'medium' });
+  assert.deepEqual(parseModelProfileAnswer('claude medium'), { engine: 'claude', effort: 'medium' });
+  assert.deepEqual(parseModelProfileAnswer('claude opus medium'), {
+    engine: 'claude',
+    model: 'opus',
+    effort: 'medium',
+  });
+  assert.deepEqual(parseModelProfileAnswer('codex gpt-5.5 medium'), {
+    engine: 'codex',
+    model: 'gpt-5.5',
+    effort: 'medium',
+  });
+  assert.equal(parseModelProfileAnswer('claude opus enormous'), null);
 });
 
 // ── stepPickSeed ───────────────────────────────────────────────────────────
@@ -228,6 +249,48 @@ test('stepPickDepth: user picks 3 → deep', async () => {
   if (result.kind === 'picked') assert.equal(result.depth, 'deep');
 });
 
+// ── stepPickNodeTarget ────────────────────────────────────────────────────
+
+test('stepPickNodeTarget: enter accepts the depth default without an override', async () => {
+  const prompter = mockPrompter(['']);
+  const result = await stepPickNodeTarget(prompter, 'quick');
+  assert.equal(result.kind, 'picked');
+  if (result.kind === 'picked') assert.equal(result.nodeTarget, undefined);
+  assert.ok(prompter.lines.some((l) => l.includes('quick defaults to 6')));
+});
+
+test('stepPickNodeTarget: user can request an explicit node count', async () => {
+  const prompter = mockPrompter(['7']);
+  const result = await stepPickNodeTarget(prompter, 'standard');
+  assert.equal(result.kind, 'picked');
+  if (result.kind === 'picked') assert.equal(result.nodeTarget, 7);
+});
+
+test('stepPickNodeTarget: invalid count cancels the wizard', async () => {
+  const prompter = mockPrompter(['31']);
+  const result = await stepPickNodeTarget(prompter, 'deep');
+  assert.equal(result.kind, 'cancelled');
+  if (result.kind === 'cancelled') assert.equal(result.reason, 'invalid-node-count');
+});
+
+// ── stepPickModelProfile ──────────────────────────────────────────────────
+
+test('stepPickModelProfile: enter accepts the default profile', async () => {
+  const prompter = mockPrompter(['']);
+  const result = await stepPickModelProfile(prompter);
+  assert.equal(result.kind, 'picked');
+  if (result.kind === 'picked') assert.deepEqual(result.profile, {});
+});
+
+test('stepPickModelProfile: parses an explicit high-quality medium profile', async () => {
+  const prompter = mockPrompter(['claude opus medium']);
+  const result = await stepPickModelProfile(prompter);
+  assert.equal(result.kind, 'picked');
+  if (result.kind === 'picked') {
+    assert.deepEqual(result.profile, { engine: 'claude', model: 'opus', effort: 'medium' });
+  }
+});
+
 // ── runPossibleWizard orchestration ────────────────────────────────────────
 
 test('runPossibleWizard: full happy path with saved set and seed default frame', async () => {
@@ -242,8 +305,9 @@ test('runPossibleWizard: full happy path with saved set and seed default frame',
     listFrames: () => frames,
   };
   // Answers: seed pick (1), accept saved repos (enter), accept seed default frame (enter),
-  //          accept quick depth (enter), confirm (enter).
-  const prompter = mockPrompter(['1', '', '', '', '']);
+  //          accept quick depth (enter), accept depth default nodes (enter),
+  //          accept default model profile (enter), confirm (enter).
+  const prompter = mockPrompter(['1', '', '', '', '', '', '']);
   const result = await runPossibleWizard(prompter, deps);
 
   assert.equal(result.kind, 'ready');
@@ -252,6 +316,8 @@ test('runPossibleWizard: full happy path with saved set and seed default frame',
     assert.deepEqual(result.plan.repos, ['/repo-a', '/repo-b']);
     assert.equal(result.plan.frameId, 'impact-effort');
     assert.equal(result.plan.depth, 'quick');
+    assert.equal(result.plan.nodeTarget, undefined);
+    assert.equal(result.plan.effort, undefined);
   }
   assert.equal(prompter.remaining(), 0, 'all canned answers should have been consumed');
 });
@@ -278,8 +344,8 @@ test('runPossibleWizard: user cancels at confirm → returns cancelled, no plan'
     listRepos: () => ['/r1'],
     listFrames: () => [fakeFrame()],
   };
-  // Answers: seed 1, accept repos, accept frame, quick, cancel with "n".
-  const prompter = mockPrompter(['1', '', '', '', 'n']);
+  // Answers: seed 1, accept repos, accept frame, quick, depth default nodes, default model, cancel with "n".
+  const prompter = mockPrompter(['1', '', '', '', '', '', 'n']);
   const result = await runPossibleWizard(prompter, deps);
   assert.equal(result.kind, 'cancelled');
   if (result.kind === 'cancelled') assert.equal(result.reason, 'user-cancelled-at-confirm');

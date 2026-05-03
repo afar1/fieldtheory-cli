@@ -14,6 +14,7 @@ import type { ResolvedEngine } from '../src/engine.js';
 function shEngine(name: string, script: string): ResolvedEngine {
   return {
     name,
+    label: name,
     config: {
       bin: '/bin/sh',
       // Ignore the prompt — fake engines don't consume it.

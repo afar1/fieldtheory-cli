@@ -40,6 +40,7 @@ import {
   parseCritiques,
   parseBatchScores,
   DEPTH_BUDGETS,
+  applyNodeTargetToBudget,
 } from './prompts.js';
 import type {
   SeedBriefParsed,
@@ -64,6 +65,7 @@ export interface RunPipelineOptions {
   frame: Frame;
   repo: string;
   depth: ConsiderationDepth;
+  nodeTarget?: number;
   steering?: string;
   parentId?: string;
   engine: ResolvedEngine;
@@ -99,7 +101,7 @@ function makeProvenance(stage: PipelineStage, engine: ResolvedEngine, inputIds: 
   return {
     createdAt: nowIso(),
     producer: 'llm' as const,
-    model: engine.name,
+    model: engine.label,
     inputIds,
     promptVersion: `adjacent-pipeline-v1/${stage}`,
   };
@@ -121,7 +123,7 @@ async function stageRead(
     : `Reading ${seedArtifacts.length} seed items...`;
   emit(ctx, 'read', label);
 
-  const cached = readSeedBriefCache(seedIds, ctx.engine.name) as SeedBriefParsed | null;
+  const cached = readSeedBriefCache(seedIds, ctx.engine.label) as SeedBriefParsed | null;
   if (cached) {
     emit(ctx, 'read', 'Seed brief loaded from cache.');
     const briefArtifact = writeArtifact({
@@ -140,7 +142,7 @@ async function stageRead(
   const raw = await invokeEngineAsync(ctx.engine, prompt, { timeout: ctx.budget.timeoutMs });
   const brief = parseSeedBrief(raw);
 
-  writeSeedBriefCache(seedIds, ctx.engine.name, brief);
+  writeSeedBriefCache(seedIds, ctx.engine.label, brief);
 
   const briefArtifact = writeArtifact({
     type: 'seed_brief',
@@ -172,6 +174,7 @@ async function stageSurvey(
     seedBrief: brief,
     repoTree: snapshot.treeText,
     recentFiles: snapshot.recentFiles,
+    fileExcerpts: snapshot.fileExcerpts,
     budget: ctx.budget,
   });
 
@@ -205,7 +208,7 @@ async function stageGenerate(
 
   const steeringHash = hashSteering(ctx.steering);
 
-  const cached = readResultCache(briefArtifact.id, ctx.frame.id, ctx.steering, gitHead) as { candidates: CandidateRaw[] } | null;
+  const cached = readResultCache(briefArtifact.id, ctx.frame.id, ctx.steering, gitHead, ctx.engine.label) as { candidates: CandidateRaw[] } | null;
   if (cached?.candidates) {
     emit(ctx, 'generate', `${cached.candidates.length} candidates loaded from cache.`);
     const candidateArtifact = writeArtifact({
@@ -244,7 +247,7 @@ async function stageGenerate(
   const raw = await invokeEngineAsync(ctx.engine, prompt, { timeout: ctx.budget.timeoutMs });
   const candidates = parseCandidates(raw);
 
-  writeResultCache(briefArtifact.id, ctx.frame.id, ctx.steering, gitHead, { candidates });
+  writeResultCache(briefArtifact.id, ctx.frame.id, ctx.steering, gitHead, { candidates }, ctx.engine.label);
 
   const candidateArtifact = writeArtifact({
     type: 'candidate_list',
@@ -327,11 +330,14 @@ async function stageScore(
 
     const title = critique.revisedTitle ?? candidate.title;
     const summary = critique.revisedSummary ?? candidate.summary;
+    const essay = candidate.essay;
+    const implementationPrompt = candidate.implementationPrompt;
     const effortEstimate = candidate.effortEstimate as Dot['effortEstimate'];
 
     const exportablePrompt = buildExportablePrompt({
       title,
       summary,
+      essay,
       rationale: candidate.rationale,
       repoSurface: candidate.repoSurface,
       frame: ctx.frame,
@@ -340,11 +346,13 @@ async function stageScore(
       axisBScore: scores.axisBScore,
       axisAJustification: scores.axisAJustification,
       axisBJustification: scores.axisBJustification,
+      implementationPrompt,
     });
 
     const dot: Dot = {
       title,
       summary,
+      essay,
       rationale: candidate.rationale,
       repoSurface: candidate.repoSurface,
       effortEstimate,
@@ -353,6 +361,7 @@ async function stageScore(
       axisBScore: scores.axisBScore,
       axisBJustification: scores.axisBJustification,
       exportablePrompt,
+      implementationPrompt,
     };
 
     const dotArtifact = writeArtifact({
@@ -381,7 +390,7 @@ export interface PipelineResult {
 }
 
 export async function runPipeline(opts: RunPipelineOptions): Promise<PipelineResult> {
-  const { seedArtifactIds, frame, repo, depth, steering, parentId, engine, onProgress } = opts;
+  const { seedArtifactIds, frame, repo, depth, nodeTarget, steering, parentId, engine, onProgress } = opts;
 
   if (!Array.isArray(seedArtifactIds) || seedArtifactIds.length === 0) {
     throw new Error('runPipeline: seedArtifactIds must contain at least one id.');
@@ -389,7 +398,7 @@ export async function runPipeline(opts: RunPipelineOptions): Promise<PipelineRes
 
   const ctx: PipelineContext = {
     engine,
-    budget: DEPTH_BUDGETS[depth as Depth],
+    budget: applyNodeTargetToBudget(DEPTH_BUDGETS[depth as Depth], nodeTarget),
     frame,
     steering,
     parentId,
@@ -420,6 +429,11 @@ export async function runPipeline(opts: RunPipelineOptions): Promise<PipelineRes
     parentId,
     repo,
     depth: depth as ConsiderationDepth,
+    model: engine.label,
+    engine: engine.name,
+    engineModel: engine.model,
+    engineEffort: engine.effort,
+    nodeTarget,
     createdAt,
     userInteractions: [],
     completedStages: [...completedStages],
@@ -463,6 +477,11 @@ export async function runPipeline(opts: RunPipelineOptions): Promise<PipelineRes
     parentId,
     repo,
     depth: depth as ConsiderationDepth,
+    model: engine.label,
+    engine: engine.name,
+    engineModel: engine.model,
+    engineEffort: engine.effort,
+    nodeTarget,
     createdAt,
     userInteractions: [],
     completedStages: [...completedStages],
@@ -477,69 +496,111 @@ export async function runPipeline(opts: RunPipelineOptions): Promise<PipelineRes
 
 // ── 2×2 rendering ─────────────────────────────────────────────────────────────
 
-const QUADRANT_WIDTH = 36;
-const QUADRANT_HEIGHT = 6;
+const PLOT_WIDTH = 72;
+const PLOT_HEIGHT = 20;
 
 function truncate(s: string, max: number): string {
+  if (max <= 0) return '';
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
 }
 
-interface GridCell {
-  label: string;
-  dots: Dot[];
+function formatScoreLine(dot: Dot, frame: Frame): string {
+  return `${frame.axisA.label} ${dot.axisAScore} · ${frame.axisB.label} ${dot.axisBScore} · ${dot.effortEstimate}`;
+}
+
+function shouldStyleGrid(): boolean {
+  return Boolean(process.stdout.isTTY) && process.env.NO_COLOR === undefined && process.env.TERM !== 'dumb';
+}
+
+function paint(s: string, code: string): string {
+  if (!code) return s;
+  return shouldStyleGrid() ? `\x1b[${code}m${s}\x1b[0m` : s;
 }
 
 export function renderTwoByTwo(dots: Dot[], frame: Frame): string {
-  // Split into quadrants by median of each axis so dots spread across all four cells
-  const aScores = dots.map((d) => d.axisAScore).sort((a, b) => a - b);
-  const bScores = dots.map((d) => d.axisBScore).sort((a, b) => a - b);
-  const aMid = aScores[Math.floor(aScores.length / 2)] ?? 50;
-  const bMid = bScores[Math.floor(bScores.length / 2)] ?? 50;
+  const canvas = Array.from({ length: PLOT_HEIGHT }, () => Array.from({ length: PLOT_WIDTH }, () => ' '));
+  const midX = scoreToX(50);
+  const midY = scoreToY(50);
 
-  const highA = (d: Dot) => d.axisAScore >= aMid;
-  const highB = (d: Dot) => d.axisBScore >= bMid;
+  for (let y = 0; y < PLOT_HEIGHT; y++) canvas[y]![midX] = '│';
+  for (let x = 0; x < PLOT_WIDTH; x++) canvas[midY]![x] = '─';
+  canvas[midY]![midX] = '┼';
 
-  const quadrants: Record<string, GridCell> = {
-    highA_highB: { label: frame.quadrantLabels.highHigh, dots: dots.filter((d) => highA(d) && highB(d)) },
-    highA_lowB:  { label: frame.quadrantLabels.highLow,  dots: dots.filter((d) => highA(d) && !highB(d)) },
-    lowA_highB:  { label: frame.quadrantLabels.lowHigh,  dots: dots.filter((d) => !highA(d) && highB(d)) },
-    lowA_lowB:   { label: frame.quadrantLabels.lowLow,   dots: dots.filter((d) => !highA(d) && !highB(d)) },
-  };
+  const sorted = [...dots].sort((a, b) => (b.axisAScore + b.axisBScore) - (a.axisAScore + a.axisBScore));
+  const labels = sorted.map((_dot, idx) => pointLabel(idx));
 
-  function renderCell(cell: GridCell): string[] {
-    const lines: string[] = [`[ ${cell.label} ]`.slice(0, QUADRANT_WIDTH)];
-    for (const dot of cell.dots.slice(0, 4)) {
-      const score = `A:${dot.axisAScore} B:${dot.axisBScore}`;
-      const title = truncate(dot.title, QUADRANT_WIDTH - score.length - 3);
-      lines.push(`  • ${title}`);
-      lines.push(`    ${score}`);
-    }
-    while (lines.length < QUADRANT_HEIGHT) lines.push('');
-    return lines.map((l) => l.padEnd(QUADRANT_WIDTH));
+  for (const [idx, dot] of sorted.entries()) {
+    const x = scoreToX(dot.axisBScore);
+    const y = scoreToY(dot.axisAScore);
+    const current = canvas[y]![x]!;
+    canvas[y]![x] = current === ' ' || current === '│' || current === '─' || current === '┼'
+      ? labels[idx]!
+      : '◆';
   }
 
-  const topLeft  = renderCell(quadrants['highA_highB']);
-  const topRight = renderCell(quadrants['lowA_highB']);
-  const botLeft  = renderCell(quadrants['highA_lowB']);
-  const botRight = renderCell(quadrants['lowA_lowB']);
+  const sep = '─'.repeat(PLOT_WIDTH);
+  const xLabels = buildXAxisLabels();
+  const rows: string[] = [
+    '',
+    `  ${paint(frame.name, '1;36')}`,
+    `  ${paint(`${frame.axisA.label} ↑ · ${frame.axisB.label} →`, '2')}`,
+    '',
+    `        ${paint('low ' + frame.axisB.label, '2')}${' '.repeat(Math.max(1, PLOT_WIDTH - frame.axisB.label.length * 2 - 11))}${paint('high ' + frame.axisB.label, '2')}`,
+    `    100 ╭${sep}╮`,
+  ];
 
-  const sep = '─'.repeat(QUADRANT_WIDTH);
-  const header = `\n  ${frame.name}\n  ${frame.axisA.label} (rows) × ${frame.axisB.label} (cols)\n`;
-  const colHeader = `  ${'high ' + frame.axisB.label}`.padEnd(QUADRANT_WIDTH + 4) + `low ${frame.axisB.label}`;
+  for (let y = 0; y < PLOT_HEIGHT; y++) {
+    const label = y === midY ? ' 50 ' : '    ';
+    rows.push(`  ${label}│${canvas[y]!.join('')}│`);
+  }
 
-  const rows: string[] = [header, colHeader, `  ${sep}┬${sep}`];
-  for (let i = 0; i < QUADRANT_HEIGHT; i++) {
-    const rowLabel = i === 0 ? `high ${frame.axisA.label}`.padStart(2) : '  ';
-    rows.push(`${rowLabel}${topLeft[i]}│${topRight[i]}`);
+  rows.push(`      0 ╰${sep}╯`);
+  rows.push(`        ${paint(xLabels, '2')}`);
+  rows.push(`        ${paint(frame.axisB.label + ' →', '2')}`);
+  rows.push('');
+  rows.push(`  ${paint('Quadrants', '1')}: ${frame.quadrantLabels.lowLow} / ${frame.quadrantLabels.lowHigh} / ${frame.quadrantLabels.highLow} / ${frame.quadrantLabels.highHigh}`);
+  rows.push('');
+  rows.push(`  ${paint('Nodes', '1')}`);
+  for (const [idx, dot] of sorted.entries()) {
+    rows.push(`    ${labels[idx]}  ${truncate(dot.title, 56)}`);
+    rows.push(`       ${formatScoreLine(dot, frame)} · ${truncate(dot.repoSurface, 44)}`);
   }
-  rows.push(`  ${sep}┼${sep}`);
-  for (let i = 0; i < QUADRANT_HEIGHT; i++) {
-    const rowLabel = i === 0 ? ` low ${frame.axisA.label}`.padStart(2) : '  ';
-    rows.push(`${rowLabel}${botLeft[i]}│${botRight[i]}`);
-  }
-  rows.push(`  ${sep}┴${sep}\n`);
+  rows.push('');
 
   return rows.join('\n');
+}
+
+function clampScore(score: number): number {
+  if (!Number.isFinite(score)) return 50;
+  return Math.max(0, Math.min(100, score));
+}
+
+function scoreToX(score: number): number {
+  return Math.round((clampScore(score) / 100) * (PLOT_WIDTH - 1));
+}
+
+function scoreToY(score: number): number {
+  return Math.round(((100 - clampScore(score)) / 100) * (PLOT_HEIGHT - 1));
+}
+
+function pointLabel(idx: number): string {
+  if (idx < 9) return String(idx + 1);
+  return String.fromCharCode('A'.charCodeAt(0) + idx - 9);
+}
+
+function buildXAxisLabels(): string {
+  const chars = Array.from({ length: PLOT_WIDTH }, () => ' ');
+  placeText(chars, 0, '0');
+  placeText(chars, scoreToX(50) - 1, '50');
+  placeText(chars, PLOT_WIDTH - 3, '100');
+  return chars.join('');
+}
+
+function placeText(chars: string[], start: number, text: string): void {
+  for (let i = 0; i < text.length; i++) {
+    const idx = start + i;
+    if (idx >= 0 && idx < chars.length) chars[idx] = text[i]!;
+  }
 }
 
 /** Print all dots sorted by axis A score descending with their justifications. */

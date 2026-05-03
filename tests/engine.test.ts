@@ -138,6 +138,42 @@ test('resolveEngine: uses saved preference when available', async () => {
   }
 });
 
+test('resolveEngine: carries explicit model and effort into engine args', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-profile-'));
+  const origEnv = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = tmpDir;
+
+  try {
+    const { detectAvailableEngines, resolveEngine } = await import('../src/engine.js');
+    const available = detectAvailableEngines();
+    if (available.length === 0) return;
+
+    const engineName = available[0];
+    const model = engineName === 'codex' ? 'gpt-5.5' : 'opus';
+    const resolved = await resolveEngine({ engine: engineName, model, effort: 'medium' });
+
+    assert.equal(resolved.name, engineName);
+    assert.equal(resolved.model, model);
+    assert.equal(resolved.effort, 'medium');
+    assert.equal(resolved.label, `${engineName}/${model}/effort=medium`);
+
+    const args = resolved.config.args('PROMPT', resolved);
+    if (engineName === 'claude') {
+      assert.deepEqual(args.slice(-5), ['--output-format', 'text', '--model', 'opus', '--effort', 'medium', 'PROMPT'].slice(-5));
+      assert.ok(args.includes('--model'));
+      assert.ok(args.includes('--effort'));
+    } else {
+      assert.ok(args.includes('--model'));
+      assert.ok(args.includes('gpt-5.5'));
+      assert.ok(args.includes('--config'));
+      assert.ok(args.includes('model_reasoning_effort="medium"'));
+    }
+  } finally {
+    process.env.FT_DATA_DIR = origEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 // ── resolveEngine with single engine ───────────────────────────────────
 
 test('resolveEngine: single available engine is used without prompting', async () => {

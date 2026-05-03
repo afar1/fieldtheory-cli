@@ -43,6 +43,7 @@ import {
   renderRunGrid,
   runIdeas,
   resolveIdeaRun,
+  resolveFrameIdForRun,
 } from './ideas.js';
 import {
   createIdeasSeedFromArtifacts,
@@ -62,7 +63,31 @@ import {
   resolveRepoList,
 } from './ideas-repos.js';
 import { runPossibleWizard } from './possible-wizard.js';
+import {
+  formatIdeasJob,
+  formatIdeasJobList,
+  listIdeasJobs,
+  readIdeasJob,
+  runIdeasJobWorker,
+  startIdeasBackgroundJob,
+} from './ideas-jobs.js';
+import {
+  createIdeasNightlySchedule,
+  currentCliInvocation,
+  deleteIdeasNightlySchedule,
+  formatIdeasNightlySchedule,
+  formatIdeasNightlyScheduleList,
+  listIdeasNightlySchedules,
+  loadNightlyLaunchAgent,
+  readIdeasNightlySchedule,
+  runIdeasNightlyTick,
+  unloadNightlyLaunchAgent,
+  validateNightlyTime,
+  writeNightlyLaunchAgent,
+  type IdeasNightlyPlan,
+} from './ideas-nightly.js';
 import { DEFAULT_FRAMES } from './adjacent/frames.js';
+import { validateNodeTarget } from './adjacent/prompts.js';
 import {
   addUserFrameFromFile,
   getFrame,
@@ -287,6 +312,10 @@ function logo(): string {
      \x1b[2m\u2514${'\u2500'.repeat(innerW)}\u2518\x1b[0m`;
 }
 
+function isInternalWorkerCommand(command: Command): boolean {
+  return command.name() === '_run-job';
+}
+
 export function showWelcome(): void {
   console.log(logo());
   console.log(`
@@ -449,6 +478,8 @@ function printIdeasRunReport(summary: import('./ideas.js').IdeasRunSummary): voi
     console.log(`\n  ✓ Ideas run complete: ${summary.runIds[0]}`);
   }
   console.log(`  Frame: ${summary.frameName}`);
+  console.log(`  Model: ${summary.model}`);
+  if (summary.nodeTarget) console.log(`  Nodes requested per repo: ${summary.nodeTarget}`);
   console.log(`  Ideas generated: ${summary.dotCount}`);
 
   if (summary.topDots.length > 0) {
@@ -552,7 +583,8 @@ export function buildCli() {
     .description('Self-custody for your X/Twitter bookmarks. Sync, search, classify, and explore locally.')
     .version(getLocalVersion())
     .showHelpAfterError()
-    .hook('preAction', () => {
+    .hook('preAction', (_thisCommand, actionCommand) => {
+      if (isInternalWorkerCommand(actionCommand)) return;
       console.log(logo());
       showWhatsNew();
     });
@@ -1467,6 +1499,10 @@ export function buildCli() {
         repos: plan.repos,
         frameId: plan.frameId,
         depth: plan.depth,
+        engine: plan.engine,
+        model: plan.model,
+        effort: plan.effort,
+        nodeTarget: plan.nodeTarget,
         onProgress: (message) => {
           process.stderr.write(`  ${message}\n`);
         },
@@ -1490,7 +1526,13 @@ export function buildCli() {
     .option('--repos <path...>', 'Multiple repo paths; produces one consideration per repo plus a batch summary')
     .option('--frame <id>', 'Frame id (overrides any frame pinned on the seed)')
     .option('--depth <depth>', 'Depth: quick | standard | deep (default: standard, or quick under --defaults)')
+    .option('--engine <name>', 'LLM CLI engine for this run (claude | codex; default comes from ft model/autodetect)')
+    .option('--model <name>', 'Model alias/name passed to the engine (for example opus or gpt-5.5)')
+    .option('--effort <level>', 'Reasoning effort passed to the engine (low | medium | high | xhigh | max)')
+    .option('--weight <level>', 'Alias for --effort', undefined)
+    .option('--nodes <n>', 'Number of nodes/debates to generate per repo (default comes from --depth)')
     .option('--steering <text>', 'Optional steering nudge')
+    .option('--background', 'Launch in the background and return immediately', false)
     .option('--defaults', 'Re-run with sensible defaults: most-recently-used seed, saved repo registry, seed-pinned frame, quick depth', false)
     .action(safe(async (options) => {
       // ── --defaults: fill in the blanks from the store ────────────────
@@ -1504,6 +1546,15 @@ export function buildCli() {
       let seedId = options.seed ? String(options.seed) : undefined;
       const depthExplicit = options.depth !== undefined;
       let depth: 'quick' | 'standard' | 'deep' = (options.depth as 'quick' | 'standard' | 'deep' | undefined) ?? 'standard';
+      const nodeTarget = validateNodeTarget(options.nodes);
+      const effort = options.effort ? String(options.effort).trim() : undefined;
+      const weight = options.weight ? String(options.weight).trim() : undefined;
+
+      if (effort && weight && effort !== weight) {
+        console.log('  Use either --effort or --weight for the same run, not both with different values.');
+        process.exitCode = 1;
+        return;
+      }
 
       if (options.defaults) {
         if (!seedId && (!seedArtifactIds || seedArtifactIds.length === 0)) {
@@ -1546,6 +1597,31 @@ export function buildCli() {
         return;
       }
       const repos = resolution.repos;
+      const explicitFrameId = validateOptionalFrameId(options.frame);
+      const seedFrameId = seedId ? readIdeasSeed(seedId)?.frameId : undefined;
+      const frameId = validateOptionalFrameId(resolveFrameIdForRun(explicitFrameId, seedFrameId))!;
+
+      const plan = {
+        seedArtifactIds,
+        seedId,
+        repos,
+        frameId,
+        depth,
+        engine: options.engine ? String(options.engine).trim() : undefined,
+        model: options.model ? String(options.model).trim() : undefined,
+        effort: effort || weight,
+        nodeTarget,
+        steering: options.steering ? String(options.steering) : undefined,
+      };
+
+      if (options.background) {
+        const job = startIdeasBackgroundJob(plan);
+        console.log(`  ✓ Background job started: ${job.id}`);
+        console.log(`  pid: ${job.pid}`);
+        console.log(`  log: ${job.logPath}`);
+        console.log(`\n  Inspect: ft possible job ${job.id}`);
+        return;
+      }
 
       console.log('  Runs on your local machine. Keep your laptop awake for longer debates.');
       if (repos.length > 1) {
@@ -1553,18 +1629,248 @@ export function buildCli() {
       }
 
       const summary = await runIdeas({
-        seedArtifactIds,
-        seedId,
-        repos,
-        frameId: options.frame ? String(options.frame) : undefined,
-        depth,
-        steering: options.steering ? String(options.steering) : undefined,
+        ...plan,
         onProgress: (message) => {
           process.stderr.write(`  ${message}\n`);
         },
       });
 
       printIdeasRunReport(summary);
+    }));
+
+  possible
+    .command('jobs')
+    .description('List background possibility jobs')
+    .action(safe(async () => {
+      console.log(formatIdeasJobList(listIdeasJobs()));
+    }));
+
+  possible
+    .command('job')
+    .description('Show one background possibility job')
+    .argument('<jobId>', 'Background job id')
+    .option('--json', 'Output JSON instead of text', false)
+    .option('--log', 'Include recent log output', false)
+    .option('--tail <n>', 'Number of log lines with --log', (v: string) => Number(v), 20)
+    .action(safe(async (jobId: string, options) => {
+      const job = readIdeasJob(String(jobId));
+      if (!job) {
+        console.log(`  Job not found: ${String(jobId)}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (options.json) {
+        console.log(JSON.stringify(job, null, 2));
+        return;
+      }
+      console.log(formatIdeasJob(job, { includeLog: Boolean(options.log), logLines: Number(options.tail) || 20 }));
+    }));
+
+  const nightly = possible
+    .command('nightly')
+    .description('Install and manage a nightly Possible run that starts background jobs');
+
+  nightly
+    .action(() => {
+      console.log(formatIdeasNightlyScheduleList(listIdeasNightlySchedules()));
+      console.log('');
+      console.log('Install one with: ft possible nightly install --time 02:00 --defaults');
+    });
+
+  nightly
+    .command('install')
+    .description('Save a nightly run shape and install a macOS LaunchAgent when available')
+    .option('--id <id>', 'Schedule id (default: default)')
+    .option('--time <HH:MM>', 'Local 24-hour time to run every night', '02:00')
+    .option('--seed-artifact <id...>', 'One or more seed artifact ids to start from')
+    .option('--seed <id>', 'Saved seed id to start from')
+    .option('--repo <path>', 'Single repo path to explore against')
+    .option('--repos <path...>', 'Multiple repo paths')
+    .option('--frame <id>', 'Frame id (defaults to seed-pinned frame or leverage-specificity)')
+    .option('--depth <depth>', 'Depth: quick | standard | deep', 'quick')
+    .option('--engine <name>', 'LLM CLI engine for this run (claude | codex)')
+    .option('--model <name>', 'Model alias/name passed to the engine')
+    .option('--effort <level>', 'Reasoning effort passed to the engine')
+    .option('--weight <level>', 'Alias for --effort', undefined)
+    .option('--nodes <n>', 'Number of nodes/debates to generate per repo')
+    .option('--steering <text>', 'Optional steering nudge')
+    .option('--defaults', 'Resolve the seed and saved repo registry each night', true)
+    .option('--no-defaults', 'Require explicit seed and repo choices instead of resolving them each night')
+    .option('--no-launchd', 'Only save the schedule; do not write a macOS LaunchAgent')
+    .option('--no-load', 'Write the LaunchAgent plist but do not load it with launchctl')
+    .action(safe(async (options) => {
+      const seedArtifactIds = Array.isArray(options.seedArtifact)
+        ? (options.seedArtifact as string[]).map(String)
+        : options.seedArtifact ? [String(options.seedArtifact)] : undefined;
+      const seedId = options.seed ? String(options.seed) : undefined;
+      const defaults = options.defaults !== false;
+      const depth = String(options.depth || 'quick') as 'quick' | 'standard' | 'deep';
+      if (!['quick', 'standard', 'deep'].includes(depth)) {
+        console.log('  Depth must be quick, standard, or deep.');
+        process.exitCode = 1;
+        return;
+      }
+      const effort = options.effort ? String(options.effort).trim() : undefined;
+      const weight = options.weight ? String(options.weight).trim() : undefined;
+      if (effort && weight && effort !== weight) {
+        console.log('  Use either --effort or --weight for the same schedule, not both with different values.');
+        process.exitCode = 1;
+        return;
+      }
+
+      const repoResolution = resolveRepoList({
+        singleRepo: options.repo ? String(options.repo) : undefined,
+        multiRepos: Array.isArray(options.repos) ? (options.repos as string[]).map(String) : undefined,
+        savedRepos: [],
+      });
+      if (repoResolution.kind === 'error' && repoResolution.reason === 'both-flags') {
+        console.log('  Use either --repo or --repos, not both.');
+        process.exitCode = 1;
+        return;
+      }
+
+      if (!defaults && !seedId && (!seedArtifactIds || seedArtifactIds.length === 0)) {
+        console.log('  --no-defaults requires --seed or --seed-artifact.');
+        process.exitCode = 1;
+        return;
+      }
+      if (!defaults && repoResolution.kind !== 'ok') {
+        console.log('  --no-defaults requires --repo or --repos.');
+        process.exitCode = 1;
+        return;
+      }
+
+      const plan: IdeasNightlyPlan = {
+        defaults,
+        seedArtifactIds,
+        seedId,
+        repos: repoResolution.kind === 'ok' ? repoResolution.repos : undefined,
+        frameId: validateOptionalFrameId(options.frame),
+        depth,
+        engine: options.engine ? String(options.engine).trim() : undefined,
+        model: options.model ? String(options.model).trim() : undefined,
+        effort: effort || weight,
+        nodeTarget: validateNodeTarget(options.nodes),
+        steering: options.steering ? String(options.steering) : undefined,
+      };
+
+      let schedule = createIdeasNightlySchedule({
+        id: options.id ? String(options.id) : undefined,
+        time: validateNightlyTime(options.time),
+        cwd: process.cwd(),
+        plan,
+      });
+
+      console.log(`  ✓ Saved nightly Possible schedule: ${schedule.id}`);
+      console.log(`  time: ${schedule.time} local`);
+      console.log(`  schedule: ${schedule.schedulePath}`);
+
+      if (options.launchd === false) {
+        console.log(`\n  Launch manually: ft possible nightly run-now ${schedule.id}`);
+        return;
+      }
+
+      if (process.platform !== 'darwin') {
+        console.log('\n  LaunchAgent install is macOS-only. The schedule was saved, but not installed.');
+        console.log(`  Launch manually: ft possible nightly run-now ${schedule.id}`);
+        return;
+      }
+
+      schedule = writeNightlyLaunchAgent({
+        schedule,
+        invocation: currentCliInvocation(),
+      });
+      console.log(`  launchd plist: ${schedule.launchAgent?.plistPath}`);
+
+      if (options.load === false) {
+        console.log(`\n  Load later: launchctl bootstrap gui/$(id -u) ${schedule.launchAgent?.plistPath}`);
+        return;
+      }
+
+      const loaded = loadNightlyLaunchAgent(schedule);
+      if (!loaded.result.ok) {
+        console.log('\n  LaunchAgent plist was written, but launchctl did not load it.');
+        console.log(`  ${loaded.result.command.join(' ')}`);
+        if (loaded.result.stderr.trim()) console.log(`  ${loaded.result.stderr.trim()}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      console.log('  launchd loaded');
+      console.log(`\n  Check later: ft possible nightly show ${loaded.schedule.id}`);
+    }));
+
+  nightly
+    .command('list')
+    .description('List nightly Possible schedules')
+    .action(() => {
+      console.log(formatIdeasNightlyScheduleList(listIdeasNightlySchedules()));
+    });
+
+  nightly
+    .command('show')
+    .description('Show a nightly Possible schedule')
+    .argument('[id]', 'Schedule id', 'default')
+    .action(safe(async (id: string) => {
+      const schedule = readIdeasNightlySchedule(String(id));
+      if (!schedule) {
+        console.log(`  Nightly schedule not found: ${String(id)}`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(formatIdeasNightlySchedule(schedule));
+    }));
+
+  nightly
+    .command('run-now')
+    .description('Start the configured nightly run immediately as a background job')
+    .argument('[id]', 'Schedule id', 'default')
+    .action(safe(async (id: string) => {
+      const job = runIdeasNightlyTick(String(id));
+      console.log(`  ✓ Nightly Possible job started: ${job.id}`);
+      console.log(`  Inspect: ft possible job ${job.id} --log`);
+    }));
+
+  nightly
+    .command('uninstall')
+    .description('Unload and delete a nightly Possible schedule')
+    .argument('[id]', 'Schedule id', 'default')
+    .option('--keep-schedule', 'Unload launchd but keep the saved schedule file', false)
+    .action(safe(async (id: string, options) => {
+      const schedule = readIdeasNightlySchedule(String(id));
+      if (!schedule) {
+        console.log(`  Nightly schedule not found: ${String(id)}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      if (process.platform === 'darwin' && schedule.launchAgent) {
+        unloadNightlyLaunchAgent(schedule);
+        fs.rmSync(schedule.launchAgent.plistPath, { force: true });
+        console.log(`  Removed LaunchAgent: ${schedule.launchAgent.plistPath}`);
+      }
+      if (!options.keepSchedule) {
+        deleteIdeasNightlySchedule(schedule.id);
+        console.log(`  Deleted nightly schedule: ${schedule.id}`);
+      }
+    }));
+
+  nightly
+    .command('_tick', { hidden: true })
+    .description('Internal launchd entrypoint for nightly Possible schedules')
+    .argument('<id>', 'Schedule id')
+    .action(safe(async (id: string) => {
+      const job = runIdeasNightlyTick(String(id));
+      console.log(`Started nightly Possible job: ${job.id}`);
+    }));
+
+  possible
+    .command('_run-job', { hidden: true })
+    .description('Internal worker for background possibility jobs')
+    .argument('<jobId>', 'Background job id')
+    .action(safe(async (jobId: string) => {
+      const job = await runIdeasJobWorker(String(jobId));
+      if (job.status === 'failed') process.exitCode = 1;
     }));
 
   possible
@@ -2294,6 +2600,9 @@ export function buildCli() {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const program = buildCli();
-  program.hook('postAction', async () => { await checkForUpdate(); });
+  program.hook('postAction', async (_thisCommand, actionCommand) => {
+    if (isInternalWorkerCommand(actionCommand)) return;
+    await checkForUpdate();
+  });
   await program.parseAsync(process.argv);
 }

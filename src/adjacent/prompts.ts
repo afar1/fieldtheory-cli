@@ -39,6 +39,9 @@ export interface DepthBudget {
   timeoutMs: number;
 }
 
+export const MIN_NODE_TARGET = 1;
+export const MAX_NODE_TARGET = 30;
+
 export const DEPTH_BUDGETS: Record<Depth, DepthBudget> = {
   // Per-call timeouts are a floor, not a target — real Claude/Codex calls
   // vary 10–90s even on small prompts, so the old 60s `quick` budget timed
@@ -49,6 +52,25 @@ export const DEPTH_BUDGETS: Record<Depth, DepthBudget> = {
   standard: { candidateTarget: 10, surveyFileLimit: 80,  critiqueMinSurvivors: 6, timeoutMs: 180_000 },
   deep:     { candidateTarget: 14, surveyFileLimit: 200, critiqueMinSurvivors: 8, timeoutMs: 300_000 },
 };
+
+export function validateNodeTarget(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const n = typeof value === 'number' ? value : Number(String(value).trim());
+  if (!Number.isInteger(n) || n < MIN_NODE_TARGET || n > MAX_NODE_TARGET) {
+    throw new Error(`Node target must be an integer from ${MIN_NODE_TARGET} to ${MAX_NODE_TARGET}.`);
+  }
+  return n;
+}
+
+export function applyNodeTargetToBudget(base: DepthBudget, nodeTarget: number | undefined): DepthBudget {
+  const target = validateNodeTarget(nodeTarget);
+  if (target === undefined) return base;
+  return {
+    ...base,
+    candidateTarget: target,
+    critiqueMinSurvivors: target,
+  };
+}
 
 // ── Stage 1: Read — seed_brief ────────────────────────────────────────────────
 
@@ -118,6 +140,7 @@ export interface SurveyInput {
   seedBrief: SeedBriefParsed;
   repoTree: string;
   recentFiles: string[];
+  fileExcerpts?: Array<{ path: string; text: string }>;
   budget: DepthBudget;
 }
 
@@ -136,6 +159,10 @@ export function buildSurveyPrompt(input: SurveyInput): string {
 
   const treeSection = sanitizeUserContent(input.repoTree, 3000);
   const recentSection = input.recentFiles.slice(0, 20).join('\n');
+  const excerptSection = (input.fileExcerpts ?? [])
+    .slice(0, 8)
+    .map((excerpt) => `### ${excerpt.path}\n${sanitizeUserContent(excerpt.text, 900)}`)
+    .join('\n\n');
 
   return `${UNTRUSTED_NOTE}
 
@@ -154,6 +181,9 @@ ${treeSection}
 
 Recently modified:
 ${recentSection}
+
+Selected file excerpts:
+${excerptSection || '(none)'}
 </repo_surface>
 
 Identify 5-8 specific surfaces in this repo where the seed idea could create interesting or valuable work. A "surface" is a file, module, subsystem, or architectural layer — something concrete, not vague.
@@ -226,16 +256,20 @@ Generate exactly ${input.budget.candidateTarget} candidate moves. Each should be
 - Concrete (names a specific file, module, feature, or experiment)
 - Adjacent (builds on the seed insight, not unrelated)
 - Framed (shaped by the ${input.frame.name} frame — ${input.frame.axisA.label} × ${input.frame.axisB.label})
+- Grounded in the repo surfaces above. If an idea feels generic, improve the code reading and anchor it to a concrete surface instead of inventing strategy language.
+- Named with a memorable descriptive title, not a timestamp, ticket number, or hyper-specific file-operation title.
 
 Output a JSON array — no markdown fencing:
 
 [
   {
-    "title": "short action title (5-10 words)",
-    "summary": "what this is in 2 sentences",
+    "title": "memorable descriptive title with spaces (4-9 words)",
+    "summary": "what improves in 2 concrete sentences",
+    "essay": "4-7 short paragraphs explaining the problem, the improvement, why it matters, what the code suggests, and what good looks like",
     "rationale": "why this is adjacent to the seed in 1 sentence",
     "repoSurface": "which file or module this touches",
-    "effortEstimate": "hours | days | weeks | unknown"
+    "effortEstimate": "hours | days | weeks | unknown",
+    "implementationPrompt": "a self-contained goal prompt another coding agent could follow to pull this off, with the objective, repo context to read, implementation shape, and verification"
   }
 ]`;
 }
@@ -252,9 +286,11 @@ export interface CritiqueInput {
 export interface CandidateRaw {
   title: string;
   summary: string;
+  essay?: string;
   rationale: string;
   repoSurface: string;
   effortEstimate: string;
+  implementationPrompt?: string;
 }
 
 export function buildCritiquePrompt(input: CritiqueInput): string {
@@ -277,6 +313,7 @@ Sharpen: good core idea but the current framing is weak — rewrite the title/su
 Drop: the objection is fatal or the idea is too vague.
 
 Aim to keep or sharpen at least ${input.budget.critiqueMinSurvivors} candidates.
+Dropping is a last resort. If the weakness is "too vague", sharpen by anchoring it to the code surface; vague ideas usually mean the repo was not read closely enough.
 
 Candidates:
 ${candidateList}
@@ -417,12 +454,22 @@ export interface ExportablePromptInput {
   axisBScore: number;
   axisAJustification: string;
   axisBJustification: string;
+  essay?: string;
+  implementationPrompt?: string;
 }
 
 export function buildExportablePrompt(input: ExportablePromptInput): string {
+  const essay = input.essay?.trim() || `${input.summary}\n\nThis surfaced because ${input.rationale}`;
+  const implementationPrompt = input.implementationPrompt?.trim() || `You are improving "${input.title}" in the relevant repo surface: ${input.repoSurface}.
+
+Start by reading the named files/modules. Explain the current behavior, identify the smallest change that would prove the idea, implement it, and add focused verification. Keep the work scoped to the surface unless the code points you to a shared abstraction.`;
+  const goal = `Improve ${input.repoSurface} by delivering "${input.title}".
+
+The work is done when the repo behavior reflects this idea, the important edge cases are covered, and the verification steps give a future maintainer confidence that the change really works.`;
+
   return `---
 name: ideas/${input.title.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')}
-type: ideas-node
+type: ideas-goal
 frame: ${input.frame.id}
 axis_a: ${input.frame.axisA.label} = ${input.axisAScore}
 axis_b: ${input.frame.axisB.label} = ${input.axisBScore}
@@ -438,6 +485,14 @@ axis_b: ${input.frame.axisB.label} = ${input.axisBScore}
 
 ${input.summary}
 
+## Goal
+
+${goal}
+
+## Essay
+
+${essay}
+
 ## Why it surfaced
 
 ${input.rationale}
@@ -447,17 +502,17 @@ ${input.rationale}
 - ${input.frame.axisA.label}: ${input.axisAScore}/100 — ${input.axisAJustification}
 - ${input.frame.axisB.label}: ${input.axisBScore}/100 — ${input.axisBJustification}
 
-## To explore this
+## Implementation prompt
 
-You are exploring the idea: "${input.title}"
+${implementationPrompt}
 
-Context: This idea emerged from exploring "${input.seedBrief.domain}" through the lens of ${input.frame.name}.
+## Context for the agent
 
-The insight: ${input.seedBrief.keyClaim}
+This idea emerged from exploring "${input.seedBrief.domain}" through the lens of ${input.frame.name}.
 
-What this suggests: ${input.summary}
+Seed insight: ${input.seedBrief.keyClaim}
 
-Start by reading \`${input.repoSurface}\` and understanding how it currently works. Then consider: ${input.rationale}
+Start by reading \`${input.repoSurface}\` and understanding how it currently works before changing behavior.
 `;
 }
 

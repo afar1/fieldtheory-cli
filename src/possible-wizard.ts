@@ -1,7 +1,7 @@
 /**
  * Interactive wizard for `ft possible` — the human-facing entry point to the
  * ideas pipeline. Walks the user through: seed → repos → frame → depth →
- * confirm → launch. Each step is a small function that takes an injectable
+ * node count → model profile → confirm → launch. Each step is a small function that takes an injectable
  * Prompter, so the orchestration is testable without touching real stdin.
  *
  * The wizard produces a WizardPlan, which the caller turns into a runIdeas
@@ -11,6 +11,7 @@
 
 import type { IdeasSeed } from './ideas-seeds.js';
 import type { Frame } from './adjacent/types.js';
+import { DEPTH_BUDGETS, MAX_NODE_TARGET, MIN_NODE_TARGET, validateNodeTarget } from './adjacent/prompts.js';
 
 /**
  * Minimal interface the wizard needs from a prompter. The prod implementation
@@ -30,6 +31,10 @@ export interface WizardPlan {
   repos: string[];
   frameId: string;
   depth: 'quick' | 'standard' | 'deep';
+  engine?: string;
+  model?: string;
+  effort?: string;
+  nodeTarget?: number;
 }
 
 /** Result shape for the overall wizard flow. */
@@ -268,7 +273,81 @@ export async function stepPickDepth(
   return { kind: 'picked', depth: DEPTH_OPTIONS[pick]!.key };
 }
 
-// ── Step 5: confirm ────────────────────────────────────────────────────────
+// ── Step 5: pick node count ───────────────────────────────────────────────
+
+export async function stepPickNodeTarget(
+  prompter: Prompter,
+  depth: 'quick' | 'standard' | 'deep',
+): Promise<
+  | { kind: 'picked'; nodeTarget: number | undefined }
+  | { kind: 'cancelled'; reason: string }
+> {
+  const depthDefault = DEPTH_BUDGETS[depth].candidateTarget;
+  prompter.write('');
+  prompter.write(`Node count per repo controls how many debates get generated. ${depth} defaults to ${depthDefault}.`);
+  const answer = await prompter.ask(`Node count [${MIN_NODE_TARGET}-${MAX_NODE_TARGET}] (or press enter for ${depthDefault}, \`q\` to quit): `);
+  if (answer === 'q' || answer === 'Q') {
+    return { kind: 'cancelled', reason: 'quit-at-node-count' };
+  }
+  if (answer === '') {
+    return { kind: 'picked', nodeTarget: undefined };
+  }
+  try {
+    return { kind: 'picked', nodeTarget: validateNodeTarget(answer) };
+  } catch {
+    return { kind: 'cancelled', reason: 'invalid-node-count' };
+  }
+}
+
+// ── Step 6: pick model profile ─────────────────────────────────────────────
+
+const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+const ENGINE_NAMES = new Set(['claude', 'codex']);
+
+export function parseModelProfileAnswer(answer: string): Pick<WizardPlan, 'engine' | 'model' | 'effort'> | null {
+  const parts = answer.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return {};
+  if (parts.length === 1 && EFFORT_LEVELS.has(parts[0]!.toLowerCase())) {
+    return { effort: parts[0]!.toLowerCase() };
+  }
+  if (parts.length === 2) {
+    const second = parts[1]!.toLowerCase();
+    if (EFFORT_LEVELS.has(second)) {
+      return ENGINE_NAMES.has(parts[0]!.toLowerCase())
+        ? { engine: parts[0], effort: second }
+        : { model: parts[0], effort: second };
+    }
+    return { engine: parts[0], model: parts[1] };
+  }
+  if (parts.length === 3) {
+    const effort = parts[2]!.toLowerCase();
+    return EFFORT_LEVELS.has(effort)
+      ? { engine: parts[0], model: parts[1], effort }
+      : null;
+  }
+  return null;
+}
+
+export async function stepPickModelProfile(
+  prompter: Prompter,
+): Promise<
+  | { kind: 'picked'; profile: Pick<WizardPlan, 'engine' | 'model' | 'effort'> }
+  | { kind: 'cancelled'; reason: string }
+> {
+  prompter.write('');
+  prompter.write('Model profile controls which LLM runs the grid and how much reasoning effort it spends.');
+  const answer = await prompter.ask('Model profile (enter for default, or e.g. `claude opus medium`, `codex gpt-5.5 medium`, `medium`): ');
+  if (answer === 'q' || answer === 'Q') {
+    return { kind: 'cancelled', reason: 'quit-at-model-profile' };
+  }
+  const profile = parseModelProfileAnswer(answer);
+  if (profile === null) {
+    return { kind: 'cancelled', reason: 'invalid-model-profile' };
+  }
+  return { kind: 'picked', profile };
+}
+
+// ── Step 7: confirm ────────────────────────────────────────────────────────
 
 export async function stepConfirm(
   prompter: Prompter,
@@ -283,10 +362,21 @@ export async function stepConfirm(
   for (const repo of plan.repos) prompter.write(`    - ${repo}`);
   prompter.write(`  frame: ${plan.frameId}  (${frameName})`);
   prompter.write(`  depth: ${plan.depth}`);
+  prompter.write(`  model: ${formatModelProfile(plan)}`);
+  prompter.write(`  nodes: ${plan.nodeTarget ?? `depth default (${DEPTH_BUDGETS[plan.depth].candidateTarget})`} per repo`);
   prompter.write('');
   const answer = await prompter.ask('Launch? [Y/n]: ');
   if (answer === '' || answer.toLowerCase() === 'y') return 'go';
   return 'cancel';
+}
+
+function formatModelProfile(plan: Pick<WizardPlan, 'engine' | 'model' | 'effort'>): string {
+  const parts = [
+    plan.engine ?? 'default engine',
+    ...(plan.model ? [plan.model] : []),
+    ...(plan.effort ? [`effort=${plan.effort}`] : []),
+  ];
+  return parts.join(' / ');
 }
 
 // ── Orchestration ──────────────────────────────────────────────────────────
@@ -328,11 +418,25 @@ export async function runPossibleWizard(
     return { kind: 'cancelled', reason: depthResult.reason };
   }
 
+  const nodeResult = await stepPickNodeTarget(prompter, depthResult.depth);
+  if (nodeResult.kind === 'cancelled') {
+    return { kind: 'cancelled', reason: nodeResult.reason };
+  }
+
+  const modelResult = await stepPickModelProfile(prompter);
+  if (modelResult.kind === 'cancelled') {
+    return { kind: 'cancelled', reason: modelResult.reason };
+  }
+
   const plan: WizardPlan = {
     seedId: seed.id,
     repos: reposResult.repos,
     frameId: frameResult.frameId,
     depth: depthResult.depth,
+    engine: modelResult.profile.engine,
+    model: modelResult.profile.model,
+    effort: modelResult.profile.effort,
+    nodeTarget: nodeResult.nodeTarget,
   };
 
   const frames = deps.listFrames();

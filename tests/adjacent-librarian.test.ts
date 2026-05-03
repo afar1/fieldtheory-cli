@@ -291,6 +291,20 @@ test('resultCache: write and read', async () => {
   });
 });
 
+test('resultCache: separates model profiles', async () => {
+  await withAdjacentStore(async () => {
+    const lib = await getLibrarian();
+    lib.writeResultCache('seed-1', 'novelty-feasibility', undefined, 'abc123git', { source: 'claude' }, 'claude/opus/effort=medium');
+    lib.writeResultCache('seed-1', 'novelty-feasibility', undefined, 'abc123git', { source: 'codex' }, 'codex/gpt-5.5/effort=medium');
+
+    const claude = lib.readResultCache('seed-1', 'novelty-feasibility', undefined, 'abc123git', 'claude/opus/effort=medium');
+    const codex = lib.readResultCache('seed-1', 'novelty-feasibility', undefined, 'abc123git', 'codex/gpt-5.5/effort=medium');
+
+    assert.equal((claude as any).source, 'claude');
+    assert.equal((codex as any).source, 'codex');
+  });
+});
+
 test('hashSteering: undefined produces stable zero hash', async () => {
   const lib = await getLibrarian();
   assert.equal(lib.hashSteering(undefined), '0');

@@ -8,7 +8,7 @@ description: Explain and drive the Field Theory CLI — bookmark-sourced seeds, 
 The Field Theory CLI (`ft`) is a self-custody bookmark tool that does two related things:
 
 1. **Local X/Twitter bookmark archive** — sync, full-text search, classify, visualize.
-2. **Possibility runs** (`ft possible`) — take a group of bookmarks, apply them to a set of repos, and score candidate directions onto a 2x2 grid. Each scored idea is a "node" (also called a "dot") with a paragraph summary, a copiable prompt, and per-axis justifications. Seeds, runs, nodes, and batches are all saved as interconnected markdown files.
+2. **Possibility runs** (`ft possible`) — take a group of bookmarks, apply them to a set of repos, and score candidate directions onto a 2x2 grid. Each scored idea is a "node" (also called a "dot") with a paragraph summary, a copiable goal prompt, and per-axis justifications. Seeds, runs, nodes, and batches are all saved as interconnected markdown files.
 
 > The feature was previously named `ft ideas` and the old name still works as an alias. `ft possible` is the primary vocabulary — use it in new walkthroughs, scripts, and explanations.
 
@@ -28,7 +28,7 @@ Those three things together shape a **run**. A run invokes an LLM pipeline that 
 - rationale ("why adjacent")
 - axis A score + justification, axis B score + justification
 - effort estimate (hours / days / weeks)
-- a **copiable prompt** that can be pasted into any AI coding agent to actually build the thing
+- a **copiable goal prompt** that can be pasted into any AI coding agent to actually build the thing
 
 When a run spans multiple repos, the seed brief is computed **once** and reused across every repo (via the seed-brief cache), then each repo gets its own `survey → generate → critique → score` pass and its own consideration. A top-level `batch_summary` artifact + markdown file links them all together.
 
@@ -40,6 +40,8 @@ Seeds, runs, nodes, and batches are all written as `.md` files under:
 ├── runs/<YYYY-MM-DD>/*.md
 ├── nodes/<YYYY-MM-DD>/*.md
 ├── batches/<YYYY-MM-DD>/*.md
+├── jobs/<YYYY-MM-DD>/*.json
+├── nightly/*.json
 ├── seeds.json        # seed store
 ├── repos.json        # saved default repo set
 ├── frames.json       # user-defined frames (built-ins are in-code)
@@ -77,7 +79,8 @@ Bare `ft possible` (no subcommand) walks a TTY user through the whole flow:
 2. **Pick repos** — if a saved registry exists, offer to use it with one key (`Enter` or `y`); otherwise let them type space-separated paths. Any non-`Y/n` answer is treated as paths directly.
 3. **Pick a frame** — numbered list of every frame (built-in + user). If the picked seed has `frameId` pinned, it's marked `(seed default)` and `Enter` accepts it.
 4. **Pick a depth** — `quick ~3-5 min / ~3-5 ideas per repo`, `standard ~8-12 min / ~6-8`, `deep ~20+ min / ~10+`. `Enter` defaults to quick.
-5. **Confirm and launch** — prints the full plan (seed + title, repos, frame, depth) and asks `Y/n`.
+5. **Pick a node count** — optional explicit number of nodes/debates per repo. `Enter` uses the depth default.
+6. **Confirm and launch** — prints the full plan (seed + title, repos, frame, depth, nodes) and asks `Y/n`.
 
 Pressing `q` at any prompt quits without launching. When stdin is not a TTY (pipes, CI, test harness), `ft possible` prints the intro instead of starting the wizard.
 
@@ -89,8 +92,28 @@ For the "I already did this once, do it again" case. `--defaults` fills in:
 - **Repos:** whatever's in the saved registry (`ft repos` manages it). Explicit `--repo`/`--repos` still wins.
 - **Frame:** the seed's pinned frame (via the existing precedence chain).
 - **Depth:** quick, unless the user passed `--depth` explicitly.
+- **Nodes:** the selected depth's default, unless the user passed `--nodes` explicitly.
 
 If no seeds exist, `--defaults` prints a hint pointing at `ft seeds search "..." --create` and exits without touching anything.
+
+### Natural-language roadmap requests
+
+When the user says something like "your goal is to look at XYZ type of bookmarks and debate / come up with a roadmap plotted in the grid of what I should do next across these projects", translate that into:
+
+1. `XYZ type of bookmarks` → a bookmark-backed seed query/filter.
+2. `these projects` → explicit repo paths, or the saved repo registry if the user already configured one.
+3. `roadmap plotted in the grid` → `ft possible run` with an execution-oriented frame such as `impact-effort`, or `leverage-specificity` when the user wants product leverage.
+4. `debate` → the current generate → critique → score pipeline. If the user explicitly asks for two models debating each other, say that is still a known gap.
+
+Concrete command shape:
+
+```bash
+ft seeds search "<bookmark topic>" --days 180 --limit 8 --frame impact-effort --create
+ft possible run --seed <seed-id> --repos ~/dev/project-a ~/dev/project-b --frame impact-effort --nodes 7 --model opus --effort medium
+ft possible grid latest
+ft possible dots latest
+ft possible prompt <node-id>
+```
 
 ## Driving a run end-to-end (explicit flags)
 
@@ -104,7 +127,12 @@ ft seeds search "agents" --days 90 --limit 8
 ft seeds search "agents" --days 90 --limit 8 --frame leverage-specificity --create
 
 # 3. Run ideas: apply the bookmark group to this repo
-ft possible run --seed <seed-id> --repo . --depth quick
+ft possible run --seed <seed-id> --repo . --depth quick --nodes 7
+
+# Optional: launch it in the background and come back later
+ft possible run --seed <seed-id> --repo . --depth quick --nodes 7 --background
+ft possible jobs
+ft possible job <job-id> --log
 
 # 4. View the grid and the full scored node list
 ft possible grid latest
@@ -132,6 +160,33 @@ ft possible grid <run-id>                 # one grid per repo
 ```
 
 A batched run prints a batch id, lists the top ideas across all repos (tagged by repo), and writes a `batch_summary` markdown file at `~/.fieldtheory/ideas/batches/<YYYY-MM-DD>/<batch-id>.md` that links every per-repo consideration and includes a re-run command.
+
+### Background jobs
+
+Use `--background` when a possibility run should continue after the terminal command returns:
+
+```bash
+ft possible run --seed <seed-id> --repos ~/dev/repo-a ~/dev/repo-b --background
+ft possible jobs
+ft possible job <job-id> --log
+```
+
+Background jobs write a resolved job plan and append-only log under `~/.fieldtheory/ideas/jobs/<YYYY-MM-DD>/`. `ft possible job <job-id>` shows status, pid, resolved repos/frame/depth/nodes, produced run ids, batch id, dot count, and the log path.
+
+### Nightly Possible schedules
+
+Use `ft possible nightly install` when the user wants to leave the Mac awake and have the same possibility run start every night through their normal logged-in shell/tooling:
+
+```bash
+ft repos add ~/dev/fieldtheory
+ft repos add ~/dev/fieldtheory-cli
+
+ft possible nightly install --time 02:00 --defaults --model opus --effort medium --nodes 5
+ft possible nightly show
+ft possible nightly run-now
+```
+
+Schedules are saved under `~/.fieldtheory/ideas/nightly/`. On macOS, install writes a LaunchAgent plist under `~/Library/LaunchAgents/` and loads it with `launchctl`; use `--no-launchd` to save only the schedule, or `--no-load` to write the plist without loading it. The nightly tick resolves defaults at runtime: most-recently-used saved seed, saved repo registry, seed-pinned/default frame, and then starts a normal background job. The LaunchAgent captures the current `PATH` so local `claude`/`codex` binaries can be found, but it does not write API keys or secrets into the plist.
 
 ### `ft repos` — manage the default repo set
 
@@ -204,9 +259,9 @@ A reader planning work on `ft` should know what does *not* yet exist:
 
 - **Two-model debate** — the pipeline uses one resolved engine (claude OR codex, picked once). The `critique` stage is single-model self-critique, not a back-and-forth between two models.
 - **N-turn back-and-forth loop** — the pipeline is a linear 5-stage single pass (`read → survey → generate → critique → score`). `--depth` changes budgets, not turn count.
-- **Background / overnight scheduling** — no scheduler, no cron/launchd, no `ft schedule`. Runs are foreground. Shell-backgrounding works but there's no built-in overnight orchestration.
+- **Two-model nightly debates** — nightly schedules start the existing single-engine pipeline in a background job. They do not yet coordinate Claude-vs-Codex debate turns.
 - **Nightly email per grid** — no email code in the CLI. The Mac app has `nodemailer` + `agentmail` in its dependencies but isn't wired to ideas-run summaries yet.
-- **Mac app 2x2 grid view** — `LibrarianView` and `ConceptGraphView` render a markdown reader and a force-directed concept graph for a *different* "librarian" system (reading artifacts). There is no mac-app view that reads `~/.fieldtheory/ideas/` and renders the 2x2 grid.
+- **Mac app live orchestration** — the CLI writes app-readable artifacts under `~/.fieldtheory/ideas/`, but app rendering is owned by the Field Theory Mac app repo. Verify that surface there rather than describing it from this CLI package.
 
 Do not describe these as working. If a user asks for any of them, explain that it is planned but unbuilt, or point them at the closest existing primitive.
 

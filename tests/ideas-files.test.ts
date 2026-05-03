@@ -43,6 +43,8 @@ test('renderIdeasNodeMd includes prompt and source context', async () => {
   });
 
   assert.ok(markdown.includes('# Tighten repo prompt loop'));
+  assert.ok(markdown.includes('## Goal'));
+  assert.ok(markdown.includes('Improve src/ideas.ts by delivering "Tighten repo prompt loop".'));
   assert.ok(markdown.includes('## Prompt'));
   assert.ok(markdown.includes('Read src/ideas.ts and implement a prompt panel.'));
   assert.ok(markdown.includes('Run: run-1'));
@@ -58,6 +60,10 @@ test('renderIdeasBatchMd: includes per-repo runs, top dots, and a re-run command
     frameId: 'leverage-specificity',
     frameName: 'Leverage × Specificity',
     depth: 'quick',
+    model: 'claude/opus/effort=medium',
+    engine: 'claude',
+    engineModel: 'opus',
+    engineEffort: 'medium',
     steering: 'focus on auth',
     repoRuns: [
       { repo: '/tmp/repo-a', runId: 'adj-1' },
@@ -90,6 +96,7 @@ test('renderIdeasBatchMd: includes per-repo runs, top dots, and a re-run command
   assert.ok(md.includes('seed_id: seed-xyz'));
   assert.ok(md.includes('frame_id: leverage-specificity'));
   assert.ok(md.includes('depth: quick'));
+  assert.ok(md.includes('model: "claude/opus/effort=medium"'));
   assert.ok(md.includes('total_dot_count: 6'));
   assert.ok(md.includes('/tmp/repo-a → adj-1'));
   assert.ok(md.includes('/tmp/repo-b → adj-2'));
@@ -98,6 +105,7 @@ test('renderIdeasBatchMd: includes per-repo runs, top dots, and a re-run command
   assert.ok(md.includes('Move token validation into a shared middleware.'));
   assert.ok(md.includes('--repos "/tmp/repo-a" "/tmp/repo-b"'));
   assert.ok(md.includes('--frame leverage-specificity'));
+  assert.ok(md.includes('--engine "claude" --model "opus" --effort "medium"'));
 });
 
 test('renderIdeasBatchMd: omits the top-dots section when no dots produced', async () => {
@@ -109,6 +117,7 @@ test('renderIdeasBatchMd: omits the top-dots section when no dots produced', asy
     frameId: 'impact-effort',
     frameName: 'Impact × Effort',
     depth: 'standard',
+    model: 'claude',
     repoRuns: [
       { repo: '/tmp/x', runId: 'adj-1' },
       { repo: '/tmp/y', runId: 'adj-2' },
@@ -133,6 +142,7 @@ test('renderIdeasBatchMd: parallel YAML arrays stay in lockstep with repoRuns or
     frameId: 'impact-effort',
     frameName: 'Impact × Effort',
     depth: 'standard',
+    model: 'claude',
     repoRuns: [
       { repo: '/tmp/zeta',  runId: 'adj-zeta' },
       { repo: '/tmp/alpha', runId: 'adj-alpha' },

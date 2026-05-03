@@ -42,6 +42,8 @@ export interface Artifact {
 export interface Dot {
   title: string;
   summary: string;
+  /** Short essay explaining what should improve and why it matters. */
+  essay?: string;
   /** Why this candidate is adjacent to the seed */
   rationale: string;
   /** Which files/areas of the repo this touches */
@@ -54,6 +56,8 @@ export interface Dot {
   axisBJustification: string;
   /** Self-contained markdown block, FT portable command shape */
   exportablePrompt: string;
+  /** Self-contained implementation prompt for another agent or future run. */
+  implementationPrompt?: string;
 }
 
 // ── Frame ─────────────────────────────────────────────────────────────────────
@@ -114,6 +118,13 @@ export interface Consideration {
   /** Absolute path to the repo being explored */
   repo: string;
   depth: ConsiderationDepth;
+  /** LLM profile used for this run, including model/effort when explicitly set. */
+  model?: string;
+  engine?: string;
+  engineModel?: string;
+  engineEffort?: string;
+  /** Optional explicit number of nodes/debates requested for this run. */
+  nodeTarget?: number;
   createdAt: string;
   userInteractions: UserInteraction[];
   /** Which pipeline stages have completed */

@@ -276,8 +276,8 @@ function seedBriefCachePath(artifactIds: string[], model: string): string {
   return path.join(adjacentCacheDir(), 'seed-briefs', `${key}.json`);
 }
 
-function resultCachePath(seedId: string, frameId: string, steeringHash: string, gitHead: string): string {
-  const key = `${seedId}-${frameId}-${steeringHash}-${gitHead}`.replace(/[^a-z0-9-]/gi, '-');
+function resultCachePath(seedId: string, frameId: string, steeringHash: string, gitHead: string, model = 'default'): string {
+  const key = `${seedId}-${frameId}-${model}-${steeringHash}-${gitHead}`.replace(/[^a-z0-9-]/gi, '-');
   return path.join(adjacentCacheDir(), 'results', `${key}.json`);
 }
 
@@ -296,12 +296,12 @@ export function hashSteering(steering: string | undefined): string {
   return crypto.createHash('sha256').update(steering).digest('hex').slice(0, 8);
 }
 
-export function readResultCache(seedId: string, frameId: string, steering: string | undefined, gitHead: string): unknown | null {
-  try { return JSON.parse(fs.readFileSync(resultCachePath(seedId, frameId, hashSteering(steering), gitHead), 'utf-8')); } catch { return null; }
+export function readResultCache(seedId: string, frameId: string, steering: string | undefined, gitHead: string, model?: string): unknown | null {
+  try { return JSON.parse(fs.readFileSync(resultCachePath(seedId, frameId, hashSteering(steering), gitHead, model), 'utf-8')); } catch { return null; }
 }
 
-export function writeResultCache(seedId: string, frameId: string, steering: string | undefined, gitHead: string, data: unknown): void {
-  const p = resultCachePath(seedId, frameId, hashSteering(steering), gitHead);
+export function writeResultCache(seedId: string, frameId: string, steering: string | undefined, gitHead: string, data: unknown, model?: string): void {
+  const p = resultCachePath(seedId, frameId, hashSteering(steering), gitHead, model);
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf-8');
 }

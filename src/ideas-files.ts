@@ -13,6 +13,18 @@ function escapeYaml(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, ' ');
 }
 
+function renderRunProfileFlags(profile: {
+  engine?: string;
+  engineModel?: string;
+  engineEffort?: string;
+}): string {
+  return [
+    ...(profile.engine ? [` --engine "${escapeYaml(profile.engine)}"`] : []),
+    ...(profile.engineModel ? [` --model "${escapeYaml(profile.engineModel)}"`] : []),
+    ...(profile.engineEffort ? [` --effort "${escapeYaml(profile.engineEffort)}"`] : []),
+  ].join('');
+}
+
 export function ideasSeedMdPath(seed: IdeasSeed): string {
   return path.join(ideasSeedsDir(dayStamp(seed.createdAt)), `${seed.id}.md`);
 }
@@ -92,6 +104,11 @@ export function renderIdeasRunMd(run: Consideration): string {
     `frame_id: ${run.frame.id}`,
     `frame_name: "${escapeYaml(run.frame.name)}"`,
     `depth: ${run.depth}`,
+    ...(run.model ? [`model: "${escapeYaml(run.model)}"`] : []),
+    ...(run.engine ? [`engine: "${escapeYaml(run.engine)}"`] : []),
+    ...(run.engineModel ? [`engine_model: "${escapeYaml(run.engineModel)}"`] : []),
+    ...(run.engineEffort ? [`engine_effort: "${escapeYaml(run.engineEffort)}"`] : []),
+    ...(run.nodeTarget ? [`node_target: ${run.nodeTarget}`] : []),
     `input_ids: [${run.inputIds.map((id) => `"${escapeYaml(id)}"`).join(', ')}]`,
     `output_ids: [${run.outputIds.map((id) => `"${escapeYaml(id)}"`).join(', ')}]`,
     `completed_stages: [${run.completedStages.map((stage) => `"${escapeYaml(stage)}"`).join(', ')}]`,
@@ -106,6 +123,8 @@ export function renderIdeasRunMd(run: Consideration): string {
     `- Repo: ${run.repo}`,
     `- Frame: ${run.frame.name} (${run.frame.id})`,
     `- Depth: ${run.depth}`,
+    ...(run.model ? [`- Model: ${run.model}`] : []),
+    ...(run.nodeTarget ? [`- Nodes requested: ${run.nodeTarget}`] : []),
     `- Created: ${run.createdAt}`,
     `- Completed stages: ${run.completedStages.join(', ')}`,
     `- Scored ideas: ${dots.length}`,
@@ -118,7 +137,7 @@ export function renderIdeasRunMd(run: Consideration): string {
     '',
     'Re-run this exploration shape later with:',
     '',
-    `\`ft ideas run --seed <seed-id> --repo "${run.repo}" --frame ${run.frame.id} --depth ${run.depth}${run.steering ? ` --steering "${escapeYaml(run.steering)}"` : ''}\``,
+    `\`ft ideas run --seed <seed-id> --repo "${run.repo}" --frame ${run.frame.id} --depth ${run.depth}${renderRunProfileFlags(run)}${run.nodeTarget ? ` --nodes ${run.nodeTarget}` : ''}${run.steering ? ` --steering "${escapeYaml(run.steering)}"` : ''}\``,
     '',
   ].join('\n');
 }
@@ -135,11 +154,16 @@ function renderDotSection(artifactId: string, dot: Dot): string[] {
     '',
     dot.summary,
     '',
+    ...(dot.essay ? ['**Essay**', '', dot.essay, ''] : []),
     '**Why adjacent**',
     '',
     dot.rationale,
     '',
-    '**Prompt**',
+    '**Implementation prompt**',
+    '',
+    dot.implementationPrompt ?? dot.exportablePrompt.trim(),
+    '',
+    '**Portable prompt**',
     '',
     '```md',
     dot.exportablePrompt.trim(),
@@ -177,6 +201,13 @@ export function renderIdeasNodeMd(input: {
     '',
     dot.summary,
     '',
+    '## Goal',
+    '',
+    `Improve ${dot.repoSurface} by delivering "${dot.title}".`,
+    '',
+    'The work is done when the repo behavior reflects this idea, the important edge cases are covered, and the verification steps give a future maintainer confidence that the change really works.',
+    '',
+    ...(dot.essay ? ['## Essay', '', dot.essay, ''] : []),
     '## Context',
     '',
     `- Run: ${run.id}`,
@@ -190,6 +221,10 @@ export function renderIdeasNodeMd(input: {
     dot.rationale,
     '',
     '## Prompt',
+    '',
+    dot.implementationPrompt ?? dot.exportablePrompt.trim(),
+    '',
+    '## Portable prompt',
     '',
     '```md',
     dot.exportablePrompt.trim(),
@@ -237,6 +272,11 @@ export function renderIdeasBatchMd(batch: IdeasBatchSummary): string {
     `frame_id: ${batch.frameId}`,
     `frame_name: "${escapeYaml(batch.frameName)}"`,
     `depth: ${batch.depth}`,
+    `model: "${escapeYaml(batch.model)}"`,
+    ...(batch.engine ? [`engine: "${escapeYaml(batch.engine)}"`] : []),
+    ...(batch.engineModel ? [`engine_model: "${escapeYaml(batch.engineModel)}"`] : []),
+    ...(batch.engineEffort ? [`engine_effort: "${escapeYaml(batch.engineEffort)}"`] : []),
+    ...(batch.nodeTarget ? [`node_target: ${batch.nodeTarget}`] : []),
     ...(batch.steering ? [`steering: "${escapeYaml(batch.steering)}"`] : []),
     `consideration_ids: [${considerationIds.map((id) => `"${escapeYaml(id)}"`).join(', ')}]`,
     `repos: [${repos.map((r) => `"${escapeYaml(r)}"`).join(', ')}]`,
@@ -250,6 +290,8 @@ export function renderIdeasBatchMd(batch: IdeasBatchSummary): string {
     ...(batch.seedId ? [`- Seed: ${batch.seedId}`] : []),
     `- Frame: ${batch.frameName} (${batch.frameId})`,
     `- Depth: ${batch.depth}`,
+    `- Model: ${batch.model}`,
+    ...(batch.nodeTarget ? [`- Nodes requested per repo: ${batch.nodeTarget}`] : []),
     `- Repos: ${batch.repoRuns.length}`,
     `- Considerations: ${batch.repoRuns.length}`,
     `- Total scored ideas: ${batch.totalDotCount}`,
@@ -264,7 +306,7 @@ export function renderIdeasBatchMd(batch: IdeasBatchSummary): string {
     '',
     'Re-run this batch shape later with:',
     '',
-    `\`ft ideas run --seed <seed-id> --repos ${repos.map((r) => `"${escapeYaml(r)}"`).join(' ')} --frame ${batch.frameId} --depth ${batch.depth}${batch.steering ? ` --steering "${escapeYaml(batch.steering)}"` : ''}\``,
+    `\`ft ideas run --seed <seed-id> --repos ${repos.map((r) => `"${escapeYaml(r)}"`).join(' ')} --frame ${batch.frameId} --depth ${batch.depth}${renderRunProfileFlags(batch)}${batch.nodeTarget ? ` --nodes ${batch.nodeTarget}` : ''}${batch.steering ? ` --steering "${escapeYaml(batch.steering)}"` : ''}\``,
     '',
   ].join('\n');
 }

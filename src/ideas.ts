@@ -2,6 +2,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {
   listConsiderations,
+  listArtifacts,
   readConsideration,
   readArtifact,
   writeArtifact,
@@ -24,6 +25,10 @@ export interface IdeasRunOptions {
   repos: string[];
   frameId?: string;
   depth?: 'quick' | 'standard' | 'deep';
+  engine?: string;
+  model?: string;
+  effort?: string;
+  nodeTarget?: number;
   steering?: string;
   onProgress?: (message: string) => void;
 }
@@ -35,6 +40,8 @@ export interface IdeasRunSummary {
   batchId?: string;
   frameId: string;
   frameName: string;
+  model: string;
+  nodeTarget?: number;
   /** Total scored dots across every run in this invocation. */
   dotCount: number;
   /** Top dots across every run, with the repo each came from. */
@@ -61,6 +68,11 @@ export interface IdeasBatchSummary {
   frameId: string;
   frameName: string;
   depth: 'quick' | 'standard' | 'deep';
+  model: string;
+  engine?: string;
+  engineModel?: string;
+  engineEffort?: string;
+  nodeTarget?: number;
   steering?: string;
   /** Single source of truth for the repo→run pairing. The md renderer derives the parallel YAML arrays from this. */
   repoRuns: RepoRun[];
@@ -98,16 +110,21 @@ export function formatIdeasIntro(): string {
     '',
     'Runtime truth:',
     '  - runs are orchestrated from your local machine',
-    '  - keep your laptop awake while longer debates are running',
+    '  - foreground runs need the terminal open; background runs keep a job log',
     '  - results are saved locally so you can reopen them later',
     '',
     'Useful commands:',
     '  ft possible explain',
     '  ft possible run --seed <seed-id> --repo .',
+    '  ft possible run --seed <seed-id> --repo . --engine claude --model opus --effort medium',
+    '  ft possible run --seed <seed-id> --repo . --background',
+    '  ft possible jobs',
+    '  ft possible job <job-id> --log',
     '  ft possible run --seed <seed-id> --repos <path...>    # batch',
     '  ft possible grid latest',
     '  ft possible dots latest',
-    '  ft possible prompt <node-id>',
+    '  ft possible prompt <node-id>                         # goal prompt',
+    '  ft possible nightly install --time 02:00 --defaults',
     '',
     `Available frames: ${frameNames}`,
   ].join('\n');
@@ -121,6 +138,14 @@ export function resolveIdeaRun(target?: string): Consideration | null {
   const runs = listIdeaRuns();
   if (!target || target === 'latest') return runs[0] ?? null;
   return readConsideration(target);
+}
+
+export function resolveIdeaBatch(target?: string): IdeasBatchSummary | null {
+  const batches = listArtifacts({ type: 'batch_summary' })
+    .map((artifact) => artifact.metadata as unknown as IdeasBatchSummary)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  if (!target || target === 'latest-batch') return batches[0] ?? null;
+  return batches.find((batch) => batch.id === target) ?? null;
 }
 
 export function dotsFromRun(run: Consideration): Array<{ artifact: Artifact; dot: Dot }> {
@@ -141,6 +166,8 @@ export function formatRunSummary(run: Consideration): string {
     `  repo: ${run.repo}`,
     `  frame: ${run.frame.name} (${run.frame.id})`,
     `  depth: ${run.depth}`,
+    ...(run.model ? [`  model: ${run.model}`] : []),
+    ...(run.nodeTarget ? [`  nodes requested: ${run.nodeTarget}`] : []),
     `  created: ${run.createdAt}`,
     `  completed stages: ${run.completedStages.join(', ') || 'none'}`,
     `  ideas: ${dots.length}`,
@@ -166,14 +193,22 @@ export function formatRunList(runs: Consideration[]): string {
     .slice(0, 20)
     .map((run) => {
       const dotCount = dotsFromRun(run).length;
-      return `${run.id}  ${run.frame.id}  ${run.depth}  ${dotCount} ideas  ${path.basename(run.repo)}  ${run.createdAt}`;
+      const nodeNote = run.nodeTarget ? `  target:${run.nodeTarget}` : '';
+      const modelNote = run.model ? `  ${run.model}` : '';
+      return `${run.id}  ${run.frame.id}  ${run.depth}${nodeNote}${modelNote}  ${dotCount} ideas  ${path.basename(run.repo)}  ${run.createdAt}`;
     })
     .join('\n');
 }
 
 export function renderRunGrid(target?: string): string {
   const run = resolveIdeaRun(target);
-  if (!run) throw new Error('No ideas run found.');
+  if (!run) {
+    const batch = resolveIdeaBatch(target);
+    if (!batch) throw new Error('No ideas run or batch found.');
+    const dots = dotsFromBatch(batch);
+    if (dots.length === 0) throw new Error(`Batch ${batch.id} has no scored ideas yet.`);
+    return renderTwoByTwo(dots, getFrame(batch.frameId) ?? DEFAULT_FRAMES[0]);
+  }
   const dots = dotsFromRun(run).map(({ dot }) => dot);
   if (dots.length === 0) throw new Error(`Run ${run.id} has no scored ideas yet.`);
   return renderTwoByTwo(dots, run.frame);
@@ -181,10 +216,23 @@ export function renderRunGrid(target?: string): string {
 
 export function renderRunDots(target?: string): string {
   const run = resolveIdeaRun(target);
-  if (!run) throw new Error('No ideas run found.');
+  if (!run) {
+    const batch = resolveIdeaBatch(target);
+    if (!batch) throw new Error('No ideas run or batch found.');
+    const dots = dotsFromBatch(batch);
+    if (dots.length === 0) throw new Error(`Batch ${batch.id} has no scored ideas yet.`);
+    return renderDotList(dots, getFrame(batch.frameId) ?? DEFAULT_FRAMES[0]);
+  }
   const dots = dotsFromRun(run).map(({ dot }) => dot);
   if (dots.length === 0) throw new Error(`Run ${run.id} has no scored ideas yet.`);
   return renderDotList(dots, run.frame);
+}
+
+function dotsFromBatch(batch: IdeasBatchSummary): Dot[] {
+  return batch.topDots.map((entry) => ({
+    ...entry.dot,
+    repoSurface: `${path.basename(entry.repo)}: ${entry.dot.repoSurface}`,
+  }));
 }
 
 export function getIdeaPrompt(dotId: string): string {
@@ -272,6 +320,7 @@ interface RunContext {
   seedArtifactIds: string[];
   seedId: string | undefined;
   depth: 'quick' | 'standard' | 'deep';
+  nodeTarget: number | undefined;
   steering: string | undefined;
   onProgress: ((message: string) => void) | undefined;
 }
@@ -300,6 +349,7 @@ async function runOneRepo(
     frame: ctx.frame,
     repo: resolvedRepo,
     depth: ctx.depth,
+    nodeTarget: ctx.nodeTarget,
     steering: ctx.steering,
     engine: ctx.engine,
     onProgress: (_stage, message) => ctx.onProgress?.(message),
@@ -336,7 +386,11 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
     throw new Error('Provide at least one repo via repos: [...]');
   }
 
-  const engine = await resolveEngine();
+  const engine = await resolveEngine({
+    engine: options.engine,
+    model: options.model,
+    effort: options.effort,
+  });
   const { seedArtifactIds, seedFrameId } = await resolveSeedForRun(options);
   const frame = resolveFrameForRun(options.frameId, seedFrameId);
 
@@ -346,6 +400,7 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
     seedArtifactIds,
     seedId: options.seedId,
     depth: options.depth ?? 'standard',
+    nodeTarget: options.nodeTarget,
     steering: options.steering,
     onProgress: options.onProgress,
   };
@@ -372,6 +427,11 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
       seedArtifactIds: ctx.seedArtifactIds,
       frame: ctx.frame,
       depth: ctx.depth,
+      model: ctx.engine.label,
+      engine: ctx.engine.name,
+      engineModel: ctx.engine.model,
+      engineEffort: ctx.engine.effort,
+      nodeTarget: ctx.nodeTarget,
       steering: ctx.steering,
       totalDotCount,
       topDots: topDotsAggregated,
@@ -385,6 +445,8 @@ export async function runIdeas(options: IdeasRunOptions): Promise<IdeasRunSummar
     batchId,
     frameId: frame.id,
     frameName: frame.name,
+    model: ctx.engine.label,
+    nodeTarget: ctx.nodeTarget,
     dotCount: totalDotCount,
     topDots: topDotsAggregated.map((entry) => ({ ...entry.dot, repo: entry.repo })),
   };
@@ -396,6 +458,11 @@ async function persistBatchSummary(input: {
   seedArtifactIds: string[];
   frame: Frame;
   depth: 'quick' | 'standard' | 'deep';
+  model: string;
+  engine?: string;
+  engineModel?: string;
+  engineEffort?: string;
+  nodeTarget?: number;
   steering?: string;
   totalDotCount: number;
   topDots: DotEntry[];
@@ -411,6 +478,11 @@ async function persistBatchSummary(input: {
     frameId: input.frame.id,
     frameName: input.frame.name,
     depth: input.depth,
+    model: input.model,
+    engine: input.engine,
+    engineModel: input.engineModel,
+    engineEffort: input.engineEffort,
+    nodeTarget: input.nodeTarget,
     steering: input.steering,
     repoRuns: input.repoRuns,
     totalDotCount: input.totalDotCount,

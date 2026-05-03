@@ -89,11 +89,13 @@ test('buildSurveyPrompt: includes seed signals and repo tree', async () => {
     seedBrief: brief,
     repoTree: 'src/gaze/tracker.ts\nsrc/gaze/calibration.ts',
     recentFiles: ['src/gaze/tracker.ts'],
+    fileExcerpts: [{ path: 'src/gaze/tracker.ts', text: 'export function trackGaze() { return "left"; }' }],
     budget: DEPTH_BUDGETS.standard,
   });
 
   assert.ok(prompt.includes('gaze tracking'), 'should include domain');
   assert.ok(prompt.includes('src/gaze/tracker.ts'), 'should include repo tree');
+  assert.ok(prompt.includes('trackGaze'), 'should include selected file excerpts');
   assert.ok(prompt.includes('path'), 'should ask for path field');
   assert.ok(prompt.includes('workKind'), 'should ask for workKind field');
 });
@@ -204,6 +206,7 @@ test('buildExportablePrompt: produces portable command frontmatter shape', async
   const out = buildExportablePrompt({
     title: 'Add AEC pipeline',
     summary: 'An acoustic echo cancellation pipeline.',
+    essay: 'The audio stack should make echo cancellation visible as a product-level capability.',
     rationale: 'Hot mic picks up system audio.',
     repoSurface: 'electron/native/AudioManager.swift',
     frame,
@@ -212,14 +215,19 @@ test('buildExportablePrompt: produces portable command frontmatter shape', async
     axisBScore: 60,
     axisAJustification: 'High novelty.',
     axisBJustification: 'Moderate feasibility.',
+    implementationPrompt: 'Read AudioManager.swift and add the smallest AEC proof.',
   });
 
   assert.ok(out.startsWith('---'), 'should start with YAML frontmatter');
   assert.ok(out.includes('ideas/'), 'should use ideas namespace');
+  assert.ok(out.includes('type: ideas-goal'), 'should identify the node as a goal-shaped artifact');
   assert.ok(out.includes('frame:'), 'should include frame ID');
   assert.ok(out.includes('80'), 'should include axis A score');
   assert.ok(out.includes('AudioManager.swift'), 'should mention repo surface');
-  assert.ok(out.includes('To explore this'), 'should include action section');
+  assert.ok(out.includes('## Goal'), 'should include model goal section');
+  assert.ok(out.includes('## Essay'), 'should include essay section');
+  assert.ok(out.includes('## Implementation prompt'), 'should include implementation prompt section');
+  assert.ok(out.includes('smallest AEC proof'), 'should include action prompt');
 });
 
 // ── Response parsers ──────────────────────────────────────────────────────────
@@ -329,6 +337,23 @@ test('DEPTH_BUDGETS: all depths have surveyFileLimit and critiqueMinSurvivors', 
   }
 });
 
+test('applyNodeTargetToBudget: explicit nodes override candidate and survivor counts', async () => {
+  const { DEPTH_BUDGETS, applyNodeTargetToBudget } = await getPrompts();
+  const budget = applyNodeTargetToBudget(DEPTH_BUDGETS.quick, 7);
+  assert.equal(budget.candidateTarget, 7);
+  assert.equal(budget.critiqueMinSurvivors, 7);
+  assert.equal(budget.surveyFileLimit, DEPTH_BUDGETS.quick.surveyFileLimit);
+  assert.equal(budget.timeoutMs, DEPTH_BUDGETS.quick.timeoutMs);
+});
+
+test('validateNodeTarget: rejects non-integer and out-of-range values', async () => {
+  const { validateNodeTarget } = await getPrompts();
+  assert.equal(validateNodeTarget(undefined), undefined);
+  assert.equal(validateNodeTarget('10'), 10);
+  assert.throws(() => validateNodeTarget('1.5'), /integer/);
+  assert.throws(() => validateNodeTarget('31'), /1 to 30/);
+});
+
 // ── Repo index ────────────────────────────────────────────────────────────────
 
 test('formatFileTree: joins paths with newlines sorted', async () => {
@@ -363,6 +388,7 @@ test('buildRepoSnapshot: scans a temp directory successfully', async () => {
     assert.ok(snapshot.fileTree.length >= 2, 'should find files');
     assert.ok(snapshot.treeText.includes('README.md'), 'should include README');
     assert.ok(snapshot.treeText.includes('index.ts'), 'should include index.ts');
+    assert.ok(snapshot.fileExcerpts.some((excerpt) => excerpt.text.includes('export const x')), 'should include code excerpts');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -400,6 +426,39 @@ test('buildRepoSnapshot: skips image files', async () => {
   }
 });
 
+test('buildRepoSnapshot: reuses complete cache for small repos', async () => {
+  const { buildRepoSnapshot } = await getRepoIndex();
+  const dir = await mkdtemp(path.join(tmpdir(), 'ft-repo-test-'));
+  try {
+    await writeFile(path.join(dir, 'app.ts'), 'export const app = true;');
+
+    const first = await buildRepoSnapshot(dir, { maxFiles: 80 });
+    const second = await buildRepoSnapshot(dir, { maxFiles: 80 });
+
+    assert.equal(first.fromCache, false);
+    assert.equal(second.fromCache, true);
+    assert.equal(second.fileTree.length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('buildRepoSnapshot: falls back to dist-only project layouts', async () => {
+  const { buildRepoSnapshot } = await getRepoIndex();
+  const dir = await mkdtemp(path.join(tmpdir(), 'ft-repo-test-'));
+  try {
+    await mkdir(path.join(dir, 'dist'));
+    await writeFile(path.join(dir, 'dist', 'cli.js'), 'export function run() {}');
+
+    const snapshot = await buildRepoSnapshot(dir, { maxFiles: 80 });
+
+    assert.ok(snapshot.fileTree.some((f) => f.path === path.join('dist', 'cli.js')));
+    assert.ok(snapshot.fileExcerpts.some((excerpt) => excerpt.path === path.join('dist', 'cli.js')));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // ── 2×2 rendering ─────────────────────────────────────────────────────────────
 
 test('renderTwoByTwo: produces output with frame name', async () => {
@@ -417,6 +476,33 @@ test('renderTwoByTwo: produces output with frame name', async () => {
   assert.ok(output.includes('Impact × Effort'), 'should include frame name');
   assert.ok(output.includes('│'), 'should have grid separator');
   assert.ok(output.includes('Fast win'), 'should include a dot title');
+});
+
+test('renderTwoByTwo: uses a framed coordinate plot with a numbered legend', async () => {
+  const { renderTwoByTwo } = await getPipeline();
+  const { DEFAULT_FRAMES } = await getFrames();
+  const frame = DEFAULT_FRAMES.find((f) => f.id === 'impact-effort')!;
+
+  const dots = Array.from({ length: 5 }, (_, i) => ({
+    title: `High value idea ${i + 1}`,
+    summary: 'S',
+    rationale: 'R',
+    repoSurface: 'f',
+    effortEstimate: 'hours' as const,
+    axisAScore: 90,
+    axisAJustification: 'j',
+    axisBScore: 90,
+    axisBJustification: 'j',
+    exportablePrompt: '',
+  }));
+
+  const output = renderTwoByTwo(dots, frame);
+  assert.ok(output.includes('╭'), 'should use a rounded top border');
+  assert.ok(output.includes('╰'), 'should use a rounded bottom border');
+  assert.ok(output.includes('Impact ↑ · Effort →'), 'should label axis orientation');
+  assert.ok(output.includes('Nodes'), 'should render a node legend');
+  assert.ok(output.includes('1  High value idea'), 'should render numbered nodes');
+  assert.ok(output.includes('◆') || output.includes('5  High value idea'), 'should show collisions or all legend entries');
 });
 
 test('renderDotList: lists all dots sorted by axis A', async () => {
@@ -525,9 +611,9 @@ test('parseBatchScores: throws on invalid JSON', async () => {
   assert.throws(() => parseBatchScores('not json', 2), /Stage 5/);
 });
 
-// ── renderTwoByTwo: fixed dead branch ────────────────────────────────────────
+// ── renderTwoByTwo: coordinate plot behavior ─────────────────────────────────
 
-test('renderTwoByTwo: row label appears exactly once for high-A quadrant', async () => {
+test('renderTwoByTwo: includes all plotted dots in the legend', async () => {
   const { renderTwoByTwo } = await getPipeline();
   const { DEFAULT_FRAMES } = await getFrames();
   const frame = DEFAULT_FRAMES.find((f) => f.id === 'impact-effort')!;
@@ -540,15 +626,30 @@ test('renderTwoByTwo: row label appears exactly once for high-A quadrant', async
   ];
 
   const output = renderTwoByTwo(dots, frame);
-  const lines = output.split('\n');
-
-  // 'high Impact' should appear exactly once (the dead branch used to produce it twice)
-  const highALines = lines.filter((l) => l.includes('high Impact'));
-  assert.equal(highALines.length, 1, 'high-A row label should appear exactly once');
-
-  // All four dots should appear in the output
   assert.ok(output.includes('Sweep it'));
   assert.ok(output.includes('Slog ahead'));
   assert.ok(output.includes('Quick fix'));
   assert.ok(output.includes('Skip this'));
+});
+
+test('renderTwoByTwo: plots against absolute 0-100 axis labels', async () => {
+  const { renderTwoByTwo } = await getPipeline();
+  const { DEFAULT_FRAMES } = await getFrames();
+  const frame = DEFAULT_FRAMES.find((f) => f.id === 'impact-effort')!;
+
+  const dots = [
+    { title: 'Sweep it',   summary: 'S', rationale: 'R', repoSurface: 'f', effortEstimate: 'hours' as const, axisAScore: 90, axisAJustification: 'j', axisBScore: 85, axisBJustification: 'j', exportablePrompt: '' },
+    { title: 'Slog ahead', summary: 'S', rationale: 'R', repoSurface: 'f', effortEstimate: 'weeks' as const, axisAScore: 80, axisAJustification: 'j', axisBScore: 15, axisBJustification: 'j', exportablePrompt: '' },
+    { title: 'Quick fix',  summary: 'S', rationale: 'R', repoSurface: 'f', effortEstimate: 'days'  as const, axisAScore: 25, axisAJustification: 'j', axisBScore: 90, axisBJustification: 'j', exportablePrompt: '' },
+    { title: 'Skip this',  summary: 'S', rationale: 'R', repoSurface: 'f', effortEstimate: 'days'  as const, axisAScore: 20, axisAJustification: 'j', axisBScore: 20, axisBJustification: 'j', exportablePrompt: '' },
+  ];
+
+  const output = renderTwoByTwo(dots, frame);
+
+  assert.ok(output.includes('100 ╭'), 'should show high end of axis A');
+  assert.ok(output.includes(' 50 │'), 'should show midpoint of axis A');
+  assert.ok(output.includes('0 ╰'), 'should show low end of axis A');
+  assert.ok(output.includes('0'), 'should show low end of axis B');
+  assert.ok(output.includes('50'), 'should show midpoint of axis B');
+  assert.ok(output.includes('100'), 'should show high end of axis B');
 });

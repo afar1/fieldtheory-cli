@@ -178,6 +178,11 @@ export function ideasBatchesDir(date?: string): string {
   return date ? path.join(base, date) : base;
 }
 
+export function ideasJobsDir(date?: string): string {
+  const base = path.join(ideasMdDir(), 'jobs');
+  return date ? path.join(base, date) : base;
+}
+
 export function ideasReposRegistryPath(): string {
   return path.join(ideasMdDir(), 'repos.json');
 }
