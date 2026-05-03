@@ -19,6 +19,7 @@ import {
   getDomainCounts,
   getFolderCounts,
   listBookmarks,
+  exportClassifications,
   getBookmarkById,
 } from './bookmarks-db.js';
 import { formatClassificationSummary } from './bookmark-classify.js';
@@ -1097,9 +1098,18 @@ export function buildCli() {
     .command('classify')
     .description('Classify bookmarks by category and domain using LLM (requires claude or codex CLI)')
     .option('--regex', 'Use simple regex classification instead of LLM')
+    .option('--export', 'Back up all existing SQLite classifications to classifications.jsonl')
     .addOption(engineOption())
     .action(safe(async (options) => {
       if (!requireData()) return;
+
+      if (options.export) {
+        process.stderr.write('Exporting classifications to JSONL...\n');
+        const count = await exportClassifications();
+        console.log(`  \u2713 Exported ${count} classifications to classifications.jsonl`);
+        return;
+      }
+
       if (options.regex) {
         process.stderr.write('Classifying bookmarks (regex)...\n');
         const result = await classifyAndRebuild();

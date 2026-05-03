@@ -85,6 +85,10 @@ export function twitterBookmarksIndexPath(): string {
   return path.join(dataDir(), 'bookmarks.db');
 }
 
+export function twitterClassificationsPath(): string {
+  return path.join(dataDir(), 'classifications.jsonl');
+}
+
 export function preferencesPath(): string {
   return path.join(dataDir(), '.preferences');
 }
