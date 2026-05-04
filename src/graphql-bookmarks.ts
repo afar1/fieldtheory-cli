@@ -4,8 +4,8 @@ import { loadChromeSessionConfig } from './config.js';
 import { extractChromeXCookies } from './chrome-cookies.js';
 import { extractFirefoxXCookies } from './firefox-cookies.js';
 import { parseTimestampMs } from './date-utils.js';
-import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkFolder, BookmarkRecord, QuotedTweetSnapshot } from './types.js';
-import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText, updateArticleContent } from './bookmarks-db.js';
+import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkFolder, BookmarkRecord, QuotedTweetSnapshot, ThreadTweetSnapshot } from './types.js';
+import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText, updateArticleContent, updateThreadData } from './bookmarks-db.js';
 import type { ArticleUpdate } from './bookmarks-db.js';
 import { fetchArticle, resolveTcoLink } from './bookmark-enrich.js';
 import type { ArticleContent } from './bookmark-enrich.js';
@@ -25,6 +25,14 @@ const BOOKMARKS_OPERATION = 'Bookmarks';
 // working against Karpathy's 2039805659525644595 note_tweet on 2026-04-15.
 const TWEET_RESULT_BY_REST_ID_QUERY_ID = 'fHLDP3qFEjnTqhWBVvsREg';
 const TWEET_RESULT_BY_REST_ID_OPERATION = 'TweetResultByRestId';
+
+// TweetDetail — used by `--threads` to fetch same-author continuations below a
+// bookmarked tweet. Query ids rotate; refresh by searching for
+// `operationName:"TweetDetail"` inside the current
+// `abs.twimg.com/responsive-web/client-web/main.<hash>.js` bundle or by
+// capturing a live `/i/api/graphql/<id>/TweetDetail` request from x.com.
+const TWEET_DETAIL_QUERY_ID = '-0WTL1e9Pij-JWAF5ztCCA';
+const TWEET_DETAIL_OPERATION = 'TweetDetail';
 
 // ──────────────────────────────────────────────────────────────────────────
 // Folder endpoints — READ ONLY. We never POST/PUT/DELETE to X.
@@ -521,6 +529,18 @@ export function mergeBookmarkRecord(existing: BookmarkRecord | undefined, incomi
   }
   if (existing.enrichedAt && !incoming.enrichedAt) {
     merged.enrichedAt = existing.enrichedAt;
+  }
+  if (existing.threadContext && incoming.threadContext === undefined) {
+    merged.threadContext = existing.threadContext;
+  }
+  if (existing.threadBelow && incoming.threadBelow === undefined) {
+    merged.threadBelow = existing.threadBelow;
+  }
+  if (existing.threadExpandedAt && !incoming.threadExpandedAt) {
+    merged.threadExpandedAt = existing.threadExpandedAt;
+  }
+  if (existing.threadExpansionFailedAt && !incoming.threadExpansionFailedAt) {
+    merged.threadExpansionFailedAt = existing.threadExpansionFailedAt;
   }
   if ((existing.mediaObjects?.length ?? 0) > 0 && (incoming.mediaObjects?.length ?? 0) === 0) {
     merged.mediaObjects = existing.mediaObjects;
@@ -1426,6 +1446,41 @@ const TWEET_RESULT_FIELD_TOGGLES = {
   withAuxiliaryUserLabels: false,
 };
 
+const TWEET_DETAIL_FEATURES = {
+  rweb_video_screen_enabled: false,
+  payments_enabled: false,
+  profile_label_improvements_pcf_label_in_post_enabled: true,
+  rweb_tipjar_consumption_enabled: true,
+  verified_phone_label_enabled: false,
+  creator_subscriptions_tweet_preview_api_enabled: true,
+  responsive_web_graphql_timeline_navigation_enabled: true,
+  responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
+  premium_content_api_read_enabled: false,
+  communities_web_enable_tweet_community_results_fetch: true,
+  c9s_tweet_anatomy_moderator_badge_enabled: true,
+  responsive_web_grok_analyze_button_fetch_trends_enabled: false,
+  responsive_web_grok_analyze_post_followups_enabled: true,
+  responsive_web_jetfuel_frame: false,
+  responsive_web_grok_share_attachment_enabled: true,
+  articles_preview_enabled: true,
+  responsive_web_edit_tweet_api_enabled: true,
+  graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
+  view_counts_everywhere_api_enabled: true,
+  longform_notetweets_consumption_enabled: true,
+  responsive_web_twitter_article_tweet_consumption_enabled: true,
+  tweet_awards_web_tipping_enabled: false,
+  responsive_web_grok_show_grok_translated_post: false,
+  responsive_web_grok_analysis_button_from_backend: false,
+  creator_subscriptions_quote_tweet_preview_enabled: false,
+  freedom_of_speech_not_reach_fetch_enabled: true,
+  standardized_nudges_misinfo: true,
+  tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
+  longform_notetweets_rich_text_read_enabled: true,
+  longform_notetweets_inline_media_enabled: true,
+  responsive_web_grok_image_annotation_enabled: true,
+  responsive_web_enhance_cards_enabled: false,
+};
+
 export type TweetFetchSource = 'graphql' | 'syndication';
 
 export interface TweetFetchResult {
@@ -1478,6 +1533,59 @@ export function parseTweetResultByRestId(json: any, tweetId: string): QuotedTwee
     })),
     url: `https://x.com/${handle ?? '_'}/status/${resolvedId}`,
   };
+}
+
+function parseThreadTweetResult(
+  value: any,
+  fallbackId?: string,
+  metadata: Partial<ThreadTweetSnapshot> = {},
+): ThreadTweetSnapshot | null {
+  const tweet = value?.tweet ?? value;
+  const legacy = tweet?.legacy;
+  if (!legacy) return null;
+
+  const noteText = tweet?.note_tweet?.note_tweet_results?.result?.text;
+  const text = noteText ?? legacy.full_text ?? legacy.text ?? '';
+  const resolvedId = String(legacy.id_str ?? tweet?.rest_id ?? fallbackId ?? '');
+  if (!resolvedId || !text) return null;
+
+  const userResult = tweet?.core?.user_results?.result;
+  const handle = userResult?.core?.screen_name ?? userResult?.legacy?.screen_name;
+  const mediaEntities: any[] = legacy?.extended_entities?.media ?? legacy?.entities?.media ?? [];
+
+  return {
+    id: resolvedId,
+    text,
+    authorHandle: handle,
+    authorName: userResult?.core?.name ?? userResult?.legacy?.name,
+    authorProfileImageUrl:
+      userResult?.avatar?.image_url ?? userResult?.legacy?.profile_image_url_https,
+    postedAt: legacy.created_at ?? null,
+    media: mediaEntities.map((m: any) => m.media_url_https ?? m.media_url).filter(Boolean),
+    mediaObjects: mediaEntities.map((m: any) => ({
+      type: m.type,
+      url: m.media_url_https ?? m.media_url,
+      expandedUrl: m.expanded_url,
+      width: m.original_info?.width,
+      height: m.original_info?.height,
+      altText: m.ext_alt_text,
+      videoVariants: Array.isArray(m.video_info?.variants)
+        ? m.video_info.variants
+            .filter((v: any) => v.content_type === 'video/mp4')
+            .map((v: any) => ({ bitrate: v.bitrate, url: v.url }))
+        : undefined,
+    })),
+    conversationId: legacy.conversation_id_str,
+    inReplyToStatusId: legacy.in_reply_to_status_id_str,
+    ...metadata,
+    url: `https://x.com/${handle ?? '_'}/status/${resolvedId}`,
+  };
+}
+
+export function parseThreadTweetResultByRestId(json: any, tweetId: string): ThreadTweetSnapshot | null {
+  const result = json?.data?.tweetResult?.result;
+  if (!result) return null;
+  return parseThreadTweetResult(result, tweetId);
 }
 
 function unwrapGraphqlResult(value: any): any {
@@ -1581,6 +1689,127 @@ function buildTweetResultByRestIdUrl(tweetId: string): string {
   return `https://x.com/i/api/graphql/${TWEET_RESULT_BY_REST_ID_QUERY_ID}/${TWEET_RESULT_BY_REST_ID_OPERATION}?${params}`;
 }
 
+function buildTweetDetailUrl(tweetId: string, cursor?: string): string {
+  const variables: Record<string, unknown> = {
+    focalTweetId: tweetId,
+    with_rux_injections: false,
+    includePromotedContent: false,
+    withCommunity: true,
+    withQuickPromoteEligibilityTweetFields: true,
+    withBirdwatchNotes: true,
+    withVoice: true,
+    withV2Timeline: true,
+    rankingMode: 'Relevance',
+    count: 40,
+  };
+  if (cursor) variables.cursor = cursor;
+  const params = new URLSearchParams({
+    variables: JSON.stringify(variables),
+    features: JSON.stringify(TWEET_DETAIL_FEATURES),
+  });
+  return `https://x.com/i/api/graphql/${TWEET_DETAIL_QUERY_ID}/${TWEET_DETAIL_OPERATION}?${params}`;
+}
+
+function compareTweetIdsChronologically(a: ThreadTweetSnapshot, b: ThreadTweetSnapshot): number {
+  const aId = parseSnowflake(a.id);
+  const bId = parseSnowflake(b.id);
+  if (aId != null && bId != null && aId !== bId) return aId < bId ? -1 : 1;
+  const aTime = parseTimestampMs(a.postedAt);
+  const bTime = parseTimestampMs(b.postedAt);
+  if (aTime != null && bTime != null && aTime !== bTime) return aTime - bTime;
+  return a.id.localeCompare(b.id);
+}
+
+function sameHandle(a?: string, b?: string): boolean {
+  if (!a || !b) return false;
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+function conversationSection(content: any): string | undefined {
+  return content?.clientEventInfo?.details?.conversationDetails?.conversationSection;
+}
+
+function collectThreadEntries(entries: any[], out: ThreadTweetSnapshot[]): string | undefined {
+  let nextCursor: string | undefined;
+  for (const entry of entries) {
+    if (entry?.entryId?.startsWith('cursor-bottom')) {
+      nextCursor = entry?.content?.value;
+      continue;
+    }
+
+    const direct = entry?.content?.itemContent?.tweet_results?.result;
+    const directSnapshot = direct ? parseThreadTweetResult(direct) : null;
+    if (directSnapshot) out.push(directSnapshot);
+
+    const moduleItems = entry?.content?.items;
+    if (Array.isArray(moduleItems)) {
+      const moduleSnapshots: ThreadTweetSnapshot[] = [];
+      for (let index = 0; index < moduleItems.length; index++) {
+        const item = moduleItems[index];
+        const result = item?.item?.itemContent?.tweet_results?.result;
+        const snapshot = result ? parseThreadTweetResult(result, undefined, {
+          conversationEntryId: entry.entryId,
+          conversationDisplayType: entry?.content?.displayType,
+          conversationSection: conversationSection(entry.content),
+          conversationItemIndex: index,
+        }) : null;
+        if (snapshot) moduleSnapshots.push(snapshot);
+      }
+      const rootId = moduleSnapshots[0]?.id;
+      for (const snapshot of moduleSnapshots) {
+        if (rootId) snapshot.conversationRootId = rootId;
+        out.push(snapshot);
+      }
+    }
+  }
+  return nextCursor;
+}
+
+export function parseTweetDetailResponse(json: any): { tweets: ThreadTweetSnapshot[]; nextCursor?: string } {
+  const instructions = json?.data?.threaded_conversation_with_injections_v2?.instructions ?? [];
+  const tweets: ThreadTweetSnapshot[] = [];
+  let nextCursor: string | undefined;
+
+  for (const instruction of instructions) {
+    if (instruction?.type === 'TimelineAddEntries' && Array.isArray(instruction.entries)) {
+      nextCursor = collectThreadEntries(instruction.entries, tweets) ?? nextCursor;
+    }
+    if (instruction?.type === 'TimelinePinEntry' && instruction.entry) {
+      collectThreadEntries([instruction.entry], tweets);
+    }
+  }
+
+  const byId = new Map<string, ThreadTweetSnapshot>();
+  for (const tweet of tweets) {
+    if (!byId.has(tweet.id)) byId.set(tweet.id, tweet);
+  }
+  return { tweets: Array.from(byId.values()).sort(compareTweetIdsChronologically), nextCursor };
+}
+
+export function extractSameAuthorThreadBelow(
+  tweets: ThreadTweetSnapshot[],
+  focalTweetId: string,
+  focalAuthorHandle?: string,
+): ThreadTweetSnapshot[] {
+  const focal = tweets.find((tweet) => tweet.id === focalTweetId);
+  const authorHandle = focalAuthorHandle ?? focal?.authorHandle;
+  if (!authorHandle) return [];
+
+  const chainIds = new Set<string>([focalTweetId]);
+  const below: ThreadTweetSnapshot[] = [];
+  const sorted = tweets
+    .filter((tweet) => tweet.id !== focalTweetId && sameHandle(tweet.authorHandle, authorHandle))
+    .sort(compareTweetIdsChronologically);
+
+  for (const tweet of sorted) {
+    if (!tweet.inReplyToStatusId || !chainIds.has(tweet.inReplyToStatusId)) continue;
+    below.push({ ...tweet, threadRole: 'post-thread' });
+    chainIds.add(tweet.id);
+  }
+
+  return below;
+}
+
 export async function fetchTweetByIdViaGraphQL(
   tweetId: string,
   csrfToken: string,
@@ -1637,6 +1866,49 @@ export async function fetchTweetByIdViaGraphQL(
   return { snapshot: null, status: 'rate_limited', source: 'graphql' };
 }
 
+export async function fetchTweetDetailViaGraphQL(
+  tweetId: string,
+  csrfToken: string,
+  cookieHeader?: string,
+  options: { maxPages?: number; delayMs?: number } = {},
+): Promise<{ tweets: ThreadTweetSnapshot[]; status: TweetFetchResult['status']; httpStatus?: number }> {
+  const maxPages = options.maxPages ?? 3;
+  const delayMs = options.delayMs ?? 300;
+  const tweets: ThreadTweetSnapshot[] = [];
+  let cursor: string | undefined;
+
+  for (let page = 0; page < maxPages; page++) {
+    let response: Response;
+    try {
+      response = await fetch(buildTweetDetailUrl(tweetId, cursor), {
+        headers: buildHeaders(csrfToken, cookieHeader),
+      });
+    } catch {
+      return { tweets, status: 'error' };
+    }
+
+    if (response.status === 429) return { tweets, status: 'rate_limited', httpStatus: 429 };
+    if (response.status === 404) return { tweets, status: 'not_found', httpStatus: 404 };
+    if (response.status === 401 || response.status === 403) return { tweets, status: 'error', httpStatus: response.status };
+    if (response.status >= 500) return { tweets, status: 'server_error', httpStatus: response.status };
+    if (!response.ok) return { tweets, status: 'error', httpStatus: response.status };
+
+    const json = await response.json();
+    const parsed = parseTweetDetailResponse(json);
+    tweets.push(...parsed.tweets);
+    if (!parsed.nextCursor || parsed.nextCursor === cursor) break;
+    cursor = parsed.nextCursor;
+    if (page < maxPages - 1) await new Promise((r) => setTimeout(r, delayMs));
+  }
+
+  const byId = new Map<string, ThreadTweetSnapshot>();
+  for (const tweet of tweets) {
+    if (!byId.has(tweet.id)) byId.set(tweet.id, tweet);
+  }
+  if (byId.size === 0) return { tweets: [], status: 'error' };
+  return { tweets: Array.from(byId.values()).sort(compareTweetIdsChronologically), status: 'ok' };
+}
+
 async function fetchTweetViaSyndication(tweetId: string): Promise<TweetFetchResult> {
   for (let attempt = 0; attempt < 4; attempt++) {
     const response = await fetch(`${SYNDICATION_URL}?id=${tweetId}&token=x`, {
@@ -1687,6 +1959,55 @@ async function fetchTweetViaSyndication(tweetId: string): Promise<TweetFetchResu
   return { snapshot: null, status: 'rate_limited', source: 'syndication' };
 }
 
+async function fetchThreadTweetViaSyndication(tweetId: string): Promise<{ tweet: ThreadTweetSnapshot | null; status: TweetFetchResult['status'] }> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const response = await fetch(`${SYNDICATION_URL}?id=${tweetId}&token=x`, {
+      headers: {
+        'user-agent': CHROME_UA,
+      },
+    });
+
+    if (response.ok) {
+      const data = await response.json() as any;
+      if (!data?.text) return { tweet: null, status: 'empty' };
+      const handle = data.user?.screen_name;
+      const mediaEntities: any[] = data.mediaDetails ?? [];
+      return {
+        status: 'ok',
+        tweet: {
+          id: String(data.id_str ?? tweetId),
+          text: data.text,
+          authorHandle: handle,
+          authorName: data.user?.name,
+          authorProfileImageUrl: data.user?.profile_image_url_https,
+          postedAt: data.created_at ?? null,
+          media: mediaEntities.map((m: any) => m.media_url_https ?? m.media_url).filter(Boolean),
+          mediaObjects: mediaEntities.map((m: any) => ({
+            type: m.type,
+            url: m.media_url_https ?? m.media_url,
+            width: m.original_info?.width,
+            height: m.original_info?.height,
+          })),
+          conversationId: data.conversation_id_str,
+          inReplyToStatusId: data.in_reply_to_status_id_str,
+          url: `https://x.com/${handle ?? '_'}/status/${data.id_str ?? tweetId}`,
+        },
+      };
+    }
+
+    if (response.status === 429) {
+      await new Promise((r) => setTimeout(r, Math.min(15 * Math.pow(2, attempt), 120) * 1000));
+      continue;
+    }
+    if (response.status >= 500) {
+      await new Promise((r) => setTimeout(r, 5000 * (attempt + 1)));
+      continue;
+    }
+    return { tweet: null, status: response.status === 404 ? 'not_found' : 'forbidden' };
+  }
+  return { tweet: null, status: 'rate_limited' };
+}
+
 // Text >= 275 chars may be truncated by Twitter's legacy.full_text limit
 const TRUNCATION_THRESHOLD = 275;
 const LINK_ONLY_THRESHOLD = 80;
@@ -1705,6 +2026,288 @@ const X_ARTICLE_MISSING_REASONS: Record<string, string> = {
   syndication: 'X Article body requires authenticated X GraphQL; syndication only returned the tweet preview',
   unknown: 'X Article body was not returned',
 };
+
+const RECENT_THREAD_RECHECK_MS = 72 * 60 * 60_000;
+const MIN_THREAD_RECHECK_MS = 6 * 60 * 60_000;
+
+export interface ThreadSyncProgress {
+  done: number;
+  total: number;
+  contextFilled: number;
+  belowFilled: number;
+  emptyChecked: number;
+  failed: number;
+}
+
+export interface ThreadSyncFailure {
+  tweetId: string;
+  reason: string;
+  url: string;
+}
+
+export interface ThreadSyncResult {
+  contextFilled: number;
+  belowFilled: number;
+  emptyChecked: number;
+  failed: number;
+  failures: ThreadSyncFailure[];
+  total: number;
+}
+
+type ThreadExpansionFetcher = (record: BookmarkRecord) => Promise<{
+  context: ThreadTweetSnapshot[];
+  below: ThreadTweetSnapshot[];
+  status: TweetFetchResult['status'];
+}>;
+
+const THREAD_TRANSIENT_FAILURE_STATUSES = new Set<TweetFetchResult['status']>([
+  'rate_limited',
+  'server_error',
+  'error',
+]);
+
+export interface SyncThreadsOptions {
+  onProgress?: (progress: ThreadSyncProgress) => void;
+  delayMs?: number;
+  browser?: string;
+  chromeUserDataDir?: string;
+  chromeProfileDirectory?: string;
+  firefoxProfileDir?: string;
+  csrfToken?: string;
+  cookieHeader?: string;
+  threadFetcher?: ThreadExpansionFetcher;
+}
+
+function shouldSyncThread(record: BookmarkRecord, nowMs: number): boolean {
+  if (record.threadExpansionFailedAt) return false;
+  if (record.threadContext === undefined || record.threadBelow === undefined) return true;
+  if (!record.threadExpandedAt) return true;
+
+  const postedAtMs = parseTimestampMs(record.postedAt);
+  const checkedAtMs = parseTimestampMs(record.threadExpandedAt);
+  if (postedAtMs == null || checkedAtMs == null) return false;
+  if (nowMs - postedAtMs > RECENT_THREAD_RECHECK_MS) return false;
+  return nowMs - checkedAtMs >= MIN_THREAD_RECHECK_MS;
+}
+
+async function fetchThreadTweetById(
+  tweetId: string,
+  cookies: { csrfToken?: string; cookieHeader?: string },
+): Promise<{ tweet: ThreadTweetSnapshot | null; status: TweetFetchResult['status'] }> {
+  if (cookies.csrfToken) {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      let response: Response;
+      try {
+        response = await fetch(buildTweetResultByRestIdUrl(tweetId), {
+          headers: buildHeaders(cookies.csrfToken, cookies.cookieHeader),
+        });
+      } catch {
+        await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+        continue;
+      }
+
+      if (response.ok) {
+        const json = await response.json();
+        const result = json?.data?.tweetResult?.result;
+        const typename = result?.__typename;
+        if (!result || typename === 'TweetTombstone' || typename === 'TweetUnavailable') {
+          return { tweet: null, status: 'not_found' };
+        }
+        const tweet = parseThreadTweetResultByRestId(json, tweetId);
+        return { tweet, status: tweet ? 'ok' : 'empty' };
+      }
+
+      if (response.status === 429) {
+        await new Promise((r) => setTimeout(r, Math.min(15 * Math.pow(2, attempt), 120) * 1000));
+        continue;
+      }
+      if (response.status >= 500) {
+        await new Promise((r) => setTimeout(r, 5000 * (attempt + 1)));
+        continue;
+      }
+      if (response.status === 404) return { tweet: null, status: 'not_found' };
+      if (response.status === 401 || response.status === 403) break;
+      return { tweet: null, status: 'error' };
+    }
+  }
+  return fetchThreadTweetViaSyndication(tweetId);
+}
+
+async function expandThreadForRecord(
+  record: BookmarkRecord,
+  cookies: { csrfToken?: string; cookieHeader?: string },
+  delayMs: number,
+): Promise<{ context: ThreadTweetSnapshot[]; below: ThreadTweetSnapshot[]; status: TweetFetchResult['status'] }> {
+  const context: ThreadTweetSnapshot[] = [];
+  let nextParentId = record.inReplyToStatusId;
+  const seenParents = new Set<string>();
+
+  while (nextParentId && !seenParents.has(nextParentId) && context.length < 25) {
+    seenParents.add(nextParentId);
+    const parent = await fetchThreadTweetById(nextParentId, cookies);
+    if (!parent.tweet) {
+      if (parent.status === 'not_found' || parent.status === 'forbidden' || parent.status === 'empty') break;
+      return { context, below: [], status: parent.status };
+    }
+    context.unshift(parent.tweet);
+    nextParentId = parent.tweet.inReplyToStatusId;
+    if (nextParentId) await new Promise((r) => setTimeout(r, delayMs));
+  }
+
+  let below: ThreadTweetSnapshot[] = [];
+  if (cookies.csrfToken) {
+    const detail = await fetchTweetDetailViaGraphQL(record.tweetId, cookies.csrfToken, cookies.cookieHeader, { delayMs });
+    if (detail.status !== 'ok') return { context, below: [], status: detail.status };
+    below = extractSameAuthorThreadBelow(detail.tweets, record.tweetId, record.authorHandle);
+  }
+
+  return { context, below, status: 'ok' };
+}
+
+export async function syncThreads(options: SyncThreadsOptions = {}): Promise<ThreadSyncResult> {
+  const delayMs = options.delayMs ?? 300;
+  const cachePath = twitterBookmarksCachePath();
+  const loaded = sanitizeRecords(await readJsonLines<BookmarkRecord>(cachePath));
+  const records = loaded.records;
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  const candidates = records.filter((record) => shouldSyncThread(record, nowMs));
+  const total = candidates.length;
+
+  if (total === 0) {
+    return {
+      contextFilled: 0,
+      belowFilled: 0,
+      emptyChecked: 0,
+      failed: 0,
+      failures: [],
+      total: 0,
+    };
+  }
+
+  const cookies = options.threadFetcher ? {} : resolveGapFillCookies({
+    browser: options.browser,
+    chromeUserDataDir: options.chromeUserDataDir,
+    chromeProfileDirectory: options.chromeProfileDirectory,
+    firefoxProfileDir: options.firefoxProfileDir,
+    csrfToken: options.csrfToken,
+    cookieHeader: options.cookieHeader,
+  });
+  if (!options.threadFetcher && !cookies.csrfToken) {
+    throw new Error('Thread sync requires X browser cookies with ct0/auth_token; pass --cookies or a browser profile.');
+  }
+  const fetcher: ThreadExpansionFetcher = options.threadFetcher
+    ?? ((record) => expandThreadForRecord(record, cookies, delayMs));
+
+  let contextFilled = 0;
+  let belowFilled = 0;
+  let emptyChecked = 0;
+  let failed = 0;
+  const failures: ThreadSyncFailure[] = [];
+  const dbUpdates: Array<{
+    id: string;
+    threadContext?: ThreadTweetSnapshot[];
+    threadBelow?: ThreadTweetSnapshot[];
+    threadExpandedAt?: string;
+    threadExpansionFailedAt?: string;
+  }> = [];
+  const persistProgress = async (): Promise<void> => {
+    await writeJsonLines(cachePath, records);
+    if (dbUpdates.length > 0) {
+      await updateThreadData(dbUpdates);
+      dbUpdates.length = 0;
+    }
+  };
+
+  for (let i = 0; i < candidates.length; i++) {
+    const record = candidates[i];
+    let status: TweetFetchResult['status'] = 'error';
+    let transientFailurePersisted = false;
+    try {
+      const expanded = await fetcher(record);
+      status = expanded.status;
+      if (expanded.status === 'ok') {
+        record.threadContext = expanded.context;
+        record.threadBelow = expanded.below;
+        record.threadExpandedAt = now;
+        delete record.threadExpansionFailedAt;
+        if (expanded.context.length > 0) contextFilled++;
+        if (expanded.below.length > 0) belowFilled++;
+        if (expanded.context.length === 0 && expanded.below.length === 0) emptyChecked++;
+        dbUpdates.push({
+          id: record.id,
+          threadContext: record.threadContext,
+          threadBelow: record.threadBelow,
+          threadExpandedAt: record.threadExpandedAt,
+        });
+      } else {
+        failed++;
+        const reason = GAP_FILL_FAILURE_REASONS[expanded.status] ?? expanded.status;
+        failures.push({
+          tweetId: record.tweetId,
+          reason,
+          url: record.url,
+        });
+        if (THREAD_TRANSIENT_FAILURE_STATUSES.has(expanded.status)) {
+          await persistProgress();
+          transientFailurePersisted = true;
+          if (expanded.status === 'rate_limited') {
+            throw new RateLimitError('Thread sync stopped by X rate limiting. Resume on a later run.');
+          }
+          throw new Error(`Thread sync stopped on transient X failure: ${reason}`);
+        }
+      }
+    } catch (err) {
+      if (THREAD_TRANSIENT_FAILURE_STATUSES.has(status)) {
+        if (!transientFailurePersisted) await persistProgress();
+        throw err;
+      }
+      failed++;
+      failures.push({
+        tweetId: record.tweetId,
+        reason: (err as Error).message ?? 'unknown error',
+        url: record.url,
+      });
+      await persistProgress();
+      throw err;
+    }
+
+    const isPermanentFailure = status === 'not_found' || status === 'forbidden' || status === 'empty';
+    if (isPermanentFailure) {
+      record.threadExpansionFailedAt = now;
+      dbUpdates.push({
+        id: record.id,
+        threadContext: record.threadContext,
+        threadBelow: record.threadBelow,
+        threadExpandedAt: record.threadExpandedAt,
+        threadExpansionFailedAt: record.threadExpansionFailedAt,
+      });
+    }
+
+    options.onProgress?.({
+      done: i + 1,
+      total,
+      contextFilled,
+      belowFilled,
+      emptyChecked,
+      failed,
+    });
+
+    if ((i + 1) % 25 === 0) await persistProgress();
+    if (i < candidates.length - 1) await new Promise((r) => setTimeout(r, delayMs));
+  }
+
+  await persistProgress();
+
+  return {
+    contextFilled,
+    belowFilled,
+    emptyChecked,
+    failed,
+    failures,
+    total,
+  };
+}
 
 export interface GapFillProgress {
   done: number;

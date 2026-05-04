@@ -3,11 +3,11 @@ import { openDb, saveDb } from './db.js';
 import { parseTimestampMs, toIsoDate } from './date-utils.js';
 import { readJsonLines } from './fs.js';
 import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js';
-import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
+import type { BookmarkRecord, QuotedTweetSnapshot, ThreadTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 export interface SearchResult {
   id: string;
@@ -51,6 +51,10 @@ export interface BookmarkTimelineItem {
   enrichedAt?: string | null;
   quotedStatusId?: string | null;
   quotedTweet?: QuotedTweetSnapshot | null;
+  threadContext: ThreadTweetSnapshot[];
+  threadBelow: ThreadTweetSnapshot[];
+  threadExpandedAt?: string | null;
+  threadExpansionFailedAt?: string | null;
   mediaCount: number;
   linkCount: number;
   likeCount?: number | null;
@@ -101,6 +105,21 @@ function parseQuotedTweet(value: unknown): QuotedTweetSnapshot | null {
     return parsed as QuotedTweetSnapshot;
   } catch {
     return null;
+  }
+}
+
+function parseThreadTweets(value: unknown): ThreadTweetSnapshot[] {
+  if (typeof value !== 'string' || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value) as Array<Partial<ThreadTweetSnapshot>>;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is ThreadTweetSnapshot =>
+      typeof entry?.id === 'string' &&
+      typeof entry?.text === 'string' &&
+      typeof entry?.url === 'string'
+    );
+  } catch {
+    return [];
   }
 }
 
@@ -171,6 +190,10 @@ function mapTimelineRow(row: unknown[]): BookmarkTimelineItem {
     enrichedAt: (row[29] as string) ?? null,
     quotedStatusId: (row[30] as string) ?? null,
     quotedTweet: parseQuotedTweet(row[31]),
+    threadContext: parseThreadTweets(row[32]),
+    threadBelow: parseThreadTweets(row[33]),
+    threadExpandedAt: (row[34] as string) ?? null,
+    threadExpansionFailedAt: (row[35] as string) ?? null,
   };
 }
 
@@ -271,7 +294,11 @@ function initSchema(db: Database): void {
     article_site TEXT,
     enriched_at TEXT,
     folder_ids TEXT,
-    folder_names TEXT
+    folder_names TEXT,
+    thread_context_json TEXT,
+    thread_below_json TEXT,
+    thread_expanded_at TEXT,
+    thread_expansion_failed_at TEXT
   )`);
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_author ON bookmarks(author_handle)`);
@@ -345,6 +372,10 @@ function ensureMigrations(db: Database): void {
 
     ensureColumn(db, 'bookmarks', 'folder_ids', 'TEXT');
     ensureColumn(db, 'bookmarks', 'folder_names', 'TEXT');
+    ensureColumn(db, 'bookmarks', 'thread_context_json', 'TEXT');
+    ensureColumn(db, 'bookmarks', 'thread_below_json', 'TEXT');
+    ensureColumn(db, 'bookmarks', 'thread_expanded_at', 'TEXT');
+    ensureColumn(db, 'bookmarks', 'thread_expansion_failed_at', 'TEXT');
 
     // FTS rebuild: only if the FTS table is missing the article_text column.
     // Check via a zero-row SELECT so we don't rebuild unnecessarily.
@@ -375,10 +406,19 @@ interface PreservedBookmarkFields {
   enrichedAt: string | null;
   folderIds: string | null;
   folderNames: string | null;
+  threadContextJson: string | null;
+  threadBelowJson: string | null;
+  threadExpandedAt: string | null;
+  threadExpansionFailedAt: string | null;
 }
 
 function serializeJsonArray(values: string[] | undefined | null): string | null {
   if (!values || values.length === 0) return null;
+  return JSON.stringify(values);
+}
+
+function serializeThreadTweets(values: ThreadTweetSnapshot[] | undefined): string | null {
+  if (values === undefined) return null;
   return JSON.stringify(values);
 }
 
@@ -390,7 +430,7 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
   const githubUrls = [...new Set([...githubMatches.map((m) => `https://${m}`), ...githubFromLinks])];
 
   db.run(
-    `INSERT OR REPLACE INTO bookmarks VALUES (${Array(37).fill('?').join(',')})`,
+    `INSERT OR REPLACE INTO bookmarks VALUES (${Array(41).fill('?').join(',')})`,
     [
       r.id,
       r.tweetId,
@@ -429,6 +469,10 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
       preserved?.enrichedAt ?? null,
       serializeJsonArray(r.folderIds) ?? preserved?.folderIds ?? null,
       serializeJsonArray(r.folderNames) ?? preserved?.folderNames ?? null,
+      serializeThreadTweets(r.threadContext) ?? preserved?.threadContextJson ?? null,
+      serializeThreadTweets(r.threadBelow) ?? preserved?.threadBelowJson ?? null,
+      r.threadExpandedAt ?? preserved?.threadExpandedAt ?? null,
+      r.threadExpansionFailedAt ?? preserved?.threadExpansionFailedAt ?? null,
     ]
   );
 }
@@ -459,7 +503,8 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
       const rows = db.exec(
         `SELECT id, categories, primary_category, github_urls, domains, primary_domain,
                 quoted_tweet_json, article_title, article_text, article_site, enriched_at,
-                folder_ids, folder_names
+                folder_ids, folder_names, thread_context_json, thread_below_json,
+                thread_expanded_at, thread_expansion_failed_at
          FROM bookmarks`
       );
       for (const r of (rows[0]?.values ?? [])) {
@@ -476,6 +521,10 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
           enrichedAt: (r[10] as string) ?? null,
           folderIds: (r[11] as string) ?? null,
           folderNames: (r[12] as string) ?? null,
+          threadContextJson: (r[13] as string) ?? null,
+          threadBelowJson: (r[14] as string) ?? null,
+          threadExpandedAt: (r[15] as string) ?? null,
+          threadExpansionFailedAt: (r[16] as string) ?? null,
         });
       }
     } catch { /* table may be empty */ }
@@ -664,7 +713,11 @@ export async function listBookmarks(
         b.synced_at,
         b.enriched_at,
         b.quoted_status_id,
-        b.quoted_tweet_json
+        b.quoted_tweet_json,
+        b.thread_context_json,
+        b.thread_below_json,
+        b.thread_expanded_at,
+        b.thread_expansion_failed_at
       FROM bookmarks b
       ${where}
       ${bookmarkSortClause(filters.sort)}
@@ -732,7 +785,11 @@ export async function exportBookmarksForSyncSeed(): Promise<BookmarkRecord[]> {
         b.view_count,
         b.links_json,
         b.folder_ids,
-        b.folder_names
+        b.folder_names,
+        b.thread_context_json,
+        b.thread_below_json,
+        b.thread_expanded_at,
+        b.thread_expansion_failed_at
       FROM bookmarks b
       ${bookmarkSortClause('desc')}
     `;
@@ -765,6 +822,10 @@ export async function exportBookmarksForSyncSeed(): Promise<BookmarkRecord[]> {
       links: parseJsonArray(row[20]),
       folderIds: parseJsonArray(row[21]),
       folderNames: parseJsonArray(row[22]),
+      threadContext: parseThreadTweets(row[23]),
+      threadBelow: parseThreadTweets(row[24]),
+      threadExpandedAt: (row[25] as string) ?? undefined,
+      threadExpansionFailedAt: (row[26] as string) ?? undefined,
       tags: [],
       ingestedVia: 'graphql',
     }));
@@ -812,7 +873,11 @@ export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem 
         b.synced_at,
         b.enriched_at,
         b.quoted_status_id,
-        b.quoted_tweet_json
+        b.quoted_tweet_json,
+        b.thread_context_json,
+        b.thread_below_json,
+        b.thread_expanded_at,
+        b.thread_expansion_failed_at
       FROM bookmarks b
       WHERE b.id = ?
       LIMIT 1`,
@@ -1217,6 +1282,47 @@ export async function updateArticleContent(
     }
     stmt.free();
     db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
+    saveDb(db, dbPath);
+  } finally {
+    db.close();
+  }
+}
+
+export interface ThreadUpdate {
+  id: string;
+  threadContext?: ThreadTweetSnapshot[];
+  threadBelow?: ThreadTweetSnapshot[];
+  threadExpandedAt?: string;
+  threadExpansionFailedAt?: string;
+}
+
+export async function updateThreadData(records: ThreadUpdate[]): Promise<void> {
+  if (!records.length) return;
+  const dbPath = twitterBookmarksIndexPath();
+  const db = await openDb(dbPath);
+  ensureMigrations(db);
+
+  try {
+    const tableExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'");
+    if (tableExists.length === 0 || tableExists[0].values.length === 0) return;
+    const stmt = db.prepare(
+      `UPDATE bookmarks
+       SET thread_context_json = ?,
+           thread_below_json = ?,
+           thread_expanded_at = ?,
+           thread_expansion_failed_at = ?
+       WHERE id = ?`
+    );
+    for (const record of records) {
+      stmt.run([
+        record.threadContext === undefined ? null : JSON.stringify(record.threadContext),
+        record.threadBelow === undefined ? null : JSON.stringify(record.threadBelow),
+        record.threadExpandedAt ?? null,
+        record.threadExpansionFailedAt ?? null,
+        record.id,
+      ]);
+    }
+    stmt.free();
     saveDb(db, dbPath);
   } finally {
     db.close();

@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { ensureDir, pathExists, readJson, readJsonLines, writeJson } from './fs.js';
 import { bookmarkMediaDir, bookmarkMediaManifestPath, twitterBookmarksCachePath } from './paths.js';
-import type { BookmarkRecord } from './types.js';
+import type { BookmarkMediaObject, BookmarkRecord, ThreadTweetSnapshot } from './types.js';
 
 export const DEFAULT_MEDIA_MAX_BYTES = 200 * 1024 * 1024;
 
@@ -60,7 +60,7 @@ interface MediaTargetSource {
   authorName?: string;
   authorProfileImageUrl?: string;
   media?: string[];
-  mediaObjects?: BookmarkRecord['mediaObjects'];
+  mediaObjects?: BookmarkMediaObject[];
 }
 
 interface CachedMediaResult {
@@ -105,7 +105,10 @@ function hasTargets(source: { media?: unknown[]; mediaObjects?: unknown[]; autho
 }
 
 function hasMediaCandidate(bookmark: BookmarkRecord): boolean {
-  return hasTargets(bookmark) || hasTargets(bookmark.quotedTweet);
+  return hasTargets(bookmark)
+    || hasTargets(bookmark.quotedTweet)
+    || (bookmark.threadContext ?? []).some(hasTargets)
+    || (bookmark.threadBelow ?? []).some(hasTargets);
 }
 
 function pushTarget(
@@ -198,6 +201,21 @@ function resolveMediaTargets(
       mediaObjects: bookmark.quotedTweet.mediaObjects,
     }, downloadedProfileImageUrls, skipProfileImages);
   }
+
+  const appendThreadTweet = (tweet: ThreadTweetSnapshot): void => {
+    appendMediaTargets(targets, seenKeys, bookmark.id, {
+      tweetId: tweet.id,
+      tweetUrl: tweet.url,
+      authorHandle: tweet.authorHandle,
+      authorName: tweet.authorName,
+      authorProfileImageUrl: tweet.authorProfileImageUrl,
+      media: tweet.media,
+      mediaObjects: tweet.mediaObjects,
+    }, downloadedProfileImageUrls, skipProfileImages);
+  };
+
+  for (const tweet of bookmark.threadContext ?? []) appendThreadTweet(tweet);
+  for (const tweet of bookmark.threadBelow ?? []) appendThreadTweet(tweet);
 
   return targets;
 }

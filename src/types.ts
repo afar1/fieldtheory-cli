@@ -52,6 +52,31 @@ export interface QuotedTweetSnapshot {
   url: string;
 }
 
+export interface ThreadTweetSnapshot {
+  id: string;
+  text: string;
+  authorHandle?: string;
+  authorName?: string;
+  authorProfileImageUrl?: string;
+  postedAt?: string | null;
+  media?: string[];
+  mediaObjects?: BookmarkMediaObject[];
+  conversationId?: string;
+  inReplyToStatusId?: string;
+  /**
+   * How this tweet relates to the bookmarked tweet in X's conversation UI.
+   * `post-thread` means X presents it as the author's continuation of the
+   * focal post, not as the author's response inside someone else's reply branch.
+   */
+  threadRole?: 'post-thread';
+  conversationEntryId?: string;
+  conversationDisplayType?: string;
+  conversationSection?: string;
+  conversationRootId?: string;
+  conversationItemIndex?: number;
+  url: string;
+}
+
 export interface BookmarkRecord {
   id: string;
   tweetId: string;
@@ -100,6 +125,20 @@ export interface BookmarkRecord {
    * same dead tweet on every run.
    */
   quotedTweetFailedAt?: string;
+  /** Parent tweets above the bookmarked tweet, oldest first. */
+  threadContext?: ThreadTweetSnapshot[];
+  /** Same-author continuation tweets below the bookmarked tweet. */
+  threadBelow?: ThreadTweetSnapshot[];
+  /**
+   * Last time thread expansion checked this record. Empty thread arrays are a
+   * completed check, but recent tweets are rechecked for delayed self-replies.
+   */
+  threadExpandedAt?: string;
+  /**
+   * Set when thread expansion hit a permanent failure for the focal tweet,
+   * preventing repeated fetches for deleted or unavailable tweets.
+   */
+  threadExpansionFailedAt?: string;
 }
 
 export interface BookmarkFolder {
