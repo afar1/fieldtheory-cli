@@ -1774,7 +1774,36 @@ export async function fetchTweetDetailViaGraphQL(
   return { tweets: Array.from(byId.values()).sort(compareThreadTweetsChronologically), status: 'ok' };
 }
 
-async function fetchTweetViaSyndication(tweetId: string): Promise<TweetFetchResult> {
+function parseSyndicationThreadTweet(data: any, tweetId: string): ThreadTweetSnapshot | null {
+  if (!data?.text) return null;
+  const handle = data.user?.screen_name;
+  const mediaEntities: any[] = data.mediaDetails ?? [];
+  const urlEntities = syndicationUrlEntities(data);
+
+  return {
+    id: String(data.id_str ?? tweetId),
+    text: expandVisibleUrlEntities(data.text, urlEntities),
+    authorHandle: handle,
+    authorName: data.user?.name,
+    authorProfileImageUrl: data.user?.profile_image_url_https,
+    postedAt: data.created_at ?? null,
+    media: mediaEntities.map((m: any) => m.media_url_https ?? m.media_url).filter(Boolean),
+    mediaObjects: mediaEntities.map((m: any) => ({
+      type: m.type,
+      url: m.media_url_https ?? m.media_url,
+      width: m.original_info?.width,
+      height: m.original_info?.height,
+    })),
+    links: extractExpandedLinks(urlEntities),
+    conversationId: data.conversation_id_str,
+    inReplyToStatusId: data.in_reply_to_status_id_str,
+    url: `https://x.com/${handle ?? '_'}/status/${data.id_str ?? tweetId}`,
+  };
+}
+
+async function fetchSyndicationThreadTweet(
+  tweetId: string,
+): Promise<{ tweet: ThreadTweetSnapshot | null; status: TweetFetchResult['status']; httpStatus?: number }> {
   for (let attempt = 0; attempt < 4; attempt++) {
     const response = await fetch(`${SYNDICATION_URL}?id=${tweetId}&token=x`, {
       headers: {
@@ -1784,31 +1813,8 @@ async function fetchTweetViaSyndication(tweetId: string): Promise<TweetFetchResu
 
     if (response.ok) {
       const data = await response.json() as any;
-      if (!data?.text) return { snapshot: null, status: 'empty', source: 'syndication' };
-      const handle = data.user?.screen_name;
-      const mediaEntities: any[] = data.mediaDetails ?? [];
-      const urlEntities = syndicationUrlEntities(data);
-      return {
-        status: 'ok',
-        source: 'syndication',
-        snapshot: {
-          id: String(data.id_str ?? tweetId),
-          text: expandVisibleUrlEntities(data.text, urlEntities),
-          authorHandle: handle,
-          authorName: data.user?.name,
-          authorProfileImageUrl: data.user?.profile_image_url_https,
-          postedAt: data.created_at ?? null,
-          media: mediaEntities.map((m: any) => m.media_url_https ?? m.media_url).filter(Boolean),
-          mediaObjects: mediaEntities.map((m: any) => ({
-            type: m.type,
-            url: m.media_url_https ?? m.media_url,
-            width: m.original_info?.width,
-            height: m.original_info?.height,
-          })),
-          links: extractExpandedLinks(urlEntities),
-          url: `https://x.com/${handle ?? '_'}/status/${data.id_str ?? tweetId}`,
-        },
-      };
+      const tweet = parseSyndicationThreadTweet(data, tweetId);
+      return tweet ? { tweet, status: 'ok' } : { tweet: null, status: 'empty' };
     }
 
     if (response.status === 429) {
@@ -1821,60 +1827,23 @@ async function fetchTweetViaSyndication(tweetId: string): Promise<TweetFetchResu
     }
     // 404/403 — tweet unavailable, don't retry
     const status = response.status === 404 ? 'not_found' as const : 'forbidden' as const;
-    return { snapshot: null, status, httpStatus: response.status, source: 'syndication' };
+    return { tweet: null, status, httpStatus: response.status };
   }
-  return { snapshot: null, status: 'rate_limited', source: 'syndication' };
+  return { tweet: null, status: 'rate_limited' };
+}
+
+async function fetchTweetViaSyndication(tweetId: string): Promise<TweetFetchResult> {
+  const result = await fetchSyndicationThreadTweet(tweetId);
+  return {
+    snapshot: result.tweet,
+    status: result.status,
+    httpStatus: result.httpStatus,
+    source: 'syndication',
+  };
 }
 
 async function fetchThreadTweetViaSyndication(tweetId: string): Promise<{ tweet: ThreadTweetSnapshot | null; status: TweetFetchResult['status'] }> {
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const response = await fetch(`${SYNDICATION_URL}?id=${tweetId}&token=x`, {
-      headers: {
-        'user-agent': CHROME_UA,
-      },
-    });
-
-    if (response.ok) {
-      const data = await response.json() as any;
-      if (!data?.text) return { tweet: null, status: 'empty' };
-      const handle = data.user?.screen_name;
-      const mediaEntities: any[] = data.mediaDetails ?? [];
-      const urlEntities = syndicationUrlEntities(data);
-      return {
-        status: 'ok',
-        tweet: {
-          id: String(data.id_str ?? tweetId),
-          text: expandVisibleUrlEntities(data.text, urlEntities),
-          authorHandle: handle,
-          authorName: data.user?.name,
-          authorProfileImageUrl: data.user?.profile_image_url_https,
-          postedAt: data.created_at ?? null,
-          media: mediaEntities.map((m: any) => m.media_url_https ?? m.media_url).filter(Boolean),
-          mediaObjects: mediaEntities.map((m: any) => ({
-            type: m.type,
-            url: m.media_url_https ?? m.media_url,
-            width: m.original_info?.width,
-            height: m.original_info?.height,
-          })),
-          links: extractExpandedLinks(urlEntities),
-          conversationId: data.conversation_id_str,
-          inReplyToStatusId: data.in_reply_to_status_id_str,
-          url: `https://x.com/${handle ?? '_'}/status/${data.id_str ?? tweetId}`,
-        },
-      };
-    }
-
-    if (response.status === 429) {
-      await new Promise((r) => setTimeout(r, Math.min(15 * Math.pow(2, attempt), 120) * 1000));
-      continue;
-    }
-    if (response.status >= 500) {
-      await new Promise((r) => setTimeout(r, 5000 * (attempt + 1)));
-      continue;
-    }
-    return { tweet: null, status: response.status === 404 ? 'not_found' : 'forbidden' };
-  }
-  return { tweet: null, status: 'rate_limited' };
+  return fetchSyndicationThreadTweet(tweetId);
 }
 
 // Text >= 275 chars may be truncated by Twitter's legacy.full_text limit
