@@ -180,6 +180,61 @@ function parseBookmarkTimestamp(record: BookmarkRecord): number | null {
   return null;
 }
 
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function urlEntityKey(entity: any): string {
+  return String(entity?.url ?? entity?.expanded_url ?? entity?.expandedUrl ?? entity?.display_url ?? entity?.displayUrl ?? '');
+}
+
+function tweetUrlEntities(tweet: any, legacy: any): any[] {
+  const entities = [
+    ...(Array.isArray(legacy?.entities?.urls) ? legacy.entities.urls : []),
+    ...(Array.isArray(tweet?.note_tweet?.note_tweet_results?.result?.entity_set?.urls)
+      ? tweet.note_tweet.note_tweet_results.result.entity_set.urls
+      : []),
+  ];
+  const seen = new Set<string>();
+  return entities.filter((entity) => {
+    const key = urlEntityKey(entity);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function syndicationUrlEntities(data: any): any[] {
+  return Array.isArray(data?.entities?.urls) ? data.entities.urls : [];
+}
+
+function extractExpandedLinks(urlEntities: any[]): string[] {
+  return uniqueStrings(
+    urlEntities
+      .map((entity) => entity?.expanded_url ?? entity?.expandedUrl ?? entity?.url)
+      .filter((url): url is string => typeof url === 'string' && url.length > 0 && !url.includes('t.co/')),
+  );
+}
+
+function urlEntityReplacement(entity: any): string | undefined {
+  const expanded = entity?.expanded_url ?? entity?.expandedUrl;
+  if (typeof expanded === 'string' && expanded.length > 0 && !expanded.includes('t.co/')) return expanded;
+  const display = entity?.display_url ?? entity?.displayUrl;
+  if (typeof display === 'string' && display.length > 0 && !display.includes('t.co/')) return display;
+  return undefined;
+}
+
+function expandVisibleUrlEntities(text: string, urlEntities: any[]): string {
+  let expanded = text;
+  for (const entity of urlEntities) {
+    if (typeof entity?.url !== 'string') continue;
+    const replacement = urlEntityReplacement(entity);
+    if (!replacement) continue;
+    expanded = expanded.split(entity.url).join(replacement);
+  }
+  return expanded;
+}
+
 function compareBookmarkChronology(a: BookmarkRecord, b: BookmarkRecord): number {
   const aSortIndex = parseSnowflake(a.sortIndex);
   const bSortIndex = parseSnowflake(b.sortIndex);
@@ -295,10 +350,8 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
       : undefined,
   }));
 
-  const urlEntities = legacy?.entities?.urls ?? [];
-  const links: string[] = urlEntities
-    .map((u: any) => u.expanded_url)
-    .filter((u: string | undefined) => u && !u.includes('t.co'));
+  const urlEntities = tweetUrlEntities(tweet, legacy);
+  const links = extractExpandedLinks(urlEntities);
 
   // Extract quoted tweet if present
   const quotedResult = tweet?.quoted_status_result?.result;
@@ -311,10 +364,11 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
       const qtUser = qtTweet?.core?.user_results?.result;
       const qtHandle = qtUser?.core?.screen_name ?? qtUser?.legacy?.screen_name;
       const qtMediaEntities = qtLegacy?.extended_entities?.media ?? qtLegacy?.entities?.media ?? [];
+      const qtUrlEntities = tweetUrlEntities(qtTweet, qtLegacy);
       const qtNoteText = qtTweet?.note_tweet?.note_tweet_results?.result?.text;
       quotedTweet = {
         id: qtId,
-        text: qtNoteText ?? qtLegacy.full_text ?? qtLegacy.text ?? '',
+        text: expandVisibleUrlEntities(qtNoteText ?? qtLegacy.full_text ?? qtLegacy.text ?? '', qtUrlEntities),
         authorHandle: qtHandle,
         authorName: qtUser?.core?.name ?? qtUser?.legacy?.name,
         authorProfileImageUrl:
@@ -334,6 +388,7 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
                 .map((v: any) => ({ bitrate: v.bitrate, url: v.url }))
             : undefined,
         })),
+        links: extractExpandedLinks(qtUrlEntities),
         url: `https://x.com/${qtHandle ?? '_'}/status/${qtId}`,
       };
     }
@@ -341,12 +396,7 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
 
   // X Articles / long-form note tweets store full text separately
   const noteTweetText = tweet?.note_tweet?.note_tweet_results?.result?.text;
-  let text = noteTweetText ?? legacy.full_text ?? legacy.text ?? '';
-  for (const entity of urlEntities) {
-    if (typeof entity?.url === 'string' && typeof entity?.display_url === 'string') {
-      text = text.split(entity.url).join(entity.display_url);
-    }
-  }
+  const text = expandVisibleUrlEntities(noteTweetText ?? legacy.full_text ?? legacy.text ?? '', urlEntities);
 
   return {
     id: tweetId,
@@ -1506,8 +1556,9 @@ export function parseTweetResultByRestId(json: any, tweetId: string): QuotedTwee
   const legacy = tweet?.legacy;
   if (!legacy) return null;
 
+  const urlEntities = tweetUrlEntities(tweet, legacy);
   const noteText = tweet?.note_tweet?.note_tweet_results?.result?.text;
-  const text = noteText ?? legacy.full_text ?? legacy.text ?? '';
+  const text = expandVisibleUrlEntities(noteText ?? legacy.full_text ?? legacy.text ?? '', urlEntities);
   if (!text) return null;
 
   const userResult = tweet?.core?.user_results?.result;
@@ -1531,6 +1582,7 @@ export function parseTweetResultByRestId(json: any, tweetId: string): QuotedTwee
       width: m.original_info?.width,
       height: m.original_info?.height,
     })),
+    links: extractExpandedLinks(urlEntities),
     url: `https://x.com/${handle ?? '_'}/status/${resolvedId}`,
   };
 }
@@ -1544,8 +1596,9 @@ function parseThreadTweetResult(
   const legacy = tweet?.legacy;
   if (!legacy) return null;
 
+  const urlEntities = tweetUrlEntities(tweet, legacy);
   const noteText = tweet?.note_tweet?.note_tweet_results?.result?.text;
-  const text = noteText ?? legacy.full_text ?? legacy.text ?? '';
+  const text = expandVisibleUrlEntities(noteText ?? legacy.full_text ?? legacy.text ?? '', urlEntities);
   const resolvedId = String(legacy.id_str ?? tweet?.rest_id ?? fallbackId ?? '');
   if (!resolvedId || !text) return null;
 
@@ -1575,6 +1628,7 @@ function parseThreadTweetResult(
             .map((v: any) => ({ bitrate: v.bitrate, url: v.url }))
         : undefined,
     })),
+    links: extractExpandedLinks(urlEntities),
     conversationId: legacy.conversation_id_str,
     inReplyToStatusId: legacy.in_reply_to_status_id_str,
     ...metadata,
@@ -1922,12 +1976,13 @@ async function fetchTweetViaSyndication(tweetId: string): Promise<TweetFetchResu
       if (!data?.text) return { snapshot: null, status: 'empty', source: 'syndication' };
       const handle = data.user?.screen_name;
       const mediaEntities: any[] = data.mediaDetails ?? [];
+      const urlEntities = syndicationUrlEntities(data);
       return {
         status: 'ok',
         source: 'syndication',
         snapshot: {
           id: String(data.id_str ?? tweetId),
-          text: data.text,
+          text: expandVisibleUrlEntities(data.text, urlEntities),
           authorHandle: handle,
           authorName: data.user?.name,
           authorProfileImageUrl: data.user?.profile_image_url_https,
@@ -1939,6 +1994,7 @@ async function fetchTweetViaSyndication(tweetId: string): Promise<TweetFetchResu
             width: m.original_info?.width,
             height: m.original_info?.height,
           })),
+          links: extractExpandedLinks(urlEntities),
           url: `https://x.com/${handle ?? '_'}/status/${data.id_str ?? tweetId}`,
         },
       };
@@ -1972,11 +2028,12 @@ async function fetchThreadTweetViaSyndication(tweetId: string): Promise<{ tweet:
       if (!data?.text) return { tweet: null, status: 'empty' };
       const handle = data.user?.screen_name;
       const mediaEntities: any[] = data.mediaDetails ?? [];
+      const urlEntities = syndicationUrlEntities(data);
       return {
         status: 'ok',
         tweet: {
           id: String(data.id_str ?? tweetId),
-          text: data.text,
+          text: expandVisibleUrlEntities(data.text, urlEntities),
           authorHandle: handle,
           authorName: data.user?.name,
           authorProfileImageUrl: data.user?.profile_image_url_https,
@@ -1988,6 +2045,7 @@ async function fetchThreadTweetViaSyndication(tweetId: string): Promise<{ tweet:
             width: m.original_info?.width,
             height: m.original_info?.height,
           })),
+          links: extractExpandedLinks(urlEntities),
           conversationId: data.conversation_id_str,
           inReplyToStatusId: data.in_reply_to_status_id_str,
           url: `https://x.com/${handle ?? '_'}/status/${data.id_str ?? tweetId}`,
@@ -2482,7 +2540,7 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
   let failed = 0;
   const failures: GapFillFailure[] = [];
   const dbQuotedUpdates: Array<{ id: string; quotedTweet: QuotedTweetSnapshot }> = [];
-  const dbTextUpdates: Array<{ id: string; text: string }> = [];
+  const dbTextUpdates: Array<{ id: string; text: string; links?: string[] }> = [];
   const articleDbUpdates: ArticleUpdate[] = [];
 
   // Fetch and apply incrementally
@@ -2543,10 +2601,13 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
     const graphqlSettled = resultSource === 'graphql' && snapshot != null;
     for (const record of recordsByTweetId.get(tweetId) ?? []) {
       const didExpand = snapshot != null && snapshot.text.length > (record.text?.length ?? 0);
-      if (didExpand) {
+      const mergedLinks = uniqueStrings([...(record.links ?? []), ...(snapshot?.links ?? [])]);
+      const didExpandLinks = mergedLinks.length > (record.links?.length ?? 0);
+      if (didExpand || didExpandLinks) {
         record.text = snapshot!.text;
-        dbTextUpdates.push({ id: record.id, text: snapshot!.text });
-        textExpanded++;
+        record.links = mergedLinks;
+        dbTextUpdates.push({ id: record.id, text: snapshot!.text, links: mergedLinks });
+        if (didExpand) textExpanded++;
       }
       if (didExpand || graphqlSettled || isPermanentFailure) {
         record.textExpandedAt = now;

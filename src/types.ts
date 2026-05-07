@@ -49,6 +49,7 @@ export interface QuotedTweetSnapshot {
   postedAt?: string | null;
   media?: string[];
   mediaObjects?: BookmarkMediaObject[];
+  links?: string[];
   url: string;
 }
 
@@ -61,6 +62,7 @@ export interface ThreadTweetSnapshot {
   postedAt?: string | null;
   media?: string[];
   mediaObjects?: BookmarkMediaObject[];
+  links?: string[];
   conversationId?: string;
   inReplyToStatusId?: string;
   /**

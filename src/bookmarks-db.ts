@@ -1237,18 +1237,31 @@ export async function updateQuotedTweets(
 }
 
 export async function updateBookmarkText(
-  records: Array<{ id: string; text: string }>,
+  records: Array<{ id: string; text: string; links?: string[] }>,
 ): Promise<void> {
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
   ensureMigrations(db);
 
   try {
-    const stmt = db.prepare('UPDATE bookmarks SET text = ? WHERE id = ?');
+    const textOnlyStmt = db.prepare('UPDATE bookmarks SET text = ? WHERE id = ?');
+    const textAndLinksStmt = db.prepare(
+      'UPDATE bookmarks SET text = ?, link_count = ?, links_json = ? WHERE id = ?'
+    );
     for (const record of records) {
-      stmt.run([record.text, record.id]);
+      if (record.links === undefined) {
+        textOnlyStmt.run([record.text, record.id]);
+      } else {
+        textAndLinksStmt.run([
+          record.text,
+          record.links.length,
+          record.links.length ? JSON.stringify(record.links) : null,
+          record.id,
+        ]);
+      }
     }
-    stmt.free();
+    textOnlyStmt.free();
+    textAndLinksStmt.free();
     // Rebuild FTS to reflect updated text
     db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
     saveDb(db, dbPath);

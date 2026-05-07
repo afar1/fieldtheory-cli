@@ -222,7 +222,7 @@ test('convertTweetToRecord: extracts links, filtering out t.co', () => {
   assert.equal(result.links![0], 'https://example.com/article');
 });
 
-test('convertTweetToRecord: expands t.co links in visible text using display_url', () => {
+test('convertTweetToRecord: expands t.co links in visible text using expanded_url', () => {
   const result = convertTweetToRecord(makeTweetResult({
     legacy: {
       full_text: 'Check this: https://t.co/abc and this: https://t.co/def',
@@ -235,7 +235,34 @@ test('convertTweetToRecord: expands t.co links in visible text using display_url
     },
   }), NOW)!;
 
-  assert.equal(result.text, 'Check this: example.com/foo and this: tools.exec.security');
+  assert.equal(result.text, 'Check this: https://example.com/article and this: https://tools.exec.security');
+  assert.deepEqual(result.links, ['https://example.com/article', 'https://tools.exec.security']);
+});
+
+test('convertTweetToRecord: extracts note_tweet entity_set links', () => {
+  const result = convertTweetToRecord(makeTweetResult({
+    legacy: {
+      full_text: 'Preview https://t.co/note',
+      entities: { urls: [] },
+    },
+    tweet: {
+      note_tweet: {
+        note_tweet_results: {
+          result: {
+            text: 'Full note body with a link: https://t.co/note',
+            entity_set: {
+              urls: [
+                { expanded_url: 'https://example.com/full-note', url: 'https://t.co/note', display_url: 'example.com/full-note' },
+              ],
+            },
+          },
+        },
+      },
+    },
+  }), NOW)!;
+
+  assert.equal(result.text, 'Full note body with a link: https://example.com/full-note');
+  assert.deepEqual(result.links, ['https://example.com/full-note']);
 });
 
 test('convertTweetToRecord: handles location as object', () => {
@@ -562,6 +589,25 @@ test('convertTweetToRecord: quoted tweet prefers note_tweet body over legacy ful
     result.quotedTweet!.text,
     'Full long-form quoted body that would be truncated in legacy.full_text',
   );
+});
+
+test('parseTweetDetailResponse: expands thread tweet t.co links and stores links', () => {
+  const reply = makeTweetResult({
+    legacy: {
+      id_str: '101',
+      full_text: 'Reply link below: https://t.co/reply',
+      entities: {
+        urls: [
+          { expanded_url: 'https://example.com/reply', url: 'https://t.co/reply', display_url: 'example.com/reply' },
+        ],
+      },
+    },
+  });
+  const parsed = parseTweetDetailResponse(makeTweetDetailResponse([reply]));
+
+  assert.equal(parsed.tweets.length, 1);
+  assert.equal(parsed.tweets[0].text, 'Reply link below: https://example.com/reply');
+  assert.deepEqual(parsed.tweets[0].links, ['https://example.com/reply']);
 });
 
 test('parseBookmarksResponse: captures full note_tweet body from live bookmarks-feed fixture', () => {
