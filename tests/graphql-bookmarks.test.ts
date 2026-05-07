@@ -932,6 +932,85 @@ test('syncThreads: writes parent context and same-author continuations to JSONL 
   }, [bookmark]);
 });
 
+test('syncThreads: empty TweetDetail preserves fetched parent context as a complete check', async () => {
+  const bookmark = makeRecord({
+    id: '100',
+    tweetId: '100',
+    url: 'https://x.com/testuser/status/100',
+    text: 'Launch post',
+    authorHandle: 'testuser',
+    postedAt: '2026-04-01T00:00:00.000Z',
+    inReplyToStatusId: '99',
+  });
+  const parent = makeTweetResult({
+    tweet: { rest_id: '99' },
+    legacy: {
+      id_str: '99',
+      full_text: 'Parent context from the original announcement',
+      conversation_id_str: '99',
+      in_reply_to_status_id_str: undefined,
+    },
+  });
+  const emptyDetail = {
+    data: {
+      threaded_conversation_with_injections_v2: {
+        instructions: [
+          { type: 'TimelineAddEntries', entries: [] },
+        ],
+      },
+    },
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    const originalFetch = globalThis.fetch;
+    let resultCalls = 0;
+    let detailCalls = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/TweetResultByRestId?')) {
+        resultCalls += 1;
+        return new Response(JSON.stringify({ data: { tweetResult: { result: parent } } }));
+      }
+      if (url.includes('/TweetDetail?')) {
+        detailCalls += 1;
+        return new Response(JSON.stringify(emptyDetail));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    try {
+      const result = await syncThreads({
+        csrfToken: 'ct0',
+        cookieHeader: 'ct0=ct0; auth_token=auth',
+        delayMs: 0,
+      });
+
+      assert.equal(result.contextFilled, 1);
+      assert.equal(result.belowFilled, 0);
+      assert.equal(result.emptyChecked, 0);
+      assert.equal(result.failed, 0);
+      assert.equal(resultCalls, 1);
+      assert.equal(detailCalls, 1);
+
+      const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+      const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+      assert.equal(stored.threadContext[0].text, 'Parent context from the original announcement');
+      assert.deepEqual(stored.threadBelow, []);
+      assert.ok(stored.threadExpandedAt);
+      assert.equal(stored.threadExpansionFailedAt, undefined);
+
+      const refreshed = await getBookmarkById('100');
+      assert.equal(refreshed?.threadContext[0]?.id, '99');
+      assert.deepEqual(refreshed?.threadBelow, []);
+      assert.ok(refreshed?.threadExpandedAt);
+      assert.equal(refreshed?.threadExpansionFailedAt, null);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }, [bookmark]);
+});
+
 test('syncThreads: rechecks recent empty threads but skips old checked empties', async () => {
   const recentChecked = makeRecord({
     id: '200',
@@ -1041,6 +1120,46 @@ test('syncThreads: transient failures abort without stamping permanent failure',
     assert.equal(storedSecond.threadExpansionFailedAt, undefined);
     assert.equal(calls, 2);
   }, [first, second]);
+});
+
+test('syncThreads: transient failure checkpoints partial thread data without stamping permanent failure', async () => {
+  const bookmark = makeRecord({
+    id: '700',
+    tweetId: '700',
+    url: 'https://x.com/testuser/status/700',
+    text: 'Rate limited after parent context',
+    authorHandle: 'testuser',
+  });
+  const parent = {
+    id: '699',
+    text: 'Fetched parent before rate limit',
+    authorHandle: 'testuser',
+    url: 'https://x.com/testuser/status/699',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    await assert.rejects(
+      () => syncThreads({
+        threadFetcher: async () => ({ context: [parent], below: [], status: 'rate_limited' }),
+        delayMs: 0,
+      }),
+      /rate limiting/,
+    );
+
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+    assert.equal(stored.threadContext[0].text, 'Fetched parent before rate limit');
+    assert.equal(stored.threadBelow, undefined);
+    assert.equal(stored.threadExpandedAt, undefined);
+    assert.equal(stored.threadExpansionFailedAt, undefined);
+
+    const refreshed = await getBookmarkById('700');
+    assert.equal(refreshed?.threadContext[0]?.id, '699');
+    assert.deepEqual(refreshed?.threadBelow, []);
+    assert.equal(refreshed?.threadExpandedAt, null);
+    assert.equal(refreshed?.threadExpansionFailedAt, null);
+  }, [bookmark]);
 });
 
 test('syncGaps: expands truncated note_tweet and stamps textExpandedAt', async () => {

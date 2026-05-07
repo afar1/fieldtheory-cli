@@ -1904,6 +1904,10 @@ const THREAD_TRANSIENT_FAILURE_STATUSES = new Set<TweetFetchResult['status']>([
   'error',
 ]);
 
+function isPermanentThreadFailure(status: TweetFetchResult['status'] | null): boolean {
+  return status === 'not_found' || status === 'forbidden' || status === 'empty';
+}
+
 export interface SyncThreadsOptions {
   onProgress?: (progress: ThreadSyncProgress) => void;
   delayMs?: number;
@@ -1995,6 +1999,7 @@ async function expandThreadForRecord(
   let below: ThreadTweetSnapshot[] = [];
   if (cookies.csrfToken) {
     const detail = await fetchTweetDetailViaGraphQL(record.tweetId, cookies.csrfToken, cookies.cookieHeader, { delayMs });
+    if (detail.status === 'empty') return { context, below: [], status: 'ok' };
     if (detail.status !== 'ok') return { context, below: [], status: detail.status };
     below = extractSameAuthorThreadBelow(detail.tweets, record.tweetId, record.authorHandle);
   }
@@ -2049,6 +2054,15 @@ export async function syncThreads(options: SyncThreadsOptions = {}): Promise<Thr
     threadExpandedAt?: string;
     threadExpansionFailedAt?: string;
   }> = [];
+  const queueThreadUpdate = (record: BookmarkRecord): void => {
+    dbUpdates.push({
+      id: record.id,
+      threadContext: record.threadContext,
+      threadBelow: record.threadBelow,
+      threadExpandedAt: record.threadExpandedAt,
+      threadExpansionFailedAt: record.threadExpansionFailedAt,
+    });
+  };
   const persistProgress = async (): Promise<void> => {
     await writeJsonLines(cachePath, records);
     if (dbUpdates.length > 0) {
@@ -2059,7 +2073,7 @@ export async function syncThreads(options: SyncThreadsOptions = {}): Promise<Thr
 
   for (let i = 0; i < candidates.length; i++) {
     const record = candidates[i];
-    let status: TweetFetchResult['status'] = 'error';
+    let status: TweetFetchResult['status'] | null = null;
     let transientFailurePersisted = false;
     try {
       const expanded = await fetcher(record);
@@ -2072,13 +2086,19 @@ export async function syncThreads(options: SyncThreadsOptions = {}): Promise<Thr
         if (expanded.context.length > 0) contextFilled++;
         if (expanded.below.length > 0) belowFilled++;
         if (expanded.context.length === 0 && expanded.below.length === 0) emptyChecked++;
-        dbUpdates.push({
-          id: record.id,
-          threadContext: record.threadContext,
-          threadBelow: record.threadBelow,
-          threadExpandedAt: record.threadExpandedAt,
-        });
+        queueThreadUpdate(record);
       } else {
+        const hasPartialSnapshots = expanded.context.length > 0 || expanded.below.length > 0;
+        if (hasPartialSnapshots) {
+          if (expanded.context.length > 0) {
+            record.threadContext = expanded.context;
+            contextFilled++;
+          }
+          if (expanded.below.length > 0) {
+            record.threadBelow = expanded.below;
+            belowFilled++;
+          }
+        }
         failed++;
         const reason = GAP_FILL_FAILURE_REASONS[expanded.status] ?? expanded.status;
         failures.push({
@@ -2087,6 +2107,7 @@ export async function syncThreads(options: SyncThreadsOptions = {}): Promise<Thr
           url: record.url,
         });
         if (THREAD_TRANSIENT_FAILURE_STATUSES.has(expanded.status)) {
+          if (hasPartialSnapshots) queueThreadUpdate(record);
           await persistProgress();
           transientFailurePersisted = true;
           if (expanded.status === 'rate_limited') {
@@ -2096,30 +2117,17 @@ export async function syncThreads(options: SyncThreadsOptions = {}): Promise<Thr
         }
       }
     } catch (err) {
-      if (THREAD_TRANSIENT_FAILURE_STATUSES.has(status)) {
+      if (status == null || THREAD_TRANSIENT_FAILURE_STATUSES.has(status)) {
         if (!transientFailurePersisted) await persistProgress();
         throw err;
       }
-      failed++;
-      failures.push({
-        tweetId: record.tweetId,
-        reason: (err as Error).message ?? 'unknown error',
-        url: record.url,
-      });
       await persistProgress();
       throw err;
     }
 
-    const isPermanentFailure = status === 'not_found' || status === 'forbidden' || status === 'empty';
-    if (isPermanentFailure) {
+    if (isPermanentThreadFailure(status)) {
       record.threadExpansionFailedAt = now;
-      dbUpdates.push({
-        id: record.id,
-        threadContext: record.threadContext,
-        threadBelow: record.threadBelow,
-        threadExpandedAt: record.threadExpandedAt,
-        threadExpansionFailedAt: record.threadExpansionFailedAt,
-      });
+      queueThreadUpdate(record);
     }
 
     options.onProgress?.({
