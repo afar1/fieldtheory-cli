@@ -850,19 +850,26 @@ export function buildCli() {
             parts.push(`${elapsed}s`);
             return parts.join(' \u2502 ');
           });
-          const result = await runWithSpinner(spinner, () => syncThreads({
-            delayMs: Number(options.delayMs) || 300,
-            browser: options.browser ? String(options.browser) : undefined,
-            chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
-            chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
-            firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
-            csrfToken: cookieArgs.csrfToken,
-            cookieHeader: cookieArgs.cookieHeader,
-            onProgress: (progress: ThreadSyncProgress) => {
-              lastProgress = progress;
-              spinner.update();
-            },
-          }));
+          let result;
+          try {
+            result = await runWithSpinner(spinner, () => syncThreads({
+              delayMs: Number(options.delayMs) || 300,
+              browser: options.browser ? String(options.browser) : undefined,
+              chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+              chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+              firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+              csrfToken: cookieArgs.csrfToken,
+              cookieHeader: cookieArgs.cookieHeader,
+              onProgress: (progress: ThreadSyncProgress) => {
+                lastProgress = progress;
+                spinner.update();
+              },
+            }));
+          } catch (err) {
+            console.error(`\n  Thread sync paused: ${(err as Error).message}`);
+            console.error('  Partial progress was saved. Re-run `ft sync --threads` later to resume.\n');
+            return;
+          }
           if (result.total === 0) {
             console.log('  No thread gaps found.');
           } else {

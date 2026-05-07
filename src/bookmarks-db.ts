@@ -7,7 +7,7 @@ import type { BookmarkRecord, QuotedTweetSnapshot, ThreadTweetSnapshot } from '.
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 export interface SearchResult {
   id: string;
@@ -298,7 +298,8 @@ function initSchema(db: Database): void {
     thread_context_json TEXT,
     thread_below_json TEXT,
     thread_expanded_at TEXT,
-    thread_expansion_failed_at TEXT
+    thread_expansion_failed_at TEXT,
+    thread_text TEXT
   )`);
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_author ON bookmarks(author_handle)`);
@@ -312,6 +313,7 @@ function initSchema(db: Database): void {
     author_handle,
     author_name,
     article_text,
+    thread_text,
     content=bookmarks,
     content_rowid=rowid,
     tokenize='porter unicode61'
@@ -342,6 +344,46 @@ function ftsHasColumn(db: Database, column: string): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+function buildThreadSearchText(context: ThreadTweetSnapshot[] = [], below: ThreadTweetSnapshot[] = []): string | null {
+  const parts: string[] = [];
+  for (const tweet of [...context, ...below]) {
+    if (tweet.text) parts.push(tweet.text);
+    for (const link of tweet.links ?? []) parts.push(link);
+  }
+
+  const text = [...new Set(parts)]
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join('\n');
+  return text.length > 0 ? text : null;
+}
+
+function buildThreadSearchTextFromJson(contextJson: unknown, belowJson: unknown): string | null {
+  return buildThreadSearchText(parseThreadTweets(contextJson), parseThreadTweets(belowJson));
+}
+
+function backfillThreadSearchText(db: Database): void {
+  const rows = db.exec(
+    `SELECT id, thread_context_json, thread_below_json
+     FROM bookmarks
+     WHERE thread_text IS NULL OR thread_text = ''`
+  );
+  const values = rows[0]?.values ?? [];
+  if (values.length === 0) return;
+
+  const stmt = db.prepare('UPDATE bookmarks SET thread_text = ? WHERE id = ?');
+  try {
+    for (const row of values) {
+      stmt.run([
+        buildThreadSearchTextFromJson(row[1], row[2]),
+        row[0],
+      ]);
+    }
+  } finally {
+    stmt.free();
   }
 }
 
@@ -376,13 +418,19 @@ function ensureMigrations(db: Database): void {
     ensureColumn(db, 'bookmarks', 'thread_below_json', 'TEXT');
     ensureColumn(db, 'bookmarks', 'thread_expanded_at', 'TEXT');
     ensureColumn(db, 'bookmarks', 'thread_expansion_failed_at', 'TEXT');
+    const hadThreadText = columnExists(db, 'bookmarks', 'thread_text');
+    ensureColumn(db, 'bookmarks', 'thread_text', 'TEXT');
 
-    // FTS rebuild: only if the FTS table is missing the article_text column.
+    // FTS rebuild: only if the FTS table is missing an indexed content column.
     // Check via a zero-row SELECT so we don't rebuild unnecessarily.
-    if (!ftsHasColumn(db, 'article_text')) {
+    const ftsNeedsRebuild = !ftsHasColumn(db, 'article_text') || !ftsHasColumn(db, 'thread_text');
+    if (!hadThreadText || ftsNeedsRebuild) {
+      backfillThreadSearchText(db);
+    }
+    if (ftsNeedsRebuild) {
       db.run('DROP TABLE IF EXISTS bookmarks_fts');
       db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
-        text, author_handle, author_name, article_text,
+        text, author_handle, author_name, article_text, thread_text,
         content=bookmarks, content_rowid=rowid,
         tokenize='porter unicode61'
       )`);
@@ -410,6 +458,7 @@ interface PreservedBookmarkFields {
   threadBelowJson: string | null;
   threadExpandedAt: string | null;
   threadExpansionFailedAt: string | null;
+  threadText: string | null;
 }
 
 function serializeJsonArray(values: string[] | undefined | null): string | null {
@@ -422,6 +471,14 @@ function serializeThreadTweets(values: ThreadTweetSnapshot[] | undefined): strin
   return JSON.stringify(values);
 }
 
+function recordThreadSearchText(r: BookmarkRecord, preserved?: PreservedBookmarkFields): string | null {
+  if (r.threadContext !== undefined || r.threadBelow !== undefined) {
+    return buildThreadSearchText(r.threadContext ?? [], r.threadBelow ?? []);
+  }
+  return preserved?.threadText
+    ?? buildThreadSearchTextFromJson(preserved?.threadContextJson, preserved?.threadBelowJson);
+}
+
 function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBookmarkFields): void {
   // Extract GitHub URLs (kept inline — no LLM needed for URL parsing)
   const text = r.text ?? '';
@@ -430,7 +487,7 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
   const githubUrls = [...new Set([...githubMatches.map((m) => `https://${m}`), ...githubFromLinks])];
 
   db.run(
-    `INSERT OR REPLACE INTO bookmarks VALUES (${Array(41).fill('?').join(',')})`,
+    `INSERT OR REPLACE INTO bookmarks VALUES (${Array(42).fill('?').join(',')})`,
     [
       r.id,
       r.tweetId,
@@ -473,6 +530,7 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
       serializeThreadTweets(r.threadBelow) ?? preserved?.threadBelowJson ?? null,
       r.threadExpandedAt ?? preserved?.threadExpandedAt ?? null,
       r.threadExpansionFailedAt ?? preserved?.threadExpansionFailedAt ?? null,
+      recordThreadSearchText(r, preserved),
     ]
   );
 }
@@ -504,7 +562,7 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
         `SELECT id, categories, primary_category, github_urls, domains, primary_domain,
                 quoted_tweet_json, article_title, article_text, article_site, enriched_at,
                 folder_ids, folder_names, thread_context_json, thread_below_json,
-                thread_expanded_at, thread_expansion_failed_at
+                thread_expanded_at, thread_expansion_failed_at, thread_text
          FROM bookmarks`
       );
       for (const r of (rows[0]?.values ?? [])) {
@@ -525,6 +583,7 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
           threadBelowJson: (r[14] as string) ?? null,
           threadExpandedAt: (r[15] as string) ?? null,
           threadExpansionFailedAt: (r[16] as string) ?? null,
+          threadText: (r[17] as string) ?? null,
         });
       }
     } catch { /* table may be empty */ }
@@ -616,7 +675,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
 
     // If we have an FTS query, use bm25 for ranking; otherwise sort by posted_at
     const orderBy = options.query
-      ? `ORDER BY bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0) ASC`
+      ? `ORDER BY bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0, 2.0) ASC`
       : `ORDER BY b.posted_at DESC`;
 
     // For FTS ranking we need to join with the FTS table for bm25
@@ -624,7 +683,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
     if (options.query) {
       sql = `
         SELECT b.id, b.url, b.text, b.author_handle, b.author_name, b.posted_at,
-               bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0) as score
+               bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0, 2.0) as score
         FROM bookmarks b
         JOIN bookmarks_fts ON bookmarks_fts.rowid = b.rowid
         ${where}
@@ -1323,7 +1382,8 @@ export async function updateThreadData(records: ThreadUpdate[]): Promise<void> {
        SET thread_context_json = ?,
            thread_below_json = ?,
            thread_expanded_at = ?,
-           thread_expansion_failed_at = ?
+           thread_expansion_failed_at = ?,
+           thread_text = ?
        WHERE id = ?`
     );
     for (const record of records) {
@@ -1332,10 +1392,12 @@ export async function updateThreadData(records: ThreadUpdate[]): Promise<void> {
         record.threadBelow === undefined ? null : JSON.stringify(record.threadBelow),
         record.threadExpandedAt ?? null,
         record.threadExpansionFailedAt ?? null,
+        buildThreadSearchText(record.threadContext ?? [], record.threadBelow ?? []),
         record.id,
       ]);
     }
     stmt.free();
+    db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
     saveDb(db, dbPath);
   } finally {
     db.close();

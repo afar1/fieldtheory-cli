@@ -9,6 +9,24 @@ import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText, upd
 import type { ArticleUpdate } from './bookmarks-db.js';
 import { fetchArticle, resolveTcoLink } from './bookmark-enrich.js';
 import type { ArticleContent } from './bookmark-enrich.js';
+import {
+  compareThreadTweetsChronologically,
+  expandVisibleUrlEntities,
+  extractExpandedLinks,
+  extractSameAuthorThreadBelow,
+  parseSnowflake,
+  parseThreadTweetResultByRestId,
+  parseTweetDetailResponse,
+  syndicationUrlEntities,
+  tweetUrlEntities,
+  uniqueStrings,
+} from './tweet-snapshots.js';
+
+export {
+  extractSameAuthorThreadBelow,
+  parseThreadTweetResultByRestId,
+  parseTweetDetailResponse,
+} from './tweet-snapshots.js';
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
 
@@ -127,15 +145,6 @@ export interface SyncResult {
   retryAfterSec?: number;
 }
 
-function parseSnowflake(value?: string | null): bigint | null {
-  if (!value || !/^\d+$/.test(value)) return null;
-  try {
-    return BigInt(value);
-  } catch {
-    return null;
-  }
-}
-
 const MAX_FUTURE_BOOKMARK_SKEW_MS = 5 * 60_000;
 
 export function sanitizeBookmarkedAt(record: BookmarkRecord): BookmarkRecord {
@@ -178,61 +187,6 @@ function parseBookmarkTimestamp(record: BookmarkRecord): number | null {
     if (parsed != null) return parsed;
   }
   return null;
-}
-
-function uniqueStrings(values: string[]): string[] {
-  return [...new Set(values)];
-}
-
-function urlEntityKey(entity: any): string {
-  return String(entity?.url ?? entity?.expanded_url ?? entity?.expandedUrl ?? entity?.display_url ?? entity?.displayUrl ?? '');
-}
-
-function tweetUrlEntities(tweet: any, legacy: any): any[] {
-  const entities = [
-    ...(Array.isArray(legacy?.entities?.urls) ? legacy.entities.urls : []),
-    ...(Array.isArray(tweet?.note_tweet?.note_tweet_results?.result?.entity_set?.urls)
-      ? tweet.note_tweet.note_tweet_results.result.entity_set.urls
-      : []),
-  ];
-  const seen = new Set<string>();
-  return entities.filter((entity) => {
-    const key = urlEntityKey(entity);
-    if (!key || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function syndicationUrlEntities(data: any): any[] {
-  return Array.isArray(data?.entities?.urls) ? data.entities.urls : [];
-}
-
-function extractExpandedLinks(urlEntities: any[]): string[] {
-  return uniqueStrings(
-    urlEntities
-      .map((entity) => entity?.expanded_url ?? entity?.expandedUrl ?? entity?.url)
-      .filter((url): url is string => typeof url === 'string' && url.length > 0 && !url.includes('t.co/')),
-  );
-}
-
-function urlEntityReplacement(entity: any): string | undefined {
-  const expanded = entity?.expanded_url ?? entity?.expandedUrl;
-  if (typeof expanded === 'string' && expanded.length > 0 && !expanded.includes('t.co/')) return expanded;
-  const display = entity?.display_url ?? entity?.displayUrl;
-  if (typeof display === 'string' && display.length > 0 && !display.includes('t.co/')) return display;
-  return undefined;
-}
-
-function expandVisibleUrlEntities(text: string, urlEntities: any[]): string {
-  let expanded = text;
-  for (const entity of urlEntities) {
-    if (typeof entity?.url !== 'string') continue;
-    const replacement = urlEntityReplacement(entity);
-    if (!replacement) continue;
-    expanded = expanded.split(entity.url).join(replacement);
-  }
-  return expanded;
 }
 
 function compareBookmarkChronology(a: BookmarkRecord, b: BookmarkRecord): number {
@@ -1587,61 +1541,6 @@ export function parseTweetResultByRestId(json: any, tweetId: string): QuotedTwee
   };
 }
 
-function parseThreadTweetResult(
-  value: any,
-  fallbackId?: string,
-  metadata: Partial<ThreadTweetSnapshot> = {},
-): ThreadTweetSnapshot | null {
-  const tweet = value?.tweet ?? value;
-  const legacy = tweet?.legacy;
-  if (!legacy) return null;
-
-  const urlEntities = tweetUrlEntities(tweet, legacy);
-  const noteText = tweet?.note_tweet?.note_tweet_results?.result?.text;
-  const text = expandVisibleUrlEntities(noteText ?? legacy.full_text ?? legacy.text ?? '', urlEntities);
-  const resolvedId = String(legacy.id_str ?? tweet?.rest_id ?? fallbackId ?? '');
-  if (!resolvedId || !text) return null;
-
-  const userResult = tweet?.core?.user_results?.result;
-  const handle = userResult?.core?.screen_name ?? userResult?.legacy?.screen_name;
-  const mediaEntities: any[] = legacy?.extended_entities?.media ?? legacy?.entities?.media ?? [];
-
-  return {
-    id: resolvedId,
-    text,
-    authorHandle: handle,
-    authorName: userResult?.core?.name ?? userResult?.legacy?.name,
-    authorProfileImageUrl:
-      userResult?.avatar?.image_url ?? userResult?.legacy?.profile_image_url_https,
-    postedAt: legacy.created_at ?? null,
-    media: mediaEntities.map((m: any) => m.media_url_https ?? m.media_url).filter(Boolean),
-    mediaObjects: mediaEntities.map((m: any) => ({
-      type: m.type,
-      url: m.media_url_https ?? m.media_url,
-      expandedUrl: m.expanded_url,
-      width: m.original_info?.width,
-      height: m.original_info?.height,
-      altText: m.ext_alt_text,
-      videoVariants: Array.isArray(m.video_info?.variants)
-        ? m.video_info.variants
-            .filter((v: any) => v.content_type === 'video/mp4')
-            .map((v: any) => ({ bitrate: v.bitrate, url: v.url }))
-        : undefined,
-    })),
-    links: extractExpandedLinks(urlEntities),
-    conversationId: legacy.conversation_id_str,
-    inReplyToStatusId: legacy.in_reply_to_status_id_str,
-    ...metadata,
-    url: `https://x.com/${handle ?? '_'}/status/${resolvedId}`,
-  };
-}
-
-export function parseThreadTweetResultByRestId(json: any, tweetId: string): ThreadTweetSnapshot | null {
-  const result = json?.data?.tweetResult?.result;
-  if (!result) return null;
-  return parseThreadTweetResult(result, tweetId);
-}
-
 function unwrapGraphqlResult(value: any): any {
   return value?.result?.tweet ?? value?.result ?? value?.tweet ?? value;
 }
@@ -1764,106 +1663,6 @@ function buildTweetDetailUrl(tweetId: string, cursor?: string): string {
   return `https://x.com/i/api/graphql/${TWEET_DETAIL_QUERY_ID}/${TWEET_DETAIL_OPERATION}?${params}`;
 }
 
-function compareTweetIdsChronologically(a: ThreadTweetSnapshot, b: ThreadTweetSnapshot): number {
-  const aId = parseSnowflake(a.id);
-  const bId = parseSnowflake(b.id);
-  if (aId != null && bId != null && aId !== bId) return aId < bId ? -1 : 1;
-  const aTime = parseTimestampMs(a.postedAt);
-  const bTime = parseTimestampMs(b.postedAt);
-  if (aTime != null && bTime != null && aTime !== bTime) return aTime - bTime;
-  return a.id.localeCompare(b.id);
-}
-
-function sameHandle(a?: string, b?: string): boolean {
-  if (!a || !b) return false;
-  return a.toLowerCase() === b.toLowerCase();
-}
-
-function conversationSection(content: any): string | undefined {
-  return content?.clientEventInfo?.details?.conversationDetails?.conversationSection;
-}
-
-function collectThreadEntries(entries: any[], out: ThreadTweetSnapshot[]): string | undefined {
-  let nextCursor: string | undefined;
-  for (const entry of entries) {
-    if (entry?.entryId?.startsWith('cursor-bottom')) {
-      nextCursor = entry?.content?.value;
-      continue;
-    }
-
-    const direct = entry?.content?.itemContent?.tweet_results?.result;
-    const directSnapshot = direct ? parseThreadTweetResult(direct) : null;
-    if (directSnapshot) out.push(directSnapshot);
-
-    const moduleItems = entry?.content?.items;
-    if (Array.isArray(moduleItems)) {
-      const moduleSnapshots: ThreadTweetSnapshot[] = [];
-      for (let index = 0; index < moduleItems.length; index++) {
-        const item = moduleItems[index];
-        const result = item?.item?.itemContent?.tweet_results?.result;
-        const snapshot = result ? parseThreadTweetResult(result, undefined, {
-          conversationEntryId: entry.entryId,
-          conversationDisplayType: entry?.content?.displayType,
-          conversationSection: conversationSection(entry.content),
-          conversationItemIndex: index,
-        }) : null;
-        if (snapshot) moduleSnapshots.push(snapshot);
-      }
-      const rootId = moduleSnapshots[0]?.id;
-      for (const snapshot of moduleSnapshots) {
-        if (rootId) snapshot.conversationRootId = rootId;
-        out.push(snapshot);
-      }
-    }
-  }
-  return nextCursor;
-}
-
-export function parseTweetDetailResponse(json: any): { tweets: ThreadTweetSnapshot[]; nextCursor?: string } {
-  const instructions = json?.data?.threaded_conversation_with_injections_v2?.instructions ?? [];
-  const tweets: ThreadTweetSnapshot[] = [];
-  let nextCursor: string | undefined;
-
-  for (const instruction of instructions) {
-    if (instruction?.type === 'TimelineAddEntries' && Array.isArray(instruction.entries)) {
-      nextCursor = collectThreadEntries(instruction.entries, tweets) ?? nextCursor;
-    }
-    if (instruction?.type === 'TimelinePinEntry' && instruction.entry) {
-      collectThreadEntries([instruction.entry], tweets);
-    }
-  }
-
-  const byId = new Map<string, ThreadTweetSnapshot>();
-  for (const tweet of tweets) {
-    if (!byId.has(tweet.id)) byId.set(tweet.id, tweet);
-  }
-  return { tweets: Array.from(byId.values()).sort(compareTweetIdsChronologically), nextCursor };
-}
-
-export function extractSameAuthorThreadBelow(
-  tweets: ThreadTweetSnapshot[],
-  focalTweetId: string,
-  focalAuthorHandle?: string,
-): ThreadTweetSnapshot[] {
-  const focal = tweets.find((tweet) => tweet.id === focalTweetId);
-  const authorHandle = focalAuthorHandle ?? focal?.authorHandle;
-  if (!authorHandle) return [];
-
-  const chainIds = new Set<string>([focalTweetId]);
-  const below: ThreadTweetSnapshot[] = [];
-  const sorted = tweets
-    .filter((tweet) => tweet.id !== focalTweetId && sameHandle(tweet.authorHandle, authorHandle))
-    .sort(compareTweetIdsChronologically);
-
-  for (const tweet of sorted) {
-    if (!tweet.inReplyToStatusId || !chainIds.has(tweet.inReplyToStatusId)) continue;
-    below.push({ ...tweet, threadRole: 'post-thread' });
-    chainIds.add(tweet.id);
-  }
-
-  return below;
-}
-
 export async function fetchTweetByIdViaGraphQL(
   tweetId: string,
   csrfToken: string,
@@ -1930,6 +1729,10 @@ export async function fetchTweetDetailViaGraphQL(
   const delayMs = options.delayMs ?? 300;
   const tweets: ThreadTweetSnapshot[] = [];
   let cursor: string | undefined;
+  let sawRecognizedTimeline = false;
+  let sawTweetResult = false;
+  let sawUnavailableTweet = false;
+  let sawUnparseableTweet = false;
 
   for (let page = 0; page < maxPages; page++) {
     let response: Response;
@@ -1949,6 +1752,10 @@ export async function fetchTweetDetailViaGraphQL(
 
     const json = await response.json();
     const parsed = parseTweetDetailResponse(json);
+    sawRecognizedTimeline = sawRecognizedTimeline || parsed.recognizedTimeline;
+    sawTweetResult = sawTweetResult || parsed.sawTweetResult;
+    sawUnavailableTweet = sawUnavailableTweet || parsed.sawUnavailableTweet;
+    sawUnparseableTweet = sawUnparseableTweet || parsed.sawUnparseableTweet;
     tweets.push(...parsed.tweets);
     if (!parsed.nextCursor || parsed.nextCursor === cursor) break;
     cursor = parsed.nextCursor;
@@ -1959,8 +1766,12 @@ export async function fetchTweetDetailViaGraphQL(
   for (const tweet of tweets) {
     if (!byId.has(tweet.id)) byId.set(tweet.id, tweet);
   }
-  if (byId.size === 0) return { tweets: [], status: 'error' };
-  return { tweets: Array.from(byId.values()).sort(compareTweetIdsChronologically), status: 'ok' };
+  if (byId.size === 0) {
+    if (sawUnavailableTweet && !sawUnparseableTweet) return { tweets: [], status: 'not_found' };
+    if (sawRecognizedTimeline && !sawTweetResult) return { tweets: [], status: 'empty' };
+    return { tweets: [], status: 'error' };
+  }
+  return { tweets: Array.from(byId.values()).sort(compareThreadTweetsChronologically), status: 'ok' };
 }
 
 async function fetchTweetViaSyndication(tweetId: string): Promise<TweetFetchResult> {

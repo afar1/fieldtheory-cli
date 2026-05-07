@@ -12,6 +12,7 @@ import {
   parseTweetArticleByRestId,
   parseTweetDetailResponse,
   parseTweetResultByRestId,
+  fetchTweetDetailViaGraphQL,
   sanitizeBookmarkedAt,
   scoreRecord,
   mergeBookmarkRecord,
@@ -24,7 +25,7 @@ import {
   syncThreads,
   extractSameAuthorThreadBelow,
 } from '../src/graphql-bookmarks.js';
-import { buildIndex, getBookmarkById } from '../src/bookmarks-db.js';
+import { buildIndex, getBookmarkById, searchBookmarks } from '../src/bookmarks-db.js';
 import { resolveFolder, formatFolderMirrorStats } from '../src/cli.js';
 import type { BookmarkFolder, BookmarkRecord } from '../src/types.js';
 
@@ -610,6 +611,63 @@ test('parseTweetDetailResponse: expands thread tweet t.co links and stores links
   assert.deepEqual(parsed.tweets[0].links, ['https://example.com/reply']);
 });
 
+test('fetchTweetDetailViaGraphQL: treats recognized empty timelines as permanent empty', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    data: {
+      threaded_conversation_with_injections_v2: {
+        instructions: [{ type: 'TimelineAddEntries', entries: [] }],
+      },
+    },
+  }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })) as typeof fetch;
+
+  try {
+    const result = await fetchTweetDetailViaGraphQL('100', 'ct0', 'ct0=ct0; auth_token=auth', { delayMs: 0 });
+    assert.equal(result.status, 'empty');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchTweetDetailViaGraphQL: keeps unparseable tweet timelines transient', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    data: {
+      threaded_conversation_with_injections_v2: {
+        instructions: [{
+          type: 'TimelineAddEntries',
+          entries: [{
+            entryId: 'tweet-100',
+            content: {
+              itemContent: {
+                tweet_results: {
+                  result: {
+                    __typename: 'Tweet',
+                    rest_id: '100',
+                  },
+                },
+              },
+            },
+          }],
+        }],
+      },
+    },
+  }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })) as typeof fetch;
+
+  try {
+    const result = await fetchTweetDetailViaGraphQL('100', 'ct0', 'ct0=ct0; auth_token=auth', { delayMs: 0 });
+    assert.equal(result.status, 'error');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('parseBookmarksResponse: captures full note_tweet body from live bookmarks-feed fixture', () => {
   const fixture = loadFixture('bookmark-feed-note-tweet.json');
   const { records } = parseBookmarksResponse(fixture, NOW);
@@ -868,6 +926,9 @@ test('syncThreads: writes parent context and same-author continuations to JSONL 
     const refreshed = await getBookmarkById('100');
     assert.equal(refreshed?.threadContext[0]?.id, '99');
     assert.equal(refreshed?.threadBelow[0]?.id, '101');
+
+    const searchResults = await searchBookmarks({ query: 'actual', limit: 10 });
+    assert.ok(searchResults.some((result) => result.id === '100'));
   }, [bookmark]);
 });
 
