@@ -415,8 +415,22 @@ export function extractFirefoxXCookies(profileDir?: string): ChromeCookieResult 
     );
   }
 
+  const validateCookie = (name: string, value: string): string => {
+    const cleaned = value.trim();
+    if (!cleaned || !/^[\x21-\x7E]+$/.test(cleaned)) {
+      throw new Error(
+        `Firefox ${name} cookie appears invalid.\n` +
+        'Try clearing Firefox cookies for x.com and logging in again.'
+      );
+    }
+    return cleaned;
+  };
+
+  const cleanCt0 = validateCookie('ct0', ct0);
+  const cleanAuthToken = validateCookie('auth_token', authToken);
+
   return {
-    cookieHeader: `ct0=${ct0}; auth_token=${authToken}`,
-    csrfToken: ct0,
+    cookieHeader: `ct0=${cleanCt0}; auth_token=${cleanAuthToken}`,
+    csrfToken: cleanCt0,
   };
 }
