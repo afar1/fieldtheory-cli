@@ -549,7 +549,7 @@ function buildHtml(): string {
   </div>
 
   <!-- ── DETAIL SLIDE-OVER ──────────────────────────────────────────────────── -->
-  <div x-show="detailOpen"
+  <div x-show="detailOpen && detail"
     class="fixed inset-0 z-50 flex"
     @keydown.escape.window="detailOpen = false">
 
@@ -1054,7 +1054,6 @@ function app() {
     },
 
     async deleteBookmark(id, tweetUrl) {
-      if (!confirm('Remove this bookmark from your local archive?')) return;
       try {
         const res = await fetch('/api/bookmarks/' + encodeURIComponent(id), { method: 'DELETE' });
         if (!res.ok) { console.error('Delete failed', await res.text()); return; }
