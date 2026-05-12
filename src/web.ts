@@ -1062,9 +1062,9 @@ function app() {
         return;
       }
       this.detailOpen = false;
+      await this.loadBookmarks();
       this.detail = null;
       if (tweetUrl) window.open(tweetUrl, '_blank', 'noopener,noreferrer');
-      await this.loadBookmarks();
     },
   };
 }
