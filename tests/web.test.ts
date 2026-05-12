@@ -495,3 +495,46 @@ test('GET / HTML includes media thumbnail strip in bookmark cards', async () => 
         assert.match(body, /b\.localMediaUrls/);
     });
 });
+
+// ── DELETE /api/bookmarks/:id ─────────────────────────────────────────────────
+
+test('DELETE /api/bookmarks/:id removes bookmark and returns url', async () => {
+    await withWebServer(FIXTURES, async (base) => {
+        const res = await fetch(`${base}/api/bookmarks/2`, { method: 'DELETE' });
+        assert.equal(res.status, 200);
+        const body = await res.json() as Record<string, unknown>;
+        assert.equal(body.deleted, true);
+        assert.ok(typeof body.url === 'string' && body.url.length > 0);
+    });
+});
+
+test('DELETE /api/bookmarks/:id makes record disappear from GET', async () => {
+    await withWebServer(FIXTURES, async (base) => {
+        await fetch(`${base}/api/bookmarks/2`, { method: 'DELETE' });
+        const res = await fetch(`${base}/api/bookmarks/2`);
+        assert.equal(res.status, 404);
+    });
+});
+
+test('DELETE /api/bookmarks/:id reduces bookmark count', async () => {
+    await withWebServer(FIXTURES, async (base) => {
+        const before = await fetch(`${base}/api/count`).then((r) => r.json()) as { count: number };
+        await fetch(`${base}/api/bookmarks/2`, { method: 'DELETE' });
+        const after = await fetch(`${base}/api/count`).then((r) => r.json()) as { count: number };
+        assert.equal(after.count, before.count - 1);
+    });
+});
+
+test('DELETE /api/bookmarks/:id returns 404 for unknown id', async () => {
+    await withWebServer(FIXTURES, async (base) => {
+        const res = await fetch(`${base}/api/bookmarks/nonexistent-id`, { method: 'DELETE' });
+        assert.equal(res.status, 404);
+    });
+});
+
+test('GET / HTML includes deleteBookmark function', async () => {
+    await withWebServer(FIXTURES, async (base) => {
+        const body = await fetch(`${base}/`).then((r) => r.text());
+        assert.match(body, /deleteBookmark/);
+    });
+});

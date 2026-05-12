@@ -1,7 +1,7 @@
 import type { Database } from 'sql.js';
 import { openDb, saveDb } from './db.js';
 import { parseTimestampMs, toIsoDate } from './date-utils.js';
-import { readJsonLines } from './fs.js';
+import { readJsonLines, writeJsonLines } from './fs.js';
 import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js';
 import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
@@ -873,6 +873,42 @@ export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem 
   } finally {
     db.close();
   }
+}
+
+/**
+ * Delete a bookmark by id from both the SQLite index and the JSONL cache.
+ * Returns the deleted bookmark's URL (for opening the tweet on Twitter) or
+ * null when no matching record was found.
+ */
+export async function deleteBookmark(id: string): Promise<{ url: string } | null> {
+  const dbPath = twitterBookmarksIndexPath();
+  const cachePath = twitterBookmarksCachePath();
+
+  const db = await openDb(dbPath);
+  ensureMigrations(db);
+
+  let url: string | null = null;
+  try {
+    const rows = db.exec('SELECT url FROM bookmarks WHERE id = ? LIMIT 1', [id]);
+    url = (rows[0]?.values?.[0]?.[0] as string) ?? null;
+    if (!url) return null;
+
+    db.run('DELETE FROM bookmarks WHERE id = ?', [id]);
+    // FTS5 content table is auto-updated via triggers set up in initSchema
+    db.run(`INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')`);
+    saveDb(db, dbPath);
+  } finally {
+    db.close();
+  }
+
+  // Remove from the JSONL cache so it won't re-appear on the next buildIndex
+  const records = await readJsonLines<{ id: string }>(cachePath);
+  const filtered = records.filter((r) => r.id !== id);
+  if (filtered.length !== records.length) {
+    await writeJsonLines(cachePath, filtered);
+  }
+
+  return { url };
 }
 
 export async function getStats(): Promise<{

@@ -9,6 +9,7 @@ import {
   countBookmarks,
   getBookmarkById,
   getFilterSuggestions,
+  deleteBookmark,
 } from './bookmarks-db.js';
 import { pathExists, readJson } from './fs.js';
 import { bookmarkMediaDir, bookmarkMediaManifestPath } from './paths.js';
@@ -682,6 +683,12 @@ function buildHtml(): string {
               View on X ↗
             </a>
 
+            <!-- Delete bookmark -->
+            <button @click="deleteBookmark(detail.id, detail.url)"
+              class="flex items-center justify-center gap-2 w-full py-2 bg-red-900/20 hover:bg-red-900/40 rounded-lg text-sm text-red-400 hover:text-red-300 transition-colors border border-red-900/30">
+              🗑 Delete from local archive &amp; open on X to unbookmark
+            </button>
+
           </div>
         </template>
       </div>
@@ -1045,6 +1052,21 @@ function app() {
         this.detailLoading = false;
       }
     },
+
+    async deleteBookmark(id, tweetUrl) {
+      if (!confirm('Remove this bookmark from your local archive?')) return;
+      try {
+        const res = await fetch('/api/bookmarks/' + encodeURIComponent(id), { method: 'DELETE' });
+        if (!res.ok) { console.error('Delete failed', await res.text()); return; }
+      } catch (e) {
+        console.error('Delete failed:', e);
+        return;
+      }
+      this.detailOpen = false;
+      this.detail = null;
+      if (tweetUrl) window.open(tweetUrl, '_blank', 'noopener,noreferrer');
+      await this.loadBookmarks();
+    },
   };
 }
 </script>
@@ -1061,6 +1083,23 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, mediaInd
   // Static HTML shell
   if (req.method === 'GET' && pathname === '/') {
     html(res, buildHtml());
+    return;
+  }
+
+  // DELETE /api/bookmarks/:id
+  if (req.method === 'DELETE') {
+    const deleteMatch = pathname.match(/^\/api\/bookmarks\/(.+)$/);
+    if (!deleteMatch) {
+      json(res, { error: 'not found' }, 404);
+      return;
+    }
+    const id = decodeURIComponent(deleteMatch[1]);
+    const deleted = await deleteBookmark(id);
+    if (!deleted) {
+      json(res, { error: 'not found' }, 404);
+      return;
+    }
+    json(res, { deleted: true, url: deleted.url });
     return;
   }
 
