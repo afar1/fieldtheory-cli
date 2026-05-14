@@ -1,8 +1,10 @@
 import type { Database } from 'sql.js';
 import { openDb, saveDb } from './db.js';
 import { parseTimestampMs, toIsoDate } from './date-utils.js';
-import { readJsonLines, writeJsonLines } from './fs.js';
-import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js';
+import { unlink } from 'node:fs/promises';
+import { readJsonLines, writeJsonLines, readJson, writeJson, pathExists } from './fs.js';
+import { twitterBookmarksCachePath, twitterBookmarksIndexPath, bookmarkMediaManifestPath } from './paths.js';
+import type { MediaFetchManifest } from './bookmark-media.js';
 import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
@@ -906,6 +908,20 @@ export async function deleteBookmark(id: string): Promise<{ url: string } | null
   const filtered = records.filter((r) => r.id !== id);
   if (filtered.length !== records.length) {
     await writeJsonLines(cachePath, filtered);
+  }
+
+  // Remove associated media files and manifest entries
+  const manifestPath = bookmarkMediaManifestPath();
+  if (await pathExists(manifestPath)) {
+    const manifest = await readJson<MediaFetchManifest>(manifestPath);
+    const toRemove = manifest.entries.filter((e) => e.bookmarkId === id);
+    for (const entry of toRemove) {
+      if (entry.localPath) {
+        await unlink(entry.localPath).catch(() => { /* already gone */ });
+      }
+    }
+    manifest.entries = manifest.entries.filter((e) => e.bookmarkId !== id);
+    await writeJson(manifestPath, manifest);
   }
 
   return { url };
