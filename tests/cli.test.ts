@@ -73,9 +73,9 @@ test('ft search, stats, and status expose --json', () => {
   }
 });
 
-test('ft paths, library, commands, app, and install command groups are registered', () => {
+test('ft paths, recent, library, commands, app, and install command groups are registered', () => {
   const program = buildCli();
-  for (const name of ['paths', 'library', 'commands', 'app', 'install']) {
+  for (const name of ['paths', 'recent', 'library', 'commands', 'app', 'install']) {
     assert.ok(program.commands.find((c: any) => c.name() === name), `${name} command should be registered`);
   }
 });

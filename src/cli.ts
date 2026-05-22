@@ -38,6 +38,7 @@ import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import { registerCompanionCommands } from './companion-cli.js';
 import { getPathReport } from './field-status.js';
+import { formatAgentContext, getAgentContext } from './agent-context.js';
 import {
   formatIdeasIntro,
   formatRunList,
@@ -423,7 +424,7 @@ function isInternalWorkerCommand(command: Command): boolean {
 function shouldSkipCommandChrome(command: Command): boolean {
   if (isInternalWorkerCommand(command)) return true;
   if (command.opts().json) return true;
-  if (command.name() === 'path' || command.name() === 'paths') return true;
+  if (command.name() === 'path' || command.name() === 'paths' || command.name() === 'recent') return true;
   if (command.name() === 'show' && command.parent?.name() === 'skill') return true;
   return false;
 }
@@ -1476,6 +1477,21 @@ export function buildCli() {
     .command('path')
     .description('Print the data directory path')
     .action(() => { console.log(dataDir()); });
+
+  program
+    .command('recent')
+    .description('Show the current repo files an agent can use for "that file" references')
+    .option('--repo <path>', 'Repo path to inspect (default: cwd)')
+    .option('--limit <n>', 'Number of recent files to show', (v: string) => Number(v), 10)
+    .option('--json', 'JSON output')
+    .action((options) => {
+      const context = getAgentContext(options.repo ?? process.cwd(), Number(options.limit) || 10);
+      if (options.json) {
+        printJson(context);
+        return;
+      }
+      process.stdout.write(formatAgentContext(context));
+    });
 
   registerCompanionCommands(program, safe);
 

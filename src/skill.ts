@@ -19,7 +19,7 @@ Field Theory has three main local surfaces:
 
 - bookmarks: raw synced X/Twitter bookmark data
 - library: readable markdown knowledge and authored notes
-- commands: portable markdown actions in \`~/.fieldtheory/commands\`
+- commands: portable markdown actions in \`~/.fieldtheory/library/Commands\`
 
 ## When to trigger
 
@@ -35,11 +35,12 @@ Field Theory has three main local surfaces:
 ## Search Workflow
 
 1. Check paths and status when setup matters: \`ft paths --json\`, \`ft status --json\`
-2. Search durable notes first when prior project knowledge matters: \`ft library search <query> --json\`
-3. Search bookmarks when reading history or saved X/Twitter posts matter: \`ft search <query> --json\`
-4. Inspect exact files or bookmarks with \`ft library show <path> --json\`, \`ft show <id> --json\`, or \`ft commands show <name> --json\`
-5. Create or update durable Library notes and portable commands only when the user asks for a saved artifact
-6. Open useful Library pages in the Mac app with \`ft library open <path>\`
+2. When the user says "that file" or "the recent file", inspect current repo recency with \`ft recent --json\`
+3. Search durable notes first when prior project knowledge matters: \`ft library search <query> --json\`
+4. Search bookmarks when reading history or saved X/Twitter posts matter: \`ft search <query> --json\`
+5. Inspect exact files or bookmarks with \`ft library show <path> --json\`, \`ft show <id> --json\`, or \`ft commands show <name> --json\`
+6. Create or update durable Library notes and portable commands only when the user asks for a saved artifact
+7. Open useful Library pages in the Mac app with \`ft library open <path>\`
 
 ## Possible Roadmap Workflow
 
@@ -86,6 +87,7 @@ If the user says "debate", use the existing \`ft possible\` pipeline as generate
 \`\`\`bash
 ft paths --json                # Canonical bookmarks, library, commands paths
 ft status --json               # Bookmark/classification status plus paths
+ft recent --json               # Current repo last-modified file and recent files for agent references
 
 ft search <query>              # Full-text BM25 search ("exact phrase", AND, OR, NOT)
 ft list --category <cat>       # tool, technique, research, opinion, launch, security, commerce
