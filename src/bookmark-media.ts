@@ -72,6 +72,9 @@ interface CachedMediaResult {
   fetchedAt: string;
 }
 
+const HOUR_MS = 60 * 60_000;
+const DAY_MS = 24 * HOUR_MS;
+
 function mediaEntryKey(tweetId: string, sourceUrl: string, isProfileImage: boolean): string {
   return isProfileImage ? `profile::${sourceUrl}` : `${tweetId}::${sourceUrl}`;
 }
@@ -202,26 +205,46 @@ function resolveMediaTargets(
   return targets;
 }
 
-function isCoveredEntry(entry: MediaFetchEntry, maxBytes: number): boolean {
+function failedEntryBackoffMs(entry: MediaFetchEntry): number {
+  if (entry.reason === 'HTTP 404' && entry.sourceUrl.includes('/profile_images/')) {
+    return 365 * DAY_MS;
+  }
+  if (entry.reason === 'HTTP 403' && (entry.sourceUrl.includes('video.twimg.com') || entry.sourceUrl.includes('/amplify_video/'))) {
+    return 30 * DAY_MS;
+  }
+  if (entry.reason === 'HTTP 404' && entry.sourceUrl.includes('pbs.twimg.com/media/')) {
+    return DAY_MS;
+  }
+  return HOUR_MS;
+}
+
+function isFailedEntryCovered(entry: MediaFetchEntry, nowMs: number): boolean {
+  const fetchedAtMs = new Date(entry.fetchedAt).getTime();
+  if (Number.isNaN(fetchedAtMs)) return false;
+  return nowMs - fetchedAtMs < failedEntryBackoffMs(entry);
+}
+
+function isCoveredEntry(entry: MediaFetchEntry, maxBytes: number, retryFailed: boolean, nowMs: number): boolean {
   if (entry.status === 'downloaded') return true;
+  if (entry.status === 'failed') return !retryFailed && isFailedEntryCovered(entry, nowMs);
   if (entry.status !== 'skipped_too_large') return false;
   return typeof entry.bytes === 'number' && !Number.isNaN(entry.bytes) && entry.bytes > maxBytes;
 }
 
-function buildCoveredAssetKeys(previous: MediaFetchManifest | null, maxBytes: number): Set<string> {
+function buildCoveredAssetKeys(previous: MediaFetchManifest | null, maxBytes: number, retryFailed: boolean, nowMs: number): Set<string> {
   return new Set(
     (previous?.entries ?? [])
       .filter((entry) => !entry.sourceUrl.includes('/profile_images/'))
-      .filter((entry) => isCoveredEntry(entry, maxBytes))
+      .filter((entry) => isCoveredEntry(entry, maxBytes, retryFailed, nowMs))
       .map((entry) => `${entry.tweetId}::${entry.sourceUrl}`),
   );
 }
 
-function buildCoveredProfileImageUrls(previous: MediaFetchManifest | null, maxBytes: number): Set<string> {
+function buildCoveredProfileImageUrls(previous: MediaFetchManifest | null, maxBytes: number, retryFailed: boolean, nowMs: number): Set<string> {
   return new Set(
     (previous?.entries ?? [])
       .filter((entry) => entry.sourceUrl.includes('/profile_images/'))
-      .filter((entry) => isCoveredEntry(entry, maxBytes))
+      .filter((entry) => isCoveredEntry(entry, maxBytes, retryFailed, nowMs))
       .map((entry) => entry.sourceUrl),
   );
 }
@@ -239,20 +262,22 @@ function hasPendingMediaTarget(
 }
 
 export async function fetchBookmarkMediaBatch(
-  options: { limit?: number; maxBytes?: number; skipProfileImages?: boolean; onProgress?: (progress: MediaFetchProgress) => void } = {}
+  options: { limit?: number; maxBytes?: number; skipProfileImages?: boolean; retryFailed?: boolean; signal?: AbortSignal; onProgress?: (progress: MediaFetchProgress) => void } = {}
 ): Promise<MediaFetchManifest> {
   const limit = typeof options.limit === 'number' && !Number.isNaN(options.limit)
     ? Math.max(0, options.limit)
     : Infinity;
   const maxBytes = options.maxBytes ?? DEFAULT_MEDIA_MAX_BYTES;
   const skipProfileImages = options.skipProfileImages ?? false;
+  const retryFailed = options.retryFailed ?? false;
+  const nowMs = Date.now();
   const mediaDir = bookmarkMediaDir();
   const manifestPath = bookmarkMediaManifestPath();
   await ensureDir(mediaDir);
 
   const previous = await loadManifest();
-  const coveredAssetKeys = buildCoveredAssetKeys(previous, maxBytes);
-  const coveredProfileImageUrls = buildCoveredProfileImageUrls(previous, maxBytes);
+  const coveredAssetKeys = buildCoveredAssetKeys(previous, maxBytes, retryFailed, nowMs);
+  const coveredProfileImageUrls = buildCoveredProfileImageUrls(previous, maxBytes, retryFailed, nowMs);
   const bookmarks = await readJsonLines<BookmarkRecord>(twitterBookmarksCachePath());
   const candidates = bookmarks
     .filter(hasMediaCandidate)
@@ -318,9 +343,11 @@ export async function fetchBookmarkMediaBatch(
   emitProgress();
 
   for (const bookmark of candidates) {
+    if (options.signal?.aborted) break;
     const mediaTargets = resolveMediaTargets(bookmark, coveredProfileImageUrls, skipProfileImages);
 
     for (const target of mediaTargets) {
+      if (options.signal?.aborted) break;
       const { bookmarkId, tweetId, tweetUrl, authorHandle, authorName, sourceUrl, isProfileImage } = target;
       const key = mediaEntryKey(tweetId, sourceUrl, isProfileImage);
       if (!isProfileImage && coveredAssetKeys.has(key)) continue;
