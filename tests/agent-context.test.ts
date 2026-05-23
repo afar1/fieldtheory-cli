@@ -27,3 +27,25 @@ test('getAgentContext returns last modified file and recent files', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('getAgentContext rejects a missing repo path', () => {
+  const missing = path.join(os.tmpdir(), `ft-agent-context-missing-${Date.now()}`);
+  assert.throws(
+    () => getAgentContext(missing, 2),
+    /Repo path not found/,
+  );
+});
+
+test('getAgentContext rejects a file repo path', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-agent-context-file-'));
+  try {
+    const filePath = path.join(tmpDir, 'not-a-directory.md');
+    fs.writeFileSync(filePath, 'hello');
+    assert.throws(
+      () => getAgentContext(filePath, 2),
+      /Repo path is not a directory/,
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

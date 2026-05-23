@@ -71,6 +71,16 @@ function collectFallbackFiles(dir: string, root: string, limit: number, depth = 
 
 export function getAgentContext(repoPath = process.cwd(), limit = 10): AgentContext {
   const cwd = path.resolve(repoPath);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(cwd);
+  } catch {
+    throw new Error(`Repo path not found: ${cwd}`);
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`Repo path is not a directory: ${cwd}`);
+  }
+
   const candidates = tryGitFiles(cwd);
   const relPaths = candidates.length > 0 ? candidates : collectFallbackFiles(cwd, cwd, 500);
   const recentFiles = relPaths
