@@ -31,6 +31,10 @@ export function canonicalCommandsDir(): string {
   return process.env.FT_COMMANDS_DIR ?? path.join(fieldTheoryDir(), 'commands');
 }
 
+export function codexContextSessionsDir(): string {
+  return path.join(canonicalLibraryDir(), 'Codex Context', 'sessions');
+}
+
 export function libraryDir(): string {
   const override = process.env.FT_LIBRARY_DIR;
   if (override) return override;
