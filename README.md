@@ -189,6 +189,17 @@ Nightly schedules are stored under `~/.fieldtheory/ideas/nightly/`. Each tick st
 
 `ft` respects standard proxy environment variables for network requests: `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, and `NO_PROXY`.
 
+### Engine timeouts
+
+Set `FT_TIMEOUT_MULTIPLIER` to scale every engine-call deadline uniformly. Useful when the configured agent CLI has heavy startup overhead (MCP servers, session hooks, high reasoning effort) and the default per-call budgets fire before the child has responded:
+
+```bash
+export FT_TIMEOUT_MULTIPLIER=2   # doubles every timeout
+ft possible run --seed <id> --repo .
+```
+
+Applies to every `invokeEngine` / `invokeEngineAsync` call (classification, wiki compile, Possible runs). Default is `1` (no change). Non-numeric or non-positive values are ignored.
+
 ## Data
 
 Data is stored locally under `~/.fieldtheory/`:
