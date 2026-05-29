@@ -23,6 +23,7 @@ ft search "distributed systems"
 
 # 3. Explore
 ft viz
+ft web        # browser-based dashboard
 ft categories
 ft stats
 ```
@@ -58,6 +59,7 @@ On first run, `ft sync` extracts your X session from your browser and downloads 
 | `ft sample <category>` | Random sample from a category |
 | `ft stats` | Top authors, languages, date range |
 | `ft viz` | Terminal dashboard with sparklines, categories, and domains |
+| `ft web` | Browser-based bookmark dashboard with charts, search, and filters (default port 4321) |
 | `ft categories` | Show category distribution |
 | `ft domains` | Subject domain distribution |
 | `ft folders` | Show X bookmark folder distribution (requires `ft sync --folders` first) |

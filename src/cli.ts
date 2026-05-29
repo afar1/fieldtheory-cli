@@ -31,6 +31,7 @@ import { askMd } from './md-ask.js';
 import { lintMd, fixLintIssues } from './md-lint.js';
 import { exportBookmarks } from './md-export.js';
 import { renderViz } from './bookmarks-viz.js';
+import { startWeb } from './web.js';
 import { listBrowserIds } from './browsers.js';
 import { configureHttpProxyFromEnv } from './http-proxy.js';
 import { dataDir, ensureDataDir, isFirstRun, migrateLegacyIdeasData, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir, bookmarkMediaDir, bookmarkMediaManifestPath } from './paths.js';
@@ -1269,6 +1270,18 @@ export function buildCli() {
     .action(safe(async () => {
       if (!requireIndex()) return;
       console.log(await renderViz());
+    }));
+
+  // ── web ──────────────────────────────────────────────────────────────────
+
+  program
+    .command('web')
+    .description('Open a browser-based dashboard for your bookmarks')
+    .option('--port <number>', 'Port to listen on', '4321')
+    .option('--no-open', 'Do not open the browser automatically')
+    .action(safe(async (options) => {
+      if (!requireIndex()) return;
+      await startWeb(parseInt(String(options.port), 10), options.open !== false);
     }));
 
   // ── classify ────────────────────────────────────────────────────────────
