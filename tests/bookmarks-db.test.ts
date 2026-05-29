@@ -273,13 +273,14 @@ test('getStats returns chronological date range for legacy Twitter timestamps', 
   }, fixtures);
 });
 
-test('formatSearchResults: formats results with author, date, text, url', () => {
+test('formatSearchResults: formats results with author, date, ID, text, url', () => {
   const results = [
-    { id: '1', url: 'https://x.com/test/status/1', text: 'Hello world', authorHandle: 'test', authorName: 'Test', postedAt: '2026-01-15T00:00:00Z', score: -1.5 },
+    { id: '2040535589771149379', url: 'https://x.com/test/status/1', text: 'Hello world', authorHandle: 'test', authorName: 'Test', postedAt: '2026-01-15T00:00:00Z', score: -1.5 },
   ];
   const formatted = formatSearchResults(results);
   assert.ok(formatted.includes('@test'));
   assert.ok(formatted.includes('2026-01-15'));
+  assert.ok(formatted.includes('(ID: 2040535589771149379)'));
   assert.ok(formatted.includes('Hello world'));
   assert.ok(formatted.includes('https://x.com/test/status/1'));
 });
