@@ -40,6 +40,7 @@ import { registerCompanionCommands } from './companion-cli.js';
 import { getPathReport } from './field-status.js';
 import { formatAgentContext, getAgentContext } from './agent-context.js';
 import { formatCurrentDocumentSummary, readCurrentDocumentContext, readCurrentDocumentSummary } from './current.js';
+import { formatWorkflowState, getWorkflowState } from './workflow-state.js';
 import {
   appendNavigationDocument,
   backNavigation,
@@ -480,7 +481,7 @@ function shouldSkipCommandChrome(command: Command): boolean {
   if (isInternalWorkerCommand(command)) return true;
   if (command.opts().json) return true;
   if ([
-    'path', 'paths', 'current', 'recent', 'ls', 'tree', 'find', 'grep', 'cat',
+    'path', 'paths', 'current', 'recent', 'state', 'ls', 'tree', 'find', 'grep', 'cat',
     'head', 'meta', 'pwd', 'context', 'open', 'tab', 'reveal', 'link', 'links',
     'backlinks', 'tags', 'tagged', 'new', 'append', 'note', 'rename', 'cd', 'back',
   ].includes(command.name())) return true;
@@ -1890,6 +1891,24 @@ export function buildCli() {
         return;
       }
       process.stdout.write(formatCurrentDocumentSummary(context));
+    }));
+
+  program
+    .command('state')
+    .description('Show repo workflow state in one read-only table')
+    .option('--repo <path>', 'Repo path to inspect (default: cwd)')
+    .option('--no-fetch', 'Skip fetching remote refs before reading state')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const state = getWorkflowState({
+        repo: options.repo,
+        fetch: options.fetch !== false,
+      });
+      if (options.json) {
+        printJson(state);
+        return;
+      }
+      process.stdout.write(formatWorkflowState(state));
     }));
 
   registerCompanionCommands(program, safe);

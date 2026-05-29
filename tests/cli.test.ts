@@ -92,10 +92,10 @@ test('ft search, stats, and status expose --json', () => {
   }
 });
 
-test('ft paths, current, recent, navigation aliases, library, commands, app, and install command groups are registered', () => {
+test('ft paths, current, state, recent, navigation aliases, library, commands, app, and install command groups are registered', () => {
   const program = buildCli();
   for (const name of [
-    'paths', 'current', 'recent', 'ls', 'tree', 'find', 'grep', 'cat', 'head',
+    'paths', 'current', 'state', 'recent', 'ls', 'tree', 'find', 'grep', 'cat', 'head',
     'meta', 'open', 'tab', 'reveal', 'pwd', 'context', 'link', 'links', 'backlinks',
     'tags', 'tagged', 'new', 'append', 'note', 'rename', 'cd', 'back',
     'library', 'commands', 'app', 'install',
@@ -350,6 +350,22 @@ test('ft current reports missing context without a stack trace', async () => {
     if (previous === undefined) delete process.env.FT_LIBRARY_DIR;
     else process.env.FT_LIBRARY_DIR = previous;
     process.exitCode = previousExitCode;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ft state prints a read-only repo workflow table', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-state-'));
+  try {
+    const output = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'state', '--repo', tmpDir, '--no-fetch']);
+    });
+    assert.match(output, /^FT state/);
+    assert.match(output, /FT state/);
+    assert.match(output, /Root/);
+    assert.match(output, /not a git repo/);
+    assert.match(output, /Verdict: not a repo\./);
+  } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

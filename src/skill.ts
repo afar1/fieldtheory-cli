@@ -36,12 +36,13 @@ Field Theory has three main local surfaces:
 
 1. Check paths and status when setup matters: \`ft paths --json\`, \`ft status --json\`
 2. When the user asks what Field Theory document they are looking at, run \`ft current --json\`; only use \`ft current --content-only\` when the document body is needed
-3. When the user says "that file" or "the recent file", inspect current repo recency with \`ft recent --json\`
-4. Search durable notes first when prior project knowledge matters: \`ft library search <query> --json\`
-5. Search bookmarks when reading history or saved X/Twitter posts matter: \`ft search <query> --json\`
-6. Inspect exact files or bookmarks with \`ft library show <path> --json\`, \`ft show <id> --json\`, or \`ft commands show <name> --json\`
-7. Create or update durable Library notes and portable commands only when the user asks for a saved artifact
-8. Open useful Library pages in the Mac app with \`ft library open <path>\`
+3. Check repo workflow state when branch/worktree/PR shape matters: \`ft state --json\`
+4. When the user says "that file" or "the recent file", inspect current repo recency with \`ft recent --json\`
+5. Search durable notes first when prior project knowledge matters: \`ft library search <query> --json\`
+6. Search bookmarks when reading history or saved X/Twitter posts matter: \`ft search <query> --json\`
+7. Inspect exact files or bookmarks with \`ft library show <path> --json\`, \`ft show <id> --json\`, or \`ft commands show <name> --json\`
+8. Create or update durable Library notes and portable commands only when the user asks for a saved artifact
+9. Open useful Library pages in the Mac app with \`ft library open <path>\`
 
 ## Possible Roadmap Workflow
 
@@ -93,6 +94,7 @@ ft paths --json                # Canonical bookmarks, library, commands paths
 ft status --json               # Bookmark/classification status plus paths
 ft current --json              # Active Field Theory document metadata without the full body
 ft current --content-only      # Active document body when the user/model actually needs it
+ft state --json                # Repo workflow state: root, workers, PRs, cleanup, next step
 ft recent --json               # Current repo last-modified file and recent files for agent references
 
 ft search <query>              # Full-text BM25 search ("exact phrase", AND, OR, NOT)
