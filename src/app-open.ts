@@ -31,8 +31,8 @@ export interface FieldTheoryLaunchOptions {
 
 export function inferOpenKind(filePath: string): FieldTheoryOpenKind | null {
   const resolved = path.resolve(filePath);
-  if (isPathInside(path.resolve(canonicalLibraryDir()), resolved)) return 'library';
   if (isPathInside(path.resolve(canonicalCommandsDir()), resolved)) return 'command';
+  if (isPathInside(path.resolve(canonicalLibraryDir()), resolved)) return 'library';
   return null;
 }
 

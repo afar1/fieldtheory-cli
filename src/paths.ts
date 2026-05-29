@@ -28,7 +28,11 @@ export function canonicalLibraryDir(): string {
 }
 
 export function canonicalCommandsDir(): string {
-  return process.env.FT_COMMANDS_DIR ?? path.join(fieldTheoryDir(), 'commands');
+  return process.env.FT_COMMANDS_DIR ?? path.join(canonicalLibraryDir(), 'Commands');
+}
+
+export function codexContextSessionsDir(): string {
+  return path.join(canonicalLibraryDir(), 'Codex Context', 'sessions');
 }
 
 export function libraryDir(): string {

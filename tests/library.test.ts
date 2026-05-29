@@ -79,3 +79,21 @@ test('library rejects traversal paths', async () => {
     );
   });
 });
+
+test('library list and search skip hidden and internal context files by default', async () => {
+  await withLibraryRoot(async (root) => {
+    await createLibraryDocument('notes/visible', { content: '# Visible\n\nordinary phrase\n' });
+    fs.mkdirSync(path.join(root, '.backup'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.backup', 'hidden.md'), '# Hidden\n\nhidden phrase\n');
+    fs.mkdirSync(path.join(root, 'Codex Context', 'sessions', 'abc'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'Codex Context', 'sessions', 'abc', 'active.md'), '# Active\n\nsession phrase\n');
+    fs.writeFileSync(path.join(root, 'Codex Context', 'Durable Note.md'), '# Durable\n\ndurable phrase\n');
+
+    const listed = listLibraryDocuments().map((doc) => doc.relPath);
+    assert.deepEqual(listed, ['Codex Context/Durable Note.md', 'notes/visible.md']);
+    assert.equal(searchLibraryDocuments('hidden phrase').length, 0);
+    assert.equal(searchLibraryDocuments('session phrase').length, 0);
+    assert.equal(searchLibraryDocuments('durable phrase').length, 1);
+    assert.equal(searchLibraryDocuments('session phrase', { includeInternal: true }).length, 1);
+  });
+});

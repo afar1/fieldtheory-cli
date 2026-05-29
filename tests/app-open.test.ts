@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { buildFieldTheoryOpenTarget, openFieldTheoryTarget } from '../src/app-open.js';
+import { buildFieldTheoryOpenTarget, inferOpenKind, openFieldTheoryTarget } from '../src/app-open.js';
 
 test('app-open builds Field Theory wiki URL for library paths', () => {
   const previous = process.env.FT_LIBRARY_DIR;
@@ -31,6 +31,21 @@ test('app-open reports command paths as unsupported deep links', () => {
   } finally {
     if (previous === undefined) delete process.env.FT_COMMANDS_DIR;
     else process.env.FT_COMMANDS_DIR = previous;
+  }
+});
+
+test('app-open infers nested Library/Commands paths as commands', () => {
+  const previousLibrary = process.env.FT_LIBRARY_DIR;
+  const previousCommands = process.env.FT_COMMANDS_DIR;
+  process.env.FT_LIBRARY_DIR = '/tmp/ft-library';
+  delete process.env.FT_COMMANDS_DIR;
+  try {
+    assert.equal(inferOpenKind(path.join('/tmp/ft-library', 'Commands', 'review.md')), 'command');
+  } finally {
+    if (previousLibrary === undefined) delete process.env.FT_LIBRARY_DIR;
+    else process.env.FT_LIBRARY_DIR = previousLibrary;
+    if (previousCommands === undefined) delete process.env.FT_COMMANDS_DIR;
+    else process.env.FT_COMMANDS_DIR = previousCommands;
   }
 });
 

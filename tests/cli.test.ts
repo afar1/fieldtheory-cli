@@ -26,6 +26,25 @@ async function captureStdout(fn: () => Promise<void>): Promise<string> {
   return chunks.join('');
 }
 
+async function captureStderr(fn: () => Promise<void>): Promise<string> {
+  const chunks: string[] = [];
+  const origWrite = process.stderr.write;
+  process.stderr.write = ((chunk: any, encodingOrCb?: any, cb?: any) => {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk.toString('utf-8') : String(chunk));
+    if (typeof encodingOrCb === 'function') encodingOrCb();
+    if (typeof cb === 'function') cb();
+    return true;
+  }) as typeof process.stderr.write;
+
+  try {
+    await fn();
+  } finally {
+    process.stderr.write = origWrite;
+  }
+
+  return chunks.join('');
+}
+
 test('showDashboard: prints update notice when cache is newer than local', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-dashboard-'));
   const origEnv = process.env.FT_DATA_DIR;
@@ -73,10 +92,265 @@ test('ft search, stats, and status expose --json', () => {
   }
 });
 
-test('ft paths, recent, library, commands, app, and install command groups are registered', () => {
+test('ft paths, current, recent, navigation aliases, library, commands, app, and install command groups are registered', () => {
   const program = buildCli();
-  for (const name of ['paths', 'recent', 'library', 'commands', 'app', 'install']) {
+  for (const name of [
+    'paths', 'current', 'recent', 'ls', 'tree', 'find', 'grep', 'cat', 'head',
+    'meta', 'open', 'tab', 'reveal', 'pwd', 'context', 'link', 'links', 'backlinks',
+    'tags', 'tagged', 'new', 'append', 'note', 'rename', 'cd', 'back',
+    'library', 'commands', 'app', 'install',
+  ]) {
     assert.ok(program.commands.find((c: any) => c.name() === name), `${name} command should be registered`);
+  }
+});
+
+test('ft navigation aliases inspect Field Theory library markdown', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-nav-'));
+  const origEnv = {
+    FT_LIBRARY_DIR: process.env.FT_LIBRARY_DIR,
+    FT_COMMANDS_DIR: process.env.FT_COMMANDS_DIR,
+  };
+  process.env.FT_LIBRARY_DIR = path.join(tmpDir, 'library');
+  process.env.FT_COMMANDS_DIR = path.join(process.env.FT_LIBRARY_DIR, 'Commands');
+  fs.mkdirSync(path.join(process.env.FT_LIBRARY_DIR, 'briefs'), { recursive: true });
+  fs.mkdirSync(process.env.FT_COMMANDS_DIR, { recursive: true });
+  fs.writeFileSync(path.join(process.env.FT_LIBRARY_DIR, 'briefs', 'Navigation Brief.md'), '# Navigation Brief\n\nFind this routing phrase.\n');
+  fs.writeFileSync(path.join(process.env.FT_COMMANDS_DIR, 'review.md'), '# review\n\nUse this when reviewing work.\n\n## Steps\n\n1. Review.\n\n## Guardrails\n\n- Verify.\n');
+
+  try {
+    const lsOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'ls', 'briefs']);
+    });
+    assert.match(lsOutput, /briefs\/Navigation Brief\.md/);
+
+    const findOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'find', 'Navigation']);
+    });
+    assert.match(findOutput, /Navigation Brief/);
+
+    const commandFindOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'find', 'review', '--limit', '10']);
+    });
+    assert.match(commandFindOutput, /^review\.md\s+review/m);
+    assert.doesNotMatch(commandFindOutput, /Commands\/review\.md/);
+
+    const grepOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'grep', 'routing phrase']);
+    });
+    assert.match(grepOutput, /routing phrase/);
+
+    const headOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'head', 'briefs/Navigation Brief', '--lines', '1']);
+    });
+    assert.match(headOutput, /# Navigation Brief\n$/);
+
+    const commandOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'cat', 'review']);
+    });
+    assert.match(commandOutput, /Use this when reviewing work/);
+  } finally {
+    for (const [key, value] of Object.entries(origEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ft link prints canonical wiki links for commands and library docs', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-link-'));
+  const origEnv = {
+    FT_LIBRARY_DIR: process.env.FT_LIBRARY_DIR,
+    FT_COMMANDS_DIR: process.env.FT_COMMANDS_DIR,
+  };
+  process.env.FT_LIBRARY_DIR = path.join(tmpDir, 'library');
+  process.env.FT_COMMANDS_DIR = path.join(process.env.FT_LIBRARY_DIR, 'Commands');
+  fs.mkdirSync(path.join(process.env.FT_LIBRARY_DIR, 'briefs'), { recursive: true });
+  fs.mkdirSync(process.env.FT_COMMANDS_DIR, { recursive: true });
+  fs.writeFileSync(path.join(process.env.FT_LIBRARY_DIR, 'briefs', 'Workflow Brief.md'), '# Workflow Brief\n\nbody\n');
+  fs.writeFileSync(path.join(process.env.FT_COMMANDS_DIR, 'save.md'), '# save\n\nUse this when saving work.\n');
+
+  try {
+    const commandOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'link', 'save']);
+    });
+    assert.equal(commandOutput.trim(), '[[save]]');
+
+    const libraryOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'link', 'Workflow Brief']);
+    });
+    assert.equal(libraryOutput.trim(), '[[Workflow Brief]]');
+
+    const aliasOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'link', 'Workflow Brief', '--alias', 'the workflow brief']);
+    });
+    assert.equal(aliasOutput.trim(), '[[Workflow Brief|the workflow brief]]');
+
+    const jsonOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'link', 'save', '--json']);
+    });
+    const parsed = JSON.parse(jsonOutput);
+    assert.equal(parsed.link, '[[save]]');
+    assert.equal(parsed.entry.place, 'commands');
+  } finally {
+    for (const [key, value] of Object.entries(origEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ft navigation commands cover links tags writes app targets and location state', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-nav-full-'));
+  const origEnv = {
+    FT_LIBRARY_DIR: process.env.FT_LIBRARY_DIR,
+    FT_COMMANDS_DIR: process.env.FT_COMMANDS_DIR,
+  };
+  process.env.FT_LIBRARY_DIR = path.join(tmpDir, 'library');
+  process.env.FT_COMMANDS_DIR = path.join(process.env.FT_LIBRARY_DIR, 'Commands');
+  fs.mkdirSync(path.join(process.env.FT_LIBRARY_DIR, 'wikis'), { recursive: true });
+  fs.mkdirSync(process.env.FT_COMMANDS_DIR, { recursive: true });
+  fs.writeFileSync(path.join(process.env.FT_LIBRARY_DIR, 'wikis', 'Alpha.md'), [
+    '---',
+    'tags: [systems, nav]',
+    '---',
+    '# Alpha',
+    '',
+    'See [[Beta]] and #fieldnote.',
+    '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(process.env.FT_LIBRARY_DIR, 'wikis', 'Beta.md'), '# Beta\n\nBack to [[Alpha]].\n');
+
+  try {
+    const linksOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'links', 'Alpha']);
+    });
+    assert.match(linksOutput, /Beta\s+1/);
+
+    const backlinksOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'backlinks', 'Alpha']);
+    });
+    assert.match(backlinksOutput, /wikis\/Beta\.md/);
+
+    const tagsOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'tags']);
+    });
+    assert.match(tagsOutput, /systems\s+1/);
+    assert.match(tagsOutput, /fieldnote\s+1/);
+
+    const taggedOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'tagged', 'nav']);
+    });
+    assert.match(taggedOutput, /wikis\/Alpha\.md/);
+
+    const openOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'open', '--query', 'Alpha', '--no-launch']);
+    });
+    assert.match(openOutput, /fieldtheory:\/\/wiki\/open/);
+    assert.match(openOutput, /Alpha\.md/);
+
+    const tabOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'tab', 'Alpha', '--no-launch']);
+    });
+    assert.match(tabOutput, /action=tab/);
+
+    const revealOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'reveal', 'Alpha', '--no-launch']);
+    });
+    assert.match(revealOutput, /action=reveal/);
+
+    await buildCli().parseAsync(['node', 'ft', 'new', 'brief', 'Fast Lookup Plan']);
+    assert.equal(fs.existsSync(path.join(process.env.FT_LIBRARY_DIR, 'briefs', 'fast-lookup-plan.md')), true);
+
+    await buildCli().parseAsync(['node', 'ft', 'append', 'Fast Lookup Plan', '--content', 'next step']);
+    assert.match(fs.readFileSync(path.join(process.env.FT_LIBRARY_DIR, 'briefs', 'fast-lookup-plan.md'), 'utf-8'), /next step/);
+
+    await buildCli().parseAsync(['node', 'ft', 'note', 'quick model note']);
+    const scratchpadFiles = fs.readdirSync(path.join(process.env.FT_LIBRARY_DIR, 'Scratchpad'));
+    assert.equal(scratchpadFiles.length, 1);
+    assert.match(fs.readFileSync(path.join(process.env.FT_LIBRARY_DIR, 'Scratchpad', scratchpadFiles[0]), 'utf-8'), /quick model note/);
+
+    await buildCli().parseAsync(['node', 'ft', 'rename', 'Fast Lookup Plan', 'Faster Lookup Plan']);
+    assert.equal(fs.existsSync(path.join(process.env.FT_LIBRARY_DIR, 'briefs', 'faster-lookup-plan.md')), true);
+
+    const cdOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'cd', 'Faster Lookup Plan']);
+    });
+    assert.match(cdOutput, /current: briefs\/faster-lookup-plan\.md/);
+
+    const backOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'back']);
+    });
+    assert.match(backOutput, /current: library/);
+  } finally {
+    for (const [key, value] of Object.entries(origEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ft current keeps document content opt-in for model-facing JSON', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-cli-'));
+  const previousExitCode = process.exitCode;
+  try {
+    const sessionDir = path.join(tmpDir, 'session');
+    fs.mkdirSync(sessionDir, { recursive: true });
+    const contentPath = path.join(sessionDir, 'active.md');
+    const manifestPath = path.join(sessionDir, 'context.json');
+    fs.writeFileSync(contentPath, '# Current Body\n\nprivate working text\n');
+    fs.writeFileSync(manifestPath, JSON.stringify({
+      updatedAt: '2026-01-02T00:00:00.000Z',
+      activeDocument: {
+        title: 'Current Body',
+        path: '/library/current-body.md',
+        kind: 'wiki',
+        contentMode: 'rendered',
+        contentPath,
+      },
+    }));
+
+    const summaryOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'current', '--manifest', manifestPath, '--json']);
+    });
+    const summary = JSON.parse(summaryOutput);
+    assert.equal(summary.activeDocument.title, 'Current Body');
+    assert.equal(summary.content, undefined);
+
+    const contentOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'current', '--manifest', manifestPath, '--content-only']);
+    });
+    assert.equal(contentOutput, '# Current Body\n\nprivate working text\n');
+
+    const fullOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'current', '--manifest', manifestPath, '--include-content', '--json']);
+    });
+    assert.match(JSON.parse(fullOutput).content, /private working text/);
+  } finally {
+    process.exitCode = previousExitCode;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ft current reports missing context without a stack trace', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-missing-'));
+  const previous = process.env.FT_LIBRARY_DIR;
+  const previousExitCode = process.exitCode;
+  process.env.FT_LIBRARY_DIR = path.join(tmpDir, 'library');
+  try {
+    const stderr = await captureStderr(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'current']);
+    });
+    assert.match(stderr, /No active Field Theory context found/);
+    assert.doesNotMatch(stderr, /at readCurrentDocument/);
+    assert.equal(process.exitCode, 1);
+  } finally {
+    if (previous === undefined) delete process.env.FT_LIBRARY_DIR;
+    else process.env.FT_LIBRARY_DIR = previous;
+    process.exitCode = previousExitCode;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 

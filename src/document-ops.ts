@@ -31,7 +31,7 @@ export function sha256(value: string): string {
 
 export function isPathInside(parentPath: string, childPath: string): boolean {
   const relPath = path.relative(parentPath, childPath);
-  return relPath === '' || (!!relPath && !relPath.startsWith(`..${path.sep}`) && !path.isAbsolute(relPath));
+  return relPath === '' || (!!relPath && relPath !== '..' && !relPath.startsWith(`..${path.sep}`) && !path.isAbsolute(relPath));
 }
 
 export function normalizeMarkdownFileName(name: string, options: { rejectLeadingUnderscore?: boolean } = {}): string | null {

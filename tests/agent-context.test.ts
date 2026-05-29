@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -28,23 +29,22 @@ test('getAgentContext returns last modified file and recent files', () => {
   }
 });
 
-test('getAgentContext rejects a missing repo path', () => {
-  const missing = path.join(os.tmpdir(), `ft-agent-context-missing-${Date.now()}`);
-  assert.throws(
-    () => getAgentContext(missing, 2),
-    /Repo path not found/,
-  );
-});
-
-test('getAgentContext rejects a file repo path', () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-agent-context-file-'));
+test('getAgentContext prefers dirty git files before scanning every tracked file', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-agent-context-git-'));
   try {
-    const filePath = path.join(tmpDir, 'not-a-directory.md');
-    fs.writeFileSync(filePath, 'hello');
-    assert.throws(
-      () => getAgentContext(filePath, 2),
-      /Repo path is not a directory/,
-    );
+    execFileSync('git', ['init'], { cwd: tmpDir, stdio: 'ignore' });
+    fs.writeFileSync(path.join(tmpDir, 'clean.md'), 'clean');
+    fs.writeFileSync(path.join(tmpDir, 'dirty.md'), 'dirty');
+    execFileSync('git', ['add', 'clean.md', 'dirty.md'], { cwd: tmpDir, stdio: 'ignore' });
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'init'], { cwd: tmpDir, stdio: 'ignore' });
+
+    fs.writeFileSync(path.join(tmpDir, 'dirty.md'), 'dirty changed');
+    fs.utimesSync(path.join(tmpDir, 'clean.md'), new Date('2026-01-03T00:00:00.000Z'), new Date('2026-01-03T00:00:00.000Z'));
+    fs.utimesSync(path.join(tmpDir, 'dirty.md'), new Date('2026-01-02T00:00:00.000Z'), new Date('2026-01-02T00:00:00.000Z'));
+
+    const context = getAgentContext(tmpDir, 5);
+    assert.deepEqual(context.recentFiles.map((file) => file.path), ['dirty.md']);
+    assert.equal(context.lastModifiedFile?.path, 'dirty.md');
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

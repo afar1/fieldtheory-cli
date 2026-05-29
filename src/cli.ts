@@ -39,6 +39,37 @@ import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import { registerCompanionCommands } from './companion-cli.js';
 import { getPathReport } from './field-status.js';
 import { formatAgentContext, getAgentContext } from './agent-context.js';
+import { formatCurrentDocumentSummary, readCurrentDocumentContext, readCurrentDocumentSummary } from './current.js';
+import {
+  appendNavigationDocument,
+  backNavigation,
+  buildNavigationWikiLink,
+  cdNavigation,
+  createNavigationDocument,
+  createNavigationNote,
+  findNavigationEntries,
+  formatNavigationContext,
+  formatNavigationEntries,
+  formatNavigationHead,
+  formatNavigationLinks,
+  formatNavigationMeta,
+  formatNavigationPlaces,
+  formatNavigationPwd,
+  formatNavigationSearchResults,
+  formatNavigationState,
+  formatNavigationTags,
+  grepNavigationContent,
+  listNavigationBacklinks,
+  listNavigationEntries,
+  listNavigationLinks,
+  listNavigationPlaces,
+  listNavigationTagged,
+  listNavigationTags,
+  openNavigationDocument,
+  readNavigationDocument,
+  renameNavigationDocument,
+  type NavigationPlace,
+} from './navigation.js';
 import {
   formatIdeasIntro,
   formatRunList,
@@ -275,6 +306,14 @@ function printJson(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
 }
 
+function parseNavigationPlace(value: string): NavigationPlace {
+  const place = value.toLowerCase();
+  if (listNavigationPlaces().some((candidate) => candidate.name === place)) {
+    return place as NavigationPlace;
+  }
+  throw new Error(`Unknown Field Theory place: ${value}`);
+}
+
 // ── Update checker ────────────────────────────────────────────────────────
 
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 1 day
@@ -440,7 +479,11 @@ function isInternalWorkerCommand(command: Command): boolean {
 function shouldSkipCommandChrome(command: Command): boolean {
   if (isInternalWorkerCommand(command)) return true;
   if (command.opts().json) return true;
-  if (command.name() === 'path' || command.name() === 'paths' || command.name() === 'recent') return true;
+  if ([
+    'path', 'paths', 'current', 'recent', 'ls', 'tree', 'find', 'grep', 'cat',
+    'head', 'meta', 'pwd', 'context', 'open', 'tab', 'reveal', 'link', 'links',
+    'backlinks', 'tags', 'tagged', 'new', 'append', 'note', 'rename', 'cd', 'back',
+  ].includes(command.name())) return true;
   if (command.name() === 'show' && command.parent?.name() === 'skill') return true;
   return false;
 }
@@ -1527,6 +1570,326 @@ export function buildCli() {
         return;
       }
       process.stdout.write(formatAgentContext(context));
+    }));
+
+  program
+    .command('ls')
+    .description('List Field Theory places or files inside one place')
+    .argument('[place]', 'Field Theory place such as library, commands, briefs, scratchpad, wikis, debates, recent, or current')
+    .option('--limit <n>', 'Max files', parsePositiveInteger)
+    .option('--json', 'JSON output')
+    .action(safe(async (place: string | undefined, options) => {
+      if (!place) {
+        const places = listNavigationPlaces();
+        if (options.json) printJson(places);
+        else process.stdout.write(formatNavigationPlaces());
+        return;
+      }
+      const parsedPlace = parseNavigationPlace(place);
+      if (parsedPlace === 'recent') {
+        const context = getAgentContext(process.cwd(), options.limit ?? 10);
+        if (options.json) printJson(context);
+        else process.stdout.write(formatAgentContext(context));
+        return;
+      }
+      if (parsedPlace === 'current') {
+        const summary = readCurrentDocumentSummary();
+        if (options.json) printJson(summary);
+        else process.stdout.write(formatCurrentDocumentSummary(summary));
+        return;
+      }
+      const entries = listNavigationEntries(parsedPlace, options.limit);
+      if (options.json) printJson(entries);
+      else process.stdout.write(formatNavigationEntries(entries));
+    }));
+
+  program
+    .command('tree')
+    .description('Show a compact Field Theory Library tree')
+    .option('--limit <n>', 'Max files', parsePositiveInteger, 80)
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const entries = listNavigationEntries('library', options.limit);
+      if (options.json) printJson(entries.map((entry) => entry.relPath));
+      else process.stdout.write(entries.length ? `${entries.map((entry) => entry.relPath).join('\n')}\n` : '(none)\n');
+    }));
+
+  program
+    .command('find')
+    .description('Search Field Theory document titles and paths')
+    .argument('<query>', 'Title or filename query')
+    .option('--limit <n>', 'Max results', parsePositiveInteger, 20)
+    .option('--json', 'JSON output')
+    .action(safe(async (query: string, options) => {
+      const entries = findNavigationEntries(query, options.limit);
+      if (options.json) printJson(entries);
+      else process.stdout.write(formatNavigationEntries(entries));
+    }));
+
+  program
+    .command('grep')
+    .description('Search inside Field Theory markdown content')
+    .argument('<query>', 'Content query')
+    .option('--limit <n>', 'Max results', parsePositiveInteger, 20)
+    .option('--json', 'JSON output')
+    .action(safe(async (query: string, options) => {
+      const entries = grepNavigationContent(query, options.limit);
+      if (options.json) printJson(entries);
+      else process.stdout.write(formatNavigationSearchResults(entries));
+    }));
+
+  program
+    .command('cat')
+    .description('Print a Field Theory Library or command document')
+    .argument('<file>', 'Relative or absolute markdown path')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const doc = await readNavigationDocument(targetPath);
+      if (options.json) printJson(doc);
+      else process.stdout.write(doc.content.endsWith('\n') ? doc.content : `${doc.content}\n`);
+    }));
+
+  program
+    .command('head')
+    .description('Print the first lines of a Field Theory Library or command document')
+    .argument('<file>', 'Relative or absolute markdown path')
+    .option('--lines <n>', 'Number of lines', parsePositiveInteger, 40)
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const doc = await readNavigationDocument(targetPath);
+      if (options.json) printJson({ ...doc, content: formatNavigationHead(doc.content, options.lines) });
+      else process.stdout.write(formatNavigationHead(doc.content, options.lines));
+    }));
+
+  program
+    .command('meta')
+    .description('Show metadata for a Field Theory Library or command document')
+    .argument('<file>', 'Relative or absolute markdown path')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const doc = await readNavigationDocument(targetPath);
+      const { content: _content, ...entry } = doc;
+      if (options.json) printJson(entry);
+      else process.stdout.write(formatNavigationMeta(entry));
+    }));
+
+  program
+    .command('open')
+    .description('Open a Field Theory Library document in the app')
+    .argument('[file]', 'Relative or absolute markdown path, title, or filename')
+    .option('--query <query>', 'Find one matching document and open it')
+    .option('--no-launch', 'Print target without launching the app')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string | undefined, options) => {
+      if (!targetPath && !options.query) throw new Error('Pass a file/title or --query.');
+      const result = await openNavigationDocument(targetPath ?? '', {
+        launch: options.launch !== false,
+        query: options.query ? String(options.query) : undefined,
+      });
+      if (options.json) {
+        printJson(result);
+        return;
+      }
+      console.log(result.url ?? result.path);
+    }));
+
+  program
+    .command('tab')
+    .description('Open a Field Theory Library document as a tab when the app supports it')
+    .argument('<file>', 'Relative or absolute markdown path, title, or filename')
+    .option('--no-launch', 'Print target without launching the app')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const result = await openNavigationDocument(targetPath, { launch: options.launch !== false, action: 'tab' });
+      if (options.json) printJson(result);
+      else console.log(result.url ?? result.path);
+    }));
+
+  program
+    .command('reveal')
+    .description('Reveal a Field Theory Library document in app navigation when the app supports it')
+    .argument('<file>', 'Relative or absolute markdown path, title, or filename')
+    .option('--no-launch', 'Print target without launching the app')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const result = await openNavigationDocument(targetPath, { launch: options.launch !== false, action: 'reveal' });
+      if (options.json) printJson(result);
+      else console.log(result.url ?? result.path);
+    }));
+
+  program
+    .command('pwd')
+    .description('Show the current Field Theory location')
+    .action(safe(async () => {
+      process.stdout.write(formatNavigationPwd());
+    }));
+
+  program
+    .command('context')
+    .description('Show current Field Theory document plus recent repo files')
+    .option('--repo <path>', 'Repo path to inspect (default: cwd)')
+    .option('--limit <n>', 'Number of recent files to show', parsePositiveInteger, 8)
+    .action(safe(async (options) => {
+      process.stdout.write(formatNavigationContext(options.repo ?? process.cwd(), options.limit));
+    }));
+
+  program
+    .command('link')
+    .description('Print the canonical wiki link for a Field Theory document or command')
+    .argument('<target>', 'Relative markdown path, title, command name, or filename')
+    .option('--alias <text>', 'Display text for the wikilink')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const result = buildNavigationWikiLink(targetPath, options.alias ? String(options.alias) : undefined);
+      if (options.json) printJson(result);
+      else console.log(result.link);
+    }));
+
+  program
+    .command('links')
+    .description('List wiki-style links from a Field Theory document')
+    .argument('<file>', 'Relative markdown path, title, or filename')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const links = listNavigationLinks(targetPath);
+      if (options.json) printJson(links);
+      else process.stdout.write(formatNavigationLinks(links));
+    }));
+
+  program
+    .command('backlinks')
+    .description('List documents that link to a Field Theory document')
+    .argument('<file>', 'Relative markdown path, title, or filename')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const entries = listNavigationBacklinks(targetPath);
+      if (options.json) printJson(entries);
+      else process.stdout.write(formatNavigationEntries(entries));
+    }));
+
+  program
+    .command('tags')
+    .description('List tags found in Field Theory markdown')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const tags = listNavigationTags();
+      if (options.json) printJson(tags);
+      else process.stdout.write(formatNavigationTags(tags));
+    }));
+
+  program
+    .command('tagged')
+    .description('List Field Theory documents with a tag')
+    .argument('<tag>', 'Tag name, with or without #')
+    .option('--json', 'JSON output')
+    .action(safe(async (tag: string, options) => {
+      const entries = listNavigationTagged(tag);
+      if (options.json) printJson(entries);
+      else process.stdout.write(formatNavigationEntries(entries));
+    }));
+
+  program
+    .command('new')
+    .description('Create a Field Theory document')
+    .argument('<type>', 'brief, command, scratchpad, wiki, or debate')
+    .argument('<title>', 'Document title')
+    .option('--stdin', 'Read markdown content from stdin')
+    .option('--file <path>', 'Read markdown content from a file')
+    .option('--json', 'JSON output')
+    .action(safe(async (type: string, title: string, options) => {
+      const entry = await createNavigationDocument(type, title, {
+        stdin: Boolean(options.stdin),
+        file: options.file ? String(options.file) : undefined,
+      });
+      if (options.json) printJson(entry);
+      else console.log(`Created: ${entry.path}`);
+    }));
+
+  program
+    .command('append')
+    .description('Append text to a Field Theory document')
+    .argument('<file>', 'Relative markdown path, title, or filename')
+    .argument('[text]', 'Text to append')
+    .option('--content <text>', 'Text to append')
+    .option('--stdin', 'Read markdown content from stdin')
+    .option('--file <path>', 'Read markdown content from a file')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, textArg: string | undefined, options) => {
+      const content = options.content ? String(options.content) : textArg;
+      const entry = await appendNavigationDocument(targetPath, {
+        stdin: Boolean(options.stdin),
+        file: options.file ? String(options.file) : undefined,
+        content,
+      });
+      if (options.json) printJson(entry);
+      else console.log(`Appended: ${entry.path}`);
+    }));
+
+  program
+    .command('note')
+    .description('Append a quick note to today’s Scratchpad file')
+    .argument('<text>', 'Note text')
+    .option('--title <title>', 'Scratchpad title when creating today’s file')
+    .option('--json', 'JSON output')
+    .action(safe(async (text: string, options) => {
+      const entry = await createNavigationNote(text, options.title ? String(options.title) : undefined);
+      if (options.json) printJson(entry);
+      else console.log(`Noted: ${entry.path}`);
+    }));
+
+  program
+    .command('rename')
+    .description('Rename a Field Theory document using Field Theory places')
+    .argument('<file>', 'Relative markdown path, title, or filename')
+    .argument('<title>', 'New title')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, title: string, options) => {
+      const entry = await renameNavigationDocument(targetPath, title);
+      if (options.json) printJson(entry);
+      else console.log(`Renamed: ${entry.path}`);
+    }));
+
+  program
+    .command('cd')
+    .description('Move the CLI Field Theory location state')
+    .argument('<ft-path>', 'Field Theory place, relative path, title, or filename')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const state = cdNavigation(targetPath);
+      if (options.json) printJson(state);
+      else process.stdout.write(formatNavigationState(state));
+    }));
+
+  program
+    .command('back')
+    .description('Move back through the CLI Field Theory location state')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const state = backNavigation();
+      if (options.json) printJson(state);
+      else process.stdout.write(formatNavigationState(state));
+    }));
+
+  program
+    .command('current')
+    .description('Show the active Field Theory document attached to the Mac app terminal')
+    .option('--manifest <path>', 'Read a specific context manifest')
+    .option('--content-only', 'Print only the active document markdown/content')
+    .option('--include-content', 'Include active document content in --json output')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      if (options.contentOnly) {
+        process.stdout.write(readCurrentDocumentContext(options.manifest).content);
+        return;
+      }
+      const context = options.includeContent
+        ? readCurrentDocumentContext(options.manifest)
+        : readCurrentDocumentSummary(options.manifest);
+      if (options.json) {
+        printJson(context);
+        return;
+      }
+      process.stdout.write(formatCurrentDocumentSummary(context));
     }));
 
   registerCompanionCommands(program, safe);
