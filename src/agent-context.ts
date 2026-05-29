@@ -39,6 +39,38 @@ function tryGitFiles(repoPath: string): string[] {
   }
 }
 
+function parseGitStatusPorcelain(output: string): string[] {
+  const entries = output.split('\0');
+  const files: string[] = [];
+  for (let i = 0; i < entries.length; i += 1) {
+    const entry = entries[i];
+    if (!entry) continue;
+    const status = entry.slice(0, 2);
+    const filePath = entry.slice(3);
+    if (status.includes('R') || status.includes('C')) {
+      const renamedPath = entries[i + 1];
+      i += 1;
+      if (renamedPath) files.push(renamedPath);
+    } else if (!status.includes('D')) {
+      files.push(filePath);
+    }
+  }
+  return [...new Set(files)];
+}
+
+function tryGitChangedFiles(repoPath: string): string[] {
+  try {
+    return parseGitStatusPorcelain(execFileSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+      cwd: repoPath,
+      encoding: 'utf-8',
+      timeout: 10_000,
+      stdio: ['pipe', 'pipe', 'ignore'],
+    }));
+  } catch {
+    return [];
+  }
+}
+
 function shouldSkipFile(relPath: string): boolean {
   const parts = relPath.split(path.sep);
   if (parts.some((part) => SKIP_DIRS.has(part))) return true;
@@ -71,17 +103,8 @@ function collectFallbackFiles(dir: string, root: string, limit: number, depth = 
 
 export function getAgentContext(repoPath = process.cwd(), limit = 10): AgentContext {
   const cwd = path.resolve(repoPath);
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(cwd);
-  } catch {
-    throw new Error(`Repo path not found: ${cwd}`);
-  }
-  if (!stat.isDirectory()) {
-    throw new Error(`Repo path is not a directory: ${cwd}`);
-  }
-
-  const candidates = tryGitFiles(cwd);
+  const changedCandidates = tryGitChangedFiles(cwd);
+  const candidates = changedCandidates.length > 0 ? changedCandidates : tryGitFiles(cwd);
   const relPaths = candidates.length > 0 ? candidates : collectFallbackFiles(cwd, cwd, 500);
   const recentFiles = relPaths
     .filter((relPath) => !shouldSkipFile(relPath))
