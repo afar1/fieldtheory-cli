@@ -111,14 +111,18 @@ export interface ResolvedEngine {
   config: EngineConfig;
   model?: string;
   effort?: string;
+  authMode?: EngineAuthMode;
   label: string;
 }
+
+export type EngineAuthMode = 'account' | 'api';
 
 export interface EngineRunProfile {
   engine?: string;
   override?: string;
   model?: string;
   effort?: string;
+  authMode?: EngineAuthMode;
 }
 
 function cleanOptional(value: string | undefined): string | undefined {
@@ -148,6 +152,7 @@ function resolve(name: string, profile: EngineRunProfile = {}): ResolvedEngine {
     config: KNOWN_ENGINES[name],
     model,
     effort,
+    authMode: profile.authMode,
     label: formatEngineLabel({ name, model, effort }),
   };
 }
@@ -288,6 +293,55 @@ const DEFAULT_MAXBUF    = 1024 * 1024;
 const STDERR_TAIL_BYTES = 4096;     // clipped tail shown in errors/logs
 const STDERR_HARD_CAP   = 64 * 1024; // hard ceiling on in-memory stderr buffering
 const SIGKILL_GRACE_MS  = 2_000;     // grace period between SIGTERM and SIGKILL
+const ENGINE_AUTH_MODE_ENV = 'FT_ENGINE_AUTH_MODE';
+
+const API_ENV_BY_ENGINE: Record<string, string[]> = {
+  claude: [
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_AUTH_TOKEN',
+    'ANTHROPIC_BASE_URL',
+    'ANTHROPIC_CUSTOM_HEADERS',
+    'CLAUDE_CODE_USE_BEDROCK',
+    'CLAUDE_CODE_USE_VERTEX',
+  ],
+  codex: [
+    'OPENAI_API_KEY',
+    'OPENAI_BASE_URL',
+    'OPENAI_API_BASE',
+    'OPENAI_ORG_ID',
+    'OPENAI_PROJECT',
+    'AZURE_OPENAI_API_KEY',
+    'AZURE_OPENAI_ENDPOINT',
+  ],
+};
+
+function cleanAuthMode(value: string | undefined): EngineAuthMode | undefined {
+  const mode = value?.trim().toLowerCase();
+  return mode === 'account' || mode === 'api' ? mode : undefined;
+}
+
+/**
+ * Build the child environment for an LLM CLI.
+ *
+ * Default to logged-in account auth. API/provider env vars are common in
+ * developer shells, but letting the child inherit them silently can switch
+ * Claude/Codex from Pro/Max account billing to API/provider billing.
+ *
+ * Set FT_ENGINE_AUTH_MODE=api, or pass authMode: 'api', to opt in.
+ */
+export function engineInvocationEnv(
+  engine: Pick<ResolvedEngine, 'name' | 'authMode'>,
+  parentEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env = { ...parentEnv };
+  const mode = cleanAuthMode(engine.authMode) ?? cleanAuthMode(parentEnv[ENGINE_AUTH_MODE_ENV]);
+  if (mode === 'api') return env;
+
+  for (const key of API_ENV_BY_ENGINE[engine.name] ?? []) {
+    delete env[key];
+  }
+  return env;
+}
 
 /** Clip the tail of a buffer to a byte budget — engines put the "what went
  *  wrong" line at the end of stderr. */
@@ -311,6 +365,7 @@ function tailString(buf: Buffer, bytes: number): string {
  */
 export function redactSecrets(s: string): string {
   return s
+    .replace(/\bREDACTED_(OPENAI|ANTHROPIC)_API_KEY\b/g, 'sk-***REDACTED***')
     .replace(/\bsk-[A-Za-z0-9_-]{16,}/g, 'sk-***REDACTED***')
     .replace(/\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,}/g, '$1_***REDACTED***')
     .replace(/\bBearer\s+[A-Za-z0-9._-]{16,}/gi, 'Bearer ***REDACTED***');
@@ -366,6 +421,7 @@ export function invokeEngine(engine: ResolvedEngine, prompt: string, opts: Invok
     timeout,
     maxBuffer,
     encoding: 'buffer',
+    env: engineInvocationEnv(engine),
   });
 
   const stderrBuf = result.stderr ?? Buffer.alloc(0);
@@ -431,6 +487,7 @@ export function invokeEngineAsync(engine: ResolvedEngine, prompt: string, opts: 
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args(prompt, engine), {
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: engineInvocationEnv(engine),
     });
 
     // Close stdin immediately with EOF so `claude -p` doesn't wait on it.

@@ -174,6 +174,90 @@ test('resolveEngine: carries explicit model and effort into engine args', async 
   }
 });
 
+test('engineInvocationEnv: Claude defaults to logged-in account auth', async () => {
+  const { engineInvocationEnv } = await import('../src/engine.js');
+  const env = engineInvocationEnv(
+    { name: 'claude' },
+    {
+      PATH: '/bin',
+      ANTHROPIC_API_KEY: 'anthropic-key',
+      ANTHROPIC_BASE_URL: 'https://api.example.test',
+      CLAUDE_CODE_USE_BEDROCK: '1',
+      CLAUDE_CODE_USE_VERTEX: '1',
+      OPENAI_API_KEY: 'openai-key',
+    },
+  );
+
+  assert.equal(env.PATH, '/bin');
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(env.ANTHROPIC_BASE_URL, undefined);
+  assert.equal(env.CLAUDE_CODE_USE_BEDROCK, undefined);
+  assert.equal(env.CLAUDE_CODE_USE_VERTEX, undefined);
+  assert.equal(env.OPENAI_API_KEY, 'openai-key');
+});
+
+test('engineInvocationEnv: Codex defaults to logged-in account auth', async () => {
+  const { engineInvocationEnv } = await import('../src/engine.js');
+  const env = engineInvocationEnv(
+    { name: 'codex' },
+    {
+      PATH: '/bin',
+      OPENAI_API_KEY: 'openai-key',
+      OPENAI_BASE_URL: 'https://api.example.test',
+      OPENAI_ORG_ID: 'org',
+      AZURE_OPENAI_API_KEY: 'azure-key',
+      ANTHROPIC_API_KEY: 'anthropic-key',
+    },
+  );
+
+  assert.equal(env.PATH, '/bin');
+  assert.equal(env.OPENAI_API_KEY, undefined);
+  assert.equal(env.OPENAI_BASE_URL, undefined);
+  assert.equal(env.OPENAI_ORG_ID, undefined);
+  assert.equal(env.AZURE_OPENAI_API_KEY, undefined);
+  assert.equal(env.ANTHROPIC_API_KEY, 'anthropic-key');
+});
+
+test('engineInvocationEnv: API auth mode preserves provider env when explicit', async () => {
+  const { engineInvocationEnv } = await import('../src/engine.js');
+  const env = engineInvocationEnv(
+    { name: 'claude' },
+    {
+      PATH: '/bin',
+      FT_ENGINE_AUTH_MODE: 'api',
+      ANTHROPIC_API_KEY: 'anthropic-key',
+      CLAUDE_CODE_USE_BEDROCK: '1',
+    },
+  );
+
+  assert.equal(env.ANTHROPIC_API_KEY, 'anthropic-key');
+  assert.equal(env.CLAUDE_CODE_USE_BEDROCK, '1');
+});
+
+test('engineInvocationEnv: resolved engine authMode overrides parent env mode', async () => {
+  const { engineInvocationEnv } = await import('../src/engine.js');
+
+  const apiEnv = engineInvocationEnv(
+    { name: 'claude', authMode: 'api' },
+    {
+      PATH: '/bin',
+      FT_ENGINE_AUTH_MODE: 'account',
+      ANTHROPIC_API_KEY: 'anthropic-key',
+    },
+  );
+  assert.equal(apiEnv.ANTHROPIC_API_KEY, 'anthropic-key');
+
+  const accountEnv = engineInvocationEnv(
+    { name: 'claude', authMode: 'account' },
+    {
+      PATH: '/bin',
+      FT_ENGINE_AUTH_MODE: 'api',
+      ANTHROPIC_API_KEY: 'anthropic-key',
+    },
+  );
+  assert.equal(accountEnv.ANTHROPIC_API_KEY, undefined);
+});
+
 // ── resolveEngine with single engine ───────────────────────────────────
 
 test('resolveEngine: single available engine is used without prompting', async () => {
@@ -335,6 +419,44 @@ function makeFakeEngine(tmpDir: string, script: string): { name: string; config:
   fs.chmodSync(binPath, 0o755);
   return { name: 'fake', config: { bin: binPath, args: (p) => [p] } };
 }
+
+test('invokeEngine: account mode strips provider API env from the child', async () => {
+  if (process.platform === 'win32') return;
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-account-auth-'));
+  const originalApiKey = process.env.ANTHROPIC_API_KEY;
+  const originalBedrock = process.env.CLAUDE_CODE_USE_BEDROCK;
+  const originalAuthMode = process.env.FT_ENGINE_AUTH_MODE;
+  try {
+    process.env.ANTHROPIC_API_KEY = 'anthropic-key';
+    process.env.CLAUDE_CODE_USE_BEDROCK = '1';
+    delete process.env.FT_ENGINE_AUTH_MODE;
+
+    const binPath = path.join(tmpDir, 'fake-claude');
+    fs.writeFileSync(
+      binPath,
+      '#!/bin/sh\nprintf "%s:%s\\n" "${ANTHROPIC_API_KEY:-unset}" "${CLAUDE_CODE_USE_BEDROCK:-unset}"\n',
+    );
+    fs.chmodSync(binPath, 0o755);
+
+    const engine = {
+      name: 'claude',
+      label: 'claude',
+      config: { bin: binPath, args: () => [] },
+    };
+    const { invokeEngine } = await import('../src/engine.js');
+
+    assert.equal(invokeEngine(engine, 'ignored'), 'unset:unset');
+  } finally {
+    if (originalApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = originalApiKey;
+    if (originalBedrock === undefined) delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    else process.env.CLAUDE_CODE_USE_BEDROCK = originalBedrock;
+    if (originalAuthMode === undefined) delete process.env.FT_ENGINE_AUTH_MODE;
+    else process.env.FT_ENGINE_AUTH_MODE = originalAuthMode;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
 
 test('invokeEngineAsync: child stdin is closed with EOF (does not inherit parent)', async () => {
   if (process.platform === 'win32') return;
@@ -521,7 +643,7 @@ sleep 30
 test('redactSecrets: masks provider-prefixed API keys', async () => {
   const { redactSecrets } = await import('../src/engine.js');
 
-  const input = 'Error: invalid API key sk-proj-abcdef1234567890zyxwvu after retry';
+  const input = 'Error: invalid API key REDACTED_OPENAI_API_KEY after retry';
   const output = redactSecrets(input);
   assert.ok(output.includes('sk-***REDACTED***'), `expected redaction, got: ${output}`);
   assert.ok(!output.includes('abcdef1234567890'), `raw secret should not appear, got: ${output}`);
@@ -565,7 +687,7 @@ test('invokeEngineAsync: stderr is bounded under STDERR_TAIL_BYTES and redacted 
     //   - have the fake secret redacted
     const script = `#!/bin/sh
 yes 'noise noise noise noise noise noise noise noise noise noise' | head -c 102400 1>&2
-echo "Error: invalid sk-ant-abcdef1234567890zyxwvu9876 token" 1>&2
+echo "Error: invalid REDACTED_ANTHROPIC_API_KEY token" 1>&2
 exit 3
 `;
     const engine = makeFakeEngine(tmpDir, script);
