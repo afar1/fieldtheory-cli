@@ -73,10 +73,26 @@ test('ft search, stats, and status expose --json', () => {
   }
 });
 
-test('ft paths, recent, library, commands, app, and install command groups are registered', () => {
+test('ft paths, state, recent, library, commands, app, and install command groups are registered', () => {
   const program = buildCli();
-  for (const name of ['paths', 'recent', 'library', 'commands', 'app', 'install']) {
+  for (const name of ['paths', 'state', 'recent', 'library', 'commands', 'app', 'install']) {
     assert.ok(program.commands.find((c: any) => c.name() === name), `${name} command should be registered`);
+  }
+});
+
+test('ft state prints a read-only repo workflow table', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-state-'));
+  try {
+    const output = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'state', '--repo', tmpDir, '--no-fetch']);
+    });
+    assert.match(output, /^FT state/);
+    assert.match(output, /FT state/);
+    assert.match(output, /Root/);
+    assert.match(output, /not a git repo/);
+    assert.match(output, /Verdict: not a repo\./);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 

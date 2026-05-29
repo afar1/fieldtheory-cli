@@ -39,6 +39,7 @@ import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import { registerCompanionCommands } from './companion-cli.js';
 import { getPathReport } from './field-status.js';
 import { formatAgentContext, getAgentContext } from './agent-context.js';
+import { formatWorkflowState, getWorkflowState } from './workflow-state.js';
 import {
   formatIdeasIntro,
   formatRunList,
@@ -440,7 +441,7 @@ function isInternalWorkerCommand(command: Command): boolean {
 function shouldSkipCommandChrome(command: Command): boolean {
   if (isInternalWorkerCommand(command)) return true;
   if (command.opts().json) return true;
-  if (command.name() === 'path' || command.name() === 'paths' || command.name() === 'recent') return true;
+  if (command.name() === 'path' || command.name() === 'paths' || command.name() === 'recent' || command.name() === 'state') return true;
   if (command.name() === 'show' && command.parent?.name() === 'skill') return true;
   return false;
 }
@@ -1527,6 +1528,24 @@ export function buildCli() {
         return;
       }
       process.stdout.write(formatAgentContext(context));
+    }));
+
+  program
+    .command('state')
+    .description('Show repo workflow state in one read-only table')
+    .option('--repo <path>', 'Repo path to inspect (default: cwd)')
+    .option('--no-fetch', 'Skip fetching remote refs before reading state')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const state = getWorkflowState({
+        repo: options.repo,
+        fetch: options.fetch !== false,
+      });
+      if (options.json) {
+        printJson(state);
+        return;
+      }
+      process.stdout.write(formatWorkflowState(state));
     }));
 
   registerCompanionCommands(program, safe);
