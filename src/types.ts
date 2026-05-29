@@ -102,6 +102,15 @@ export interface BookmarkRecord {
   quotedTweetFailedAt?: string;
 }
 
+export interface ClassificationRecord {
+  id: string;
+  categories: string[];
+  primaryCategory: string;
+  domains?: string[];
+  primaryDomain?: string;
+  classifiedAt: string;
+}
+
 export interface BookmarkFolder {
   id: string;
   name: string;

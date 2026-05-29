@@ -1,9 +1,9 @@
 import type { Database } from 'sql.js';
 import { openDb, saveDb } from './db.js';
 import { parseTimestampMs, toIsoDate } from './date-utils.js';
-import { readJsonLines } from './fs.js';
-import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js';
-import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
+import { readJsonLines, writeJsonLines } from './fs.js';
+import { twitterBookmarksCachePath, twitterBookmarksIndexPath, twitterClassificationsPath } from './paths.js';
+import type { BookmarkRecord, QuotedTweetSnapshot, ClassificationRecord } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
 
@@ -479,6 +479,41 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
         });
       }
     } catch { /* table may be empty */ }
+
+    // Backup source of truth: classifications.jsonl
+    const classificationsPath = twitterClassificationsPath();
+    const storedClassifications = await readJsonLines<ClassificationRecord>(classificationsPath);
+    for (const c of storedClassifications) {
+      const existing = existingRows.get(c.id);
+      if (existing) {
+        // Hydrate domains if missing in DB but present in JSONL
+        if (!existing.domains && c.domains) {
+          existing.domains = c.domains.join(',');
+          existing.primaryDomain = c.primaryDomain ?? null;
+        }
+        // Hydrate categories if missing in DB but present in JSONL
+        if (!existing.categories && c.categories) {
+          existing.categories = c.categories.join(',');
+          existing.primaryCategory = c.primaryCategory;
+        }
+      } else {
+        // Create new placeholder for untracked record that has classification data
+        existingRows.set(c.id, {
+          categories: c.categories.join(','),
+          primaryCategory: c.primaryCategory,
+          domains: c.domains?.join(',') ?? null,
+          primaryDomain: c.primaryDomain ?? null,
+          githubUrls: null,
+          quotedTweetJson: null,
+          articleTitle: null,
+          articleText: null,
+          articleSite: null,
+          enrichedAt: null,
+          folderIds: null,
+          folderNames: null,
+        });
+      }
+    }
 
     const newRecords: BookmarkRecord[] = records.filter(r => !existingRows.has(r.id));
 
@@ -1234,4 +1269,35 @@ export function formatSearchResults(results: SearchResult[]): string {
       return `${i + 1}. [${date}] ${author}\n   ${text}\n   ${r.url}`;
     })
     .join('\n\n');
+}
+
+export async function exportClassifications(): Promise<number> {
+  const dbPath = twitterBookmarksIndexPath();
+  const db = await openDb(dbPath);
+  ensureMigrations(db);
+
+  try {
+    const rows = db.exec(
+      `SELECT id, categories, primary_category, domains, primary_domain
+       FROM bookmarks
+       WHERE primary_category IS NOT NULL AND primary_category != 'unclassified'`
+    );
+
+    if (!rows.length || !rows[0].values.length) return 0;
+
+    const now = new Date().toISOString();
+    const records: ClassificationRecord[] = rows[0].values.map((r) => ({
+      id: r[0] as string,
+      categories: (r[1] as string)?.split(',') ?? [],
+      primaryCategory: r[2] as string,
+      domains: (r[3] as string)?.split(',') ?? undefined,
+      primaryDomain: (r[4] as string) ?? undefined,
+      classifiedAt: now,
+    }));
+
+    await writeJsonLines(twitterClassificationsPath(), records);
+    return records.length;
+  } finally {
+    db.close();
+  }
 }
