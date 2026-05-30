@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { canonicalCommandsDir } from './paths.js';
+import { commandsDir } from './paths.js';
 import {
   createMarkdownFile,
   DocumentVersion,
@@ -47,7 +47,7 @@ export interface CommandUpdateInput extends CommandWriteInput {
 }
 
 function commandsRoot(): string {
-  return canonicalCommandsDir();
+  return commandsDir();
 }
 
 function resolveCommandPath(target: string): string {

@@ -46,7 +46,13 @@ export function libraryDir(): string {
 }
 
 export function commandsDir(): string {
-  return canonicalCommandsDir();
+  const override = process.env.FT_COMMANDS_DIR;
+  if (override) return override;
+  const canonical = path.join(canonicalLibraryDir(), 'Commands');
+  if (process.env.FT_LIBRARY_DIR) return canonical;
+  const legacy = path.join(fieldTheoryDir(), 'commands');
+  if (fs.existsSync(canonical) || !fs.existsSync(legacy)) return canonical;
+  return legacy;
 }
 
 /**

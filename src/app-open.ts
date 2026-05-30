@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { canonicalCommandsDir, canonicalLibraryDir } from './paths.js';
+import { canonicalLibraryDir, commandsDir } from './paths.js';
 import { isPathInside, resolveMarkdownPath } from './document-ops.js';
 
 const DEFAULT_FIELD_THEORY_BUNDLE_ID = 'com.fieldtheory.app';
@@ -31,7 +31,7 @@ export interface FieldTheoryLaunchOptions {
 
 export function inferOpenKind(filePath: string): FieldTheoryOpenKind | null {
   const resolved = path.resolve(filePath);
-  if (isPathInside(path.resolve(canonicalCommandsDir()), resolved)) return 'command';
+  if (isPathInside(path.resolve(commandsDir()), resolved)) return 'command';
   if (isPathInside(path.resolve(canonicalLibraryDir()), resolved)) return 'library';
   return null;
 }
@@ -45,7 +45,7 @@ export function buildFieldTheoryOpenTarget(inputPath: string, kind?: FieldTheory
     throw new Error(`Unknown target kind: ${String(resolvedKind)}`);
   }
 
-  const root = resolvedKind === 'library' ? canonicalLibraryDir() : canonicalCommandsDir();
+  const root = resolvedKind === 'library' ? canonicalLibraryDir() : commandsDir();
   const resolvedPath = resolveMarkdownPath(root, inputPath);
   if (!resolvedPath) throw new Error(`Path is outside the ${resolvedKind} root or is not markdown.`);
 
