@@ -106,3 +106,30 @@ test('commands reject unsafe names and flag weak command content', async () => {
     ]);
   });
 });
+
+test('commands default to the Library Commands folder', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-library-commands-'));
+  const home = path.join(tmp, 'home');
+  const root = path.join(home, '.fieldtheory', 'library', 'Commands');
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(path.join(root, 'state.md'), goodCommand);
+
+  const previous = {
+    FT_COMMANDS_DIR: process.env.FT_COMMANDS_DIR,
+    HOME: process.env.HOME,
+  };
+  delete process.env.FT_COMMANDS_DIR;
+  process.env.HOME = home;
+
+  try {
+    const shown = await showCommandDocument('state');
+    assert.equal(shown.path, path.join(root, 'state.md'));
+    assert.equal(shown.name, 'state');
+  } finally {
+    if (previous.FT_COMMANDS_DIR === undefined) delete process.env.FT_COMMANDS_DIR;
+    else process.env.FT_COMMANDS_DIR = previous.FT_COMMANDS_DIR;
+    if (previous.HOME === undefined) delete process.env.HOME;
+    else process.env.HOME = previous.HOME;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

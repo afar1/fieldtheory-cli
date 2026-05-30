@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { canonicalCommandsDir, canonicalDataDir, canonicalLibraryDir, dataDir, libraryDir, mdDir, commandsDir, mdSchemaPath } from '../src/paths.js';
@@ -50,10 +51,29 @@ test('paths: FT_DATA_DIR keeps the legacy md child unless FT_LIBRARY_DIR is set'
   });
 });
 
-test('paths: default command root is under ~/.fieldtheory', () => {
+test('paths: default command root is under the Field Theory Library', () => {
   withEnv({
     FT_COMMANDS_DIR: undefined,
   }, () => {
-    assert.equal(commandsDir(), path.join(os.homedir(), '.fieldtheory', 'commands'));
+    assert.equal(commandsDir(), path.join(os.homedir(), '.fieldtheory', 'library', 'Commands'));
+    assert.equal(canonicalCommandsDir(), path.join(os.homedir(), '.fieldtheory', 'library', 'Commands'));
   });
+});
+
+test('paths: command root falls back to old commands dir for old installs', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-paths-home-'));
+  const home = path.join(tmp, 'home');
+  const legacyCommands = path.join(home, '.fieldtheory', 'commands');
+  fs.mkdirSync(legacyCommands, { recursive: true });
+
+  withEnv({
+    HOME: home,
+    FT_LIBRARY_DIR: undefined,
+    FT_COMMANDS_DIR: undefined,
+  }, () => {
+    assert.equal(commandsDir(), legacyCommands);
+    assert.equal(canonicalCommandsDir(), path.join(home, '.fieldtheory', 'library', 'Commands'));
+  });
+
+  fs.rmSync(tmp, { recursive: true, force: true });
 });

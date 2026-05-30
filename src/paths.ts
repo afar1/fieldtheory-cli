@@ -28,7 +28,7 @@ export function canonicalLibraryDir(): string {
 }
 
 export function canonicalCommandsDir(): string {
-  return process.env.FT_COMMANDS_DIR ?? path.join(fieldTheoryDir(), 'commands');
+  return process.env.FT_COMMANDS_DIR ?? path.join(canonicalLibraryDir(), 'Commands');
 }
 
 export function codexContextSessionsDir(): string {
@@ -46,7 +46,12 @@ export function libraryDir(): string {
 }
 
 export function commandsDir(): string {
-  return canonicalCommandsDir();
+  const override = process.env.FT_COMMANDS_DIR;
+  if (override) return override;
+  const canonical = path.join(canonicalLibraryDir(), 'Commands');
+  const legacy = path.join(fieldTheoryDir(), 'commands');
+  if (fs.existsSync(canonical) || !fs.existsSync(legacy)) return canonical;
+  return legacy;
 }
 
 /**
