@@ -29,6 +29,10 @@ export interface FieldTheoryLaunchOptions {
   spawn?: SpawnRunner;
 }
 
+function posixRelativePath(from: string, to: string): string {
+  return path.relative(from, to).split(path.sep).join('/');
+}
+
 export function inferOpenKind(filePath: string): FieldTheoryOpenKind | null {
   const resolved = path.resolve(filePath);
   if (isPathInside(path.resolve(commandsDir()), resolved)) return 'command';
@@ -66,6 +70,31 @@ export function buildFieldTheoryOpenTarget(inputPath: string, kind?: FieldTheory
     supported: false,
     note: 'Field Theory does not expose a command-file deep link yet; open this path in the Commands view.',
   };
+}
+
+export function buildFieldTheoryPanelOpenTarget(inputPath: string, kind?: FieldTheoryOpenKind): FieldTheoryOpenTarget {
+  const target = buildFieldTheoryOpenTarget(inputPath, kind);
+  if (target.kind === 'library') {
+    const relPath = posixRelativePath(path.resolve(canonicalLibraryDir()), target.path);
+    const params = new URLSearchParams({ kind: 'wiki', path: relPath });
+    return {
+      ...target,
+      url: `fieldtheory://browser-library/open?${params.toString()}`,
+      supported: true,
+    };
+  }
+
+  if (target.kind === 'command') {
+    const params = new URLSearchParams({ kind: 'command', path: target.path });
+    return {
+      ...target,
+      url: `fieldtheory://browser-library/open?${params.toString()}`,
+      supported: true,
+      note: undefined,
+    };
+  }
+
+  return target;
 }
 
 function runLauncher(spawn: SpawnRunner, command: string, args: string[], method: FieldTheoryLaunchResult['method'], cwd?: string): FieldTheoryLaunchResult {

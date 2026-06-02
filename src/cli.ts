@@ -67,6 +67,7 @@ import {
   listNavigationTagged,
   listNavigationTags,
   openNavigationDocument,
+  panelNavigationDocument,
   readNavigationDocument,
   renameNavigationDocument,
   type NavigationPlace,
@@ -1690,6 +1691,49 @@ export function buildCli() {
       if (!targetPath && !options.query) throw new Error('Pass a file/title or --query.');
       const result = await openNavigationDocument(targetPath ?? '', {
         launch: options.launch !== false,
+        query: options.query ? String(options.query) : undefined,
+      });
+      if (options.json) {
+        printJson(result);
+        return;
+      }
+      console.log(result.url ?? result.path);
+    }));
+
+  program
+    .command('panel')
+    .description('Print a Field Theory panel link for a Library or command document')
+    .argument('[file]', 'Relative or absolute markdown path, title, or filename')
+    .option('--query <query>', 'Find one matching document and link it')
+    .option('--open', 'Open the panel link in the Field Theory app')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string | undefined, options) => {
+      if (!targetPath && !options.query) throw new Error('Pass a file/title or --query.');
+      const result = await panelNavigationDocument(targetPath ?? '', {
+        launch: options.open === true,
+        query: options.query ? String(options.query) : undefined,
+      });
+      if (options.json) {
+        printJson(result);
+        return;
+      }
+      console.log(result.url ?? result.path);
+    }));
+
+  const codexCommand = program
+    .command('codex')
+    .description('Codex-facing Field Theory helpers');
+
+  codexCommand
+    .command('panel')
+    .description('Print a Field Theory panel link for Codex')
+    .argument('[file]', 'Relative or absolute markdown path, title, or filename')
+    .option('--query <query>', 'Find one matching document and link it')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string | undefined, options) => {
+      if (!targetPath && !options.query) throw new Error('Pass a file/title or --query.');
+      const result = await panelNavigationDocument(targetPath ?? '', {
+        launch: false,
         query: options.query ? String(options.query) : undefined,
       });
       if (options.json) {

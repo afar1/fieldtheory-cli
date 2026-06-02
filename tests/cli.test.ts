@@ -250,6 +250,23 @@ test('ft navigation commands cover links tags writes app targets and location st
     assert.match(openOutput, /fieldtheory:\/\/wiki\/open/);
     assert.match(openOutput, /Alpha\.md/);
 
+    const panelOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'panel', 'Alpha']);
+    });
+    assert.match(panelOutput, /fieldtheory:\/\/browser-library\/open/);
+    assert.match(panelOutput, /kind=wiki/);
+    assert.match(panelOutput, /path=wikis%2FAlpha\.md/);
+
+    const codexPanelOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'codex', 'panel', 'Alpha']);
+    });
+    assert.equal(codexPanelOutput, panelOutput);
+
+    const appUrlOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'app', 'url', 'Alpha']);
+    });
+    assert.equal(appUrlOutput, panelOutput);
+
     const tabOutput = await captureStdout(async () => {
       await buildCli().parseAsync(['node', 'ft', 'tab', 'Alpha', '--no-launch']);
     });

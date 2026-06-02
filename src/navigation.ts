@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { buildFieldTheoryOpenTarget, inferOpenKind, openFieldTheoryTarget } from './app-open.js';
+import { buildFieldTheoryOpenTarget, buildFieldTheoryPanelOpenTarget, inferOpenKind, openFieldTheoryTarget } from './app-open.js';
 import {
   createCommandDocument,
   listCommandDocuments,
@@ -360,6 +360,19 @@ export async function openNavigationDocument(target: string, options: Navigation
     openTarget.url = url.toString();
   }
   const launch = options.launch !== false ? openFieldTheoryTarget(openTarget) : undefined;
+  return {
+    path: openTarget.path,
+    url: openTarget.url,
+    launched: Boolean(launch?.launched),
+  };
+}
+
+export async function panelNavigationDocument(target: string, options: NavigationOpenOptions = {}): Promise<NavigationOpenResult> {
+  const entry = options.query ? findNavigationEntries(options.query, 1)[0] : resolveNavigationEntry(target);
+  if (!entry) throw new Error(`No Field Theory document found for query: ${options.query}`);
+  const kind = inferOpenKind(entry.path) ?? 'library';
+  const openTarget = buildFieldTheoryPanelOpenTarget(entry.path, kind);
+  const launch = options.launch === true ? openFieldTheoryTarget(openTarget) : undefined;
   return {
     path: openTarget.path,
     url: openTarget.url,
