@@ -20,7 +20,7 @@ import {
   showLibraryDocument,
   updateLibraryDocument,
 } from './library.js';
-import { panelNavigationDocument } from './navigation.js';
+import { appPanelNavigationDocument } from './navigation.js';
 
 type SafeAction = (fn: (...args: any[]) => Promise<void>) => (...args: any[]) => Promise<void>;
 
@@ -364,8 +364,7 @@ export function registerCompanionCommands(program: Command, safe: SafeAction): v
     .option('--query <query>', 'Find one matching document and link it')
     .option('--json', 'JSON output')
     .action(safe(async (targetPath: string | undefined, options) => {
-      if (!targetPath && !options.query) throw new Error('Pass a file/title or --query.');
-      const result = await panelNavigationDocument(targetPath ?? '', {
+      const result = await appPanelNavigationDocument(targetPath ?? '', {
         launch: false,
         query: options.query ? String(options.query) : undefined,
       });

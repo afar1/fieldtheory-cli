@@ -15,6 +15,10 @@ export function fieldTheoryDir(): string {
   return path.join(os.homedir(), '.fieldtheory');
 }
 
+export function browserHelperStatePath(): string {
+  return process.env.FT_BROWSER_HELPER_STATE_PATH ?? path.join(fieldTheoryDir(), 'browser-helper.json');
+}
+
 export function legacyDataDir(): string {
   return path.join(os.homedir(), '.ft-bookmarks');
 }

@@ -313,6 +313,12 @@ function printJson(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
 }
 
+function formatMarkdownLink(label: string, href: string): string {
+  const safeLabel = label.replace(/]/g, '\\]');
+  const safeHref = href.replace(/\)/g, '%29');
+  return `[${safeLabel}](${safeHref})`;
+}
+
 function parseNavigationPlace(value: string): NavigationPlace {
   const place = value.toLowerCase();
   if (listNavigationPlaces().some((candidate) => candidate.name === place)) {
@@ -1706,9 +1712,9 @@ export function buildCli() {
     .argument('[file]', 'Relative or absolute markdown path, title, or filename')
     .option('--query <query>', 'Find one matching document and link it')
     .option('--open', 'Open the panel link in the Field Theory app')
+    .option('--url', 'Print the raw URL instead of a Markdown hyperlink')
     .option('--json', 'JSON output')
     .action(safe(async (targetPath: string | undefined, options) => {
-      if (!targetPath && !options.query) throw new Error('Pass a file/title or --query.');
       const result = await panelNavigationDocument(targetPath ?? '', {
         launch: options.open === true,
         query: options.query ? String(options.query) : undefined,
@@ -1717,7 +1723,8 @@ export function buildCli() {
         printJson(result);
         return;
       }
-      console.log(result.url ?? result.path);
+      const href = result.url ?? result.path;
+      console.log(options.url ? href : formatMarkdownLink('Open in Field Theory panel', href));
     }));
 
   const codexCommand = program
@@ -1729,9 +1736,9 @@ export function buildCli() {
     .description('Print a Field Theory panel link for Codex')
     .argument('[file]', 'Relative or absolute markdown path, title, or filename')
     .option('--query <query>', 'Find one matching document and link it')
+    .option('--url', 'Print the raw URL instead of a Markdown hyperlink')
     .option('--json', 'JSON output')
     .action(safe(async (targetPath: string | undefined, options) => {
-      if (!targetPath && !options.query) throw new Error('Pass a file/title or --query.');
       const result = await panelNavigationDocument(targetPath ?? '', {
         launch: false,
         query: options.query ? String(options.query) : undefined,
@@ -1740,7 +1747,8 @@ export function buildCli() {
         printJson(result);
         return;
       }
-      console.log(result.url ?? result.path);
+      const href = result.url ?? result.path;
+      console.log(options.url ? href : formatMarkdownLink('Open in Field Theory panel', href));
     }));
 
   program

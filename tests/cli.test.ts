@@ -206,11 +206,19 @@ test('ft navigation commands cover links tags writes app targets and location st
   const origEnv = {
     FT_LIBRARY_DIR: process.env.FT_LIBRARY_DIR,
     FT_COMMANDS_DIR: process.env.FT_COMMANDS_DIR,
+    FT_BROWSER_HELPER_STATE_PATH: process.env.FT_BROWSER_HELPER_STATE_PATH,
   };
   process.env.FT_LIBRARY_DIR = path.join(tmpDir, 'library');
   process.env.FT_COMMANDS_DIR = path.join(process.env.FT_LIBRARY_DIR, 'Commands');
+  process.env.FT_BROWSER_HELPER_STATE_PATH = path.join(tmpDir, 'browser-helper.json');
   fs.mkdirSync(path.join(process.env.FT_LIBRARY_DIR, 'wikis'), { recursive: true });
   fs.mkdirSync(process.env.FT_COMMANDS_DIR, { recursive: true });
+  fs.writeFileSync(process.env.FT_BROWSER_HELPER_STATE_PATH, JSON.stringify({
+    host: '127.0.0.1',
+    port: 59971,
+    token: 'test-token',
+    browserUrl: 'http://127.0.0.1:59971/browser-library.html',
+  }));
   fs.writeFileSync(path.join(process.env.FT_LIBRARY_DIR, 'wikis', 'Alpha.md'), [
     '---',
     'tags: [systems, nav]',
@@ -221,6 +229,8 @@ test('ft navigation commands cover links tags writes app targets and location st
     '',
   ].join('\n'));
   fs.writeFileSync(path.join(process.env.FT_LIBRARY_DIR, 'wikis', 'Beta.md'), '# Beta\n\nBack to [[Alpha]].\n');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ ok: true }), { status: 200 })) as typeof fetch;
 
   try {
     const linksOutput = await captureStdout(async () => {
@@ -253,19 +263,45 @@ test('ft navigation commands cover links tags writes app targets and location st
     const panelOutput = await captureStdout(async () => {
       await buildCli().parseAsync(['node', 'ft', 'panel', 'Alpha']);
     });
-    assert.match(panelOutput, /fieldtheory:\/\/browser-library\/open/);
-    assert.match(panelOutput, /kind=wiki/);
-    assert.match(panelOutput, /path=wikis%2FAlpha\.md/);
+    const panelLine = panelOutput.trim().split('\n').at(-1) ?? '';
+    assert.match(panelLine, /http:\/\/127\.0\.0\.1:59971\/browser-library\.html/);
+    assert.match(panelLine, /api=http%3A%2F%2F127\.0\.0\.1%3A59971/);
+    assert.match(panelLine, /token=test-token/);
+    assert.match(panelLine, /target=%7B%22kind%22%3A%22wiki%22%2C%22path%22%3A%22wikis%2FAlpha\.md%22%7D/);
+
+    const panelUrlOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'panel', 'Alpha', '--url']);
+    });
+    const panelUrlLine = panelUrlOutput.trim().split('\n').at(-1) ?? '';
+    assert.match(panelUrlLine, /^http:\/\/127\.0\.0\.1:59971\/browser-library\.html/);
+    assert.match(panelUrlLine, /target=%7B%22kind%22%3A%22wiki%22%2C%22path%22%3A%22wikis%2FAlpha\.md%22%7D/);
+
+    const libraryPanelOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'panel']);
+    });
+    const libraryPanelLine = libraryPanelOutput.trim().split('\n').at(-1) ?? '';
+    assert.match(libraryPanelLine, /http:\/\/127\.0\.0\.1:59971\/browser-library\.html/);
+    assert.match(libraryPanelLine, /target=%7B%22kind%22%3A%22library%22%7D/);
 
     const codexPanelOutput = await captureStdout(async () => {
       await buildCli().parseAsync(['node', 'ft', 'codex', 'panel', 'Alpha']);
     });
-    assert.equal(codexPanelOutput, panelOutput);
+    const codexPanelLine = codexPanelOutput.trim().split('\n').at(-1) ?? '';
+    assert.match(codexPanelLine, /http:\/\/127\.0\.0\.1:59971\/browser-library\.html/);
+    assert.match(codexPanelLine, /target=%7B%22kind%22%3A%22wiki%22%2C%22path%22%3A%22wikis%2FAlpha\.md%22%7D/);
 
     const appUrlOutput = await captureStdout(async () => {
       await buildCli().parseAsync(['node', 'ft', 'app', 'url', 'Alpha']);
     });
-    assert.equal(appUrlOutput, panelOutput);
+    const appUrlLine = appUrlOutput.trim().split('\n').at(-1) ?? '';
+    assert.match(appUrlLine, /^fieldtheory:\/\/browser-library\/open/);
+    assert.match(appUrlLine, /path=wikis%2FAlpha\.md/);
+
+    const appLibraryUrlOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'app', 'url']);
+    });
+    const appLibraryUrlLine = appLibraryUrlOutput.trim().split('\n').at(-1) ?? '';
+    assert.equal(appLibraryUrlLine, 'fieldtheory://browser-library/open?kind=library');
 
     const tabOutput = await captureStdout(async () => {
       await buildCli().parseAsync(['node', 'ft', 'tab', 'Alpha', '--no-launch']);
@@ -301,6 +337,7 @@ test('ft navigation commands cover links tags writes app targets and location st
     });
     assert.match(backOutput, /current: library/);
   } finally {
+    globalThis.fetch = originalFetch;
     for (const [key, value] of Object.entries(origEnv)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
