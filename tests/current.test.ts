@@ -90,6 +90,43 @@ test('findCurrentContextManifest reads the app runtime context before legacy Lib
   }
 });
 
+test('findCurrentContextManifest prefers the terminal attached context from session state', () => {
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-attached-home-'));
+  const originalHome = process.env.HOME;
+  const originalLibraryDir = process.env.FT_LIBRARY_DIR;
+  delete process.env.FT_LIBRARY_DIR;
+  process.env.HOME = homeDir;
+
+  try {
+    const runtimeSessionsDir = path.join(homeDir, '.fieldtheory', '.codex-context', 'sessions');
+    const attachedManifest = writeContext(runtimeSessionsDir, 'attached', 'Attached Artifact', 'attached body', '2026-01-02T00:00:00.000Z');
+    const newerUnattachedManifest = writeContext(runtimeSessionsDir, 'unattached', 'Workflow', 'workflow body', '2026-01-03T00:00:00.000Z');
+    fs.utimesSync(attachedManifest, new Date('2026-01-02T00:00:00.000Z'), new Date('2026-01-02T00:00:00.000Z'));
+    fs.utimesSync(newerUnattachedManifest, new Date('2026-01-03T00:00:00.000Z'), new Date('2026-01-03T00:00:00.000Z'));
+
+    const sessionStatePath = path.join(homeDir, '.fieldtheory', '.codex-context', 'session-state.json');
+    fs.writeFileSync(sessionStatePath, JSON.stringify([{
+      id: 'terminal-1',
+      cwd: process.cwd(),
+      exitedAt: null,
+      attachedContexts: [{
+        filePath: attachedManifest,
+        attachedAt: '2026-01-04T00:00:00.000Z',
+        sourcePath: '/Users/afar/.fieldtheory/librarian/artifacts/fieldtheory-2026-05-08-093112-artifact.md',
+      }],
+    }]));
+
+    assert.equal(findCurrentContextManifest(), attachedManifest);
+    assert.equal(readCurrentDocumentSummary().activeDocument.title, 'Attached Artifact');
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalLibraryDir === undefined) delete process.env.FT_LIBRARY_DIR;
+    else process.env.FT_LIBRARY_DIR = originalLibraryDir;
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
 test('readCurrentDocumentSummary exposes selection, recent, and included page metadata', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-context-fields-'));
   try {

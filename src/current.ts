@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { legacyCodexContextSessionsDir, runtimeContextSessionsDir } from './paths.js';
+import { legacyCodexContextSessionsDir, runtimeContextSessionStatePath, runtimeContextSessionsDir } from './paths.js';
 
 export interface CurrentDocumentSelection {
   textPath: string;
@@ -35,6 +35,14 @@ export interface CurrentDocumentContext extends CurrentDocumentSummary {
 
 type ManifestRecord = Record<string, unknown>;
 
+interface SessionStateManifestCandidate {
+  manifestPath: string;
+  cwdMatches: boolean;
+  active: boolean;
+  attachedAtMs: number;
+  mtimeMs: number;
+}
+
 function readJsonObject(filePath: string): ManifestRecord {
   const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -57,6 +65,17 @@ function statMtimeMs(filePath: string): number {
 
 function arrayField(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
+}
+
+function timestampMs(value: unknown): number {
+  if (typeof value !== 'string') return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function cwdMatchesSession(value: unknown, cwd = process.cwd()): boolean {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  return path.resolve(value) === path.resolve(cwd);
 }
 
 function assertInsideDirectory(filePath: string, dirPath: string): void {
@@ -89,7 +108,50 @@ function contextSessionDirs(): string[] {
   ]));
 }
 
+function readSessionStateManifestCandidates(sessionStatePath: string): SessionStateManifestCandidate[] {
+  let sessions: unknown[];
+  try {
+    sessions = arrayField(JSON.parse(fs.readFileSync(sessionStatePath, 'utf-8')));
+  } catch {
+    return [];
+  }
+
+  return sessions.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const session = item as ManifestRecord;
+    const attachedContexts = arrayField(session.attachedContexts);
+    return attachedContexts.flatMap((context) => {
+      if (!context || typeof context !== 'object' || Array.isArray(context)) return [];
+      const manifestPath = stringField((context as ManifestRecord).filePath);
+      if (!manifestPath || !fs.existsSync(manifestPath)) return [];
+      return [{
+        manifestPath,
+        cwdMatches: cwdMatchesSession(session.cwd) || cwdMatchesSession(session.sessionCwd) || cwdMatchesSession((context as ManifestRecord).sessionCwd),
+        active: !stringField(session.exitedAt),
+        attachedAtMs: timestampMs((context as ManifestRecord).attachedAt),
+        mtimeMs: statMtimeMs(manifestPath),
+      }];
+    });
+  });
+}
+
+function findAttachedContextManifest(sessionStatePath = runtimeContextSessionStatePath()): string | null {
+  const candidates = readSessionStateManifestCandidates(sessionStatePath)
+    .sort((a, b) => {
+      if (a.cwdMatches !== b.cwdMatches) return a.cwdMatches ? -1 : 1;
+      if (a.active !== b.active) return a.active ? -1 : 1;
+      return (b.attachedAtMs - a.attachedAtMs) || (b.mtimeMs - a.mtimeMs);
+    });
+
+  return candidates[0]?.manifestPath ?? null;
+}
+
 export function findCurrentContextManifest(sessionsDir?: string): string | null {
+  if (!sessionsDir) {
+    const attachedManifest = findAttachedContextManifest();
+    if (attachedManifest) return attachedManifest;
+  }
+
   const manifests = (sessionsDir ? readSessionManifests(sessionsDir) : contextSessionDirs().flatMap(readSessionManifests))
     .sort((a, b) => statMtimeMs(b) - statMtimeMs(a));
 
