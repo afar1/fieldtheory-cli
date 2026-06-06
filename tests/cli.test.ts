@@ -218,6 +218,7 @@ test('ft navigation commands cover links tags writes app targets and location st
     port: 59971,
     token: 'test-token',
     browserUrl: 'http://127.0.0.1:59971/browser-library.html',
+    panelUrl: 'http://127.0.0.1:59971/panel',
   }));
   fs.writeFileSync(path.join(process.env.FT_LIBRARY_DIR, 'wikis', 'Alpha.md'), [
     '---',
@@ -264,30 +265,30 @@ test('ft navigation commands cover links tags writes app targets and location st
       await buildCli().parseAsync(['node', 'ft', 'panel', 'Alpha']);
     });
     const panelLine = panelOutput.trim().split('\n').at(-1) ?? '';
-    assert.match(panelLine, /http:\/\/127\.0\.0\.1:59971\/browser-library\.html/);
-    assert.match(panelLine, /api=http%3A%2F%2F127\.0\.0\.1%3A59971/);
-    assert.match(panelLine, /token=test-token/);
+    assert.match(panelLine, /http:\/\/127\.0\.0\.1:59971\/panel/);
+    assert.doesNotMatch(panelLine, /api=http%3A%2F%2F127\.0\.0\.1%3A59971/);
+    assert.doesNotMatch(panelLine, /token=test-token/);
     assert.match(panelLine, /target=%7B%22kind%22%3A%22wiki%22%2C%22path%22%3A%22wikis%2FAlpha\.md%22%7D/);
 
     const panelUrlOutput = await captureStdout(async () => {
       await buildCli().parseAsync(['node', 'ft', 'panel', 'Alpha', '--url']);
     });
     const panelUrlLine = panelUrlOutput.trim().split('\n').at(-1) ?? '';
-    assert.match(panelUrlLine, /^http:\/\/127\.0\.0\.1:59971\/browser-library\.html/);
+    assert.match(panelUrlLine, /^http:\/\/127\.0\.0\.1:59971\/panel/);
     assert.match(panelUrlLine, /target=%7B%22kind%22%3A%22wiki%22%2C%22path%22%3A%22wikis%2FAlpha\.md%22%7D/);
 
     const libraryPanelOutput = await captureStdout(async () => {
       await buildCli().parseAsync(['node', 'ft', 'panel']);
     });
     const libraryPanelLine = libraryPanelOutput.trim().split('\n').at(-1) ?? '';
-    assert.match(libraryPanelLine, /http:\/\/127\.0\.0\.1:59971\/browser-library\.html/);
+    assert.match(libraryPanelLine, /http:\/\/127\.0\.0\.1:59971\/panel/);
     assert.match(libraryPanelLine, /target=%7B%22kind%22%3A%22library%22%7D/);
 
     const codexPanelOutput = await captureStdout(async () => {
       await buildCli().parseAsync(['node', 'ft', 'codex', 'panel', 'Alpha']);
     });
     const codexPanelLine = codexPanelOutput.trim().split('\n').at(-1) ?? '';
-    assert.match(codexPanelLine, /http:\/\/127\.0\.0\.1:59971\/browser-library\.html/);
+    assert.match(codexPanelLine, /http:\/\/127\.0\.0\.1:59971\/panel/);
     assert.match(codexPanelLine, /target=%7B%22kind%22%3A%22wiki%22%2C%22path%22%3A%22wikis%2FAlpha\.md%22%7D/);
 
     const appUrlOutput = await captureStdout(async () => {

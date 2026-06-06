@@ -11,6 +11,7 @@ type BrowserHelperState = {
   port: number;
   token: string;
   browserUrl?: string;
+  panelUrl?: string;
 };
 
 function normalizeState(value: unknown): BrowserHelperState | null {
@@ -24,6 +25,7 @@ function normalizeState(value: unknown): BrowserHelperState | null {
     port: record.port,
     token: record.token,
     browserUrl: typeof record.browserUrl === 'string' && record.browserUrl.trim() ? record.browserUrl : undefined,
+    panelUrl: typeof record.panelUrl === 'string' && record.panelUrl.trim() ? record.panelUrl : undefined,
   };
 }
 
@@ -50,11 +52,13 @@ export async function buildBrowserPanelUrl(target: BrowserPanelTarget): Promise<
     throw new Error('Field Theory browser helper is not responding. Restart Field Theory with FIELD_THEORY_BROWSER_HELPER=1, then run ft panel again.', { cause: error });
   }
 
-  const baseUrl = state.browserUrl || `http://${state.host}:${state.port}/browser-library.html`;
+  const baseUrl = state.panelUrl || state.browserUrl || `http://${state.host}:${state.port}/browser-library.html`;
   const url = new URL(baseUrl);
-  url.pathname = '/browser-library.html';
-  url.searchParams.set('api', `http://${state.host}:${state.port}`);
-  url.searchParams.set('token', state.token);
+  if (!state.panelUrl) {
+    url.pathname = '/browser-library.html';
+    url.searchParams.set('api', `http://${state.host}:${state.port}`);
+    url.searchParams.set('token', state.token);
+  }
   url.searchParams.set('target', JSON.stringify(target));
   return url.toString();
 }
