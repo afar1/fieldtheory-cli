@@ -39,6 +39,10 @@ export function runtimeContextSessionsDir(): string {
   return path.join(fieldTheoryDir(), '.codex-context', 'sessions');
 }
 
+export function runtimeContextSessionStatePath(): string {
+  return path.join(fieldTheoryDir(), '.codex-context', 'session-state.json');
+}
+
 export function legacyCodexContextSessionsDir(): string {
   return path.join(canonicalLibraryDir(), 'Codex Context', 'sessions');
 }
