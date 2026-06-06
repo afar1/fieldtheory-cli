@@ -23,6 +23,7 @@ export interface CurrentDocumentSummary {
     kind: string | null;
     contentMode: string | null;
     contentPath: string;
+    lineMapping: unknown;
   };
   selection: CurrentDocumentSelection | null;
   recent: CurrentDocumentRelatedPage[];
@@ -215,6 +216,7 @@ export function readCurrentDocumentSummary(manifestPath = findCurrentContextMani
       kind: stringField(documentRecord.kind),
       contentMode: stringField(documentRecord.contentMode),
       contentPath,
+      lineMapping: documentRecord.lineMapping ?? null,
     },
     selection: readSelection(manifest.selection, sessionDir),
     recent: readRelatedPages(manifest.recent, sessionDir),
@@ -241,6 +243,7 @@ export function formatCurrentDocumentContext(context: CurrentDocumentContext): s
     `updatedAt: ${context.updatedAt ?? '(unknown)'}`,
     `manifest: ${context.manifestPath}`,
     `content: ${context.activeDocument.contentPath}`,
+    `lineMapping: ${context.activeDocument.lineMapping ? 'available' : '(none)'}`,
     '',
     '---',
     '',
@@ -259,6 +262,7 @@ export function formatCurrentDocumentSummary(context: CurrentDocumentSummary): s
     `updatedAt: ${context.updatedAt ?? '(unknown)'}`,
     `manifest: ${context.manifestPath}`,
     `content: ${context.activeDocument.contentPath}`,
+    `lineMapping: ${context.activeDocument.lineMapping ? 'available' : '(none)'}`,
     '',
   ].join('\n');
 }

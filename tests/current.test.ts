@@ -170,6 +170,35 @@ test('readCurrentDocumentSummary exposes selection, recent, and included page me
   }
 });
 
+test('readCurrentDocumentSummary exposes active document line mapping', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-line-map-'));
+  try {
+    const sessionsDir = path.join(tmpDir, 'sessions');
+    const manifestPath = writeContext(sessionsDir, 'session', 'Page', 'body', '2026-01-01T00:00:00.000Z');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    const lineMapping = {
+      activeLineKind: 'renderedVisual',
+      contentMode: 'rendered',
+      visibleRowsOnly: true,
+      lines: [{
+        visibleLine: 20,
+        sourceLine: 15,
+        rowInSourceLine: 1,
+        rowsInSourceLine: 3,
+        text: 'The phrase "Ego sum" is Latin for "I am."',
+      }],
+    };
+    manifest.activeDocument.lineMapping = lineMapping;
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+
+    const summary = readCurrentDocumentSummary(manifestPath);
+    assert.deepEqual(summary.activeDocument.lineMapping, lineMapping);
+    assert.match(formatCurrentDocumentSummary(summary), /lineMapping: available/);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('readCurrentDocumentContext rejects content paths outside the session directory', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-'));
   try {
