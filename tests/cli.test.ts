@@ -390,8 +390,10 @@ test('ft current keeps document content opt-in for model-facing JSON', async () 
 
 test('ft current reports missing context without a stack trace', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-missing-'));
-  const previous = process.env.FT_LIBRARY_DIR;
+  const previousHome = process.env.HOME;
+  const previousLibraryDir = process.env.FT_LIBRARY_DIR;
   const previousExitCode = process.exitCode;
+  process.env.HOME = tmpDir;
   process.env.FT_LIBRARY_DIR = path.join(tmpDir, 'library');
   try {
     const stderr = await captureStderr(async () => {
@@ -401,8 +403,10 @@ test('ft current reports missing context without a stack trace', async () => {
     assert.doesNotMatch(stderr, /at readCurrentDocument/);
     assert.equal(process.exitCode, 1);
   } finally {
-    if (previous === undefined) delete process.env.FT_LIBRARY_DIR;
-    else process.env.FT_LIBRARY_DIR = previous;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousLibraryDir === undefined) delete process.env.FT_LIBRARY_DIR;
+    else process.env.FT_LIBRARY_DIR = previousLibraryDir;
     process.exitCode = previousExitCode;
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

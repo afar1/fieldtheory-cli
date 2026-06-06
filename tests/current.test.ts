@@ -12,7 +12,7 @@ import {
   readCurrentDocumentSummary,
 } from '../src/current.js';
 
-function writeContext(root: string, id: string, title: string, content: string, updatedAt: string): string {
+function writeContext(root: string, id: string, title: string, content: string, updatedAt: string, extra: Record<string, unknown> = {}): string {
   const sessionDir = path.join(root, id);
   fs.mkdirSync(sessionDir, { recursive: true });
   const contentPath = path.join(sessionDir, 'active.md');
@@ -28,6 +28,7 @@ function writeContext(root: string, id: string, title: string, content: string, 
       contentMode: 'rendered',
       contentPath,
     },
+    ...extra,
   }));
   return manifestPath;
 }
@@ -56,6 +57,77 @@ test('readCurrentDocumentContext reads newest Field Theory context manifest', ()
     assert.match(formatCurrentDocumentContext(context), /# Newer/);
     assert.match(formatCurrentDocumentSummary(context), /title: Newer Page/);
     assert.doesNotMatch(formatCurrentDocumentSummary(context), /# Newer/);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('findCurrentContextManifest reads the app runtime context before legacy Library context', () => {
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-home-'));
+  const originalHome = process.env.HOME;
+  const originalLibraryDir = process.env.FT_LIBRARY_DIR;
+  delete process.env.FT_LIBRARY_DIR;
+  process.env.HOME = homeDir;
+
+  try {
+    const runtimeSessionsDir = path.join(homeDir, '.fieldtheory', '.codex-context', 'sessions');
+    const legacySessionsDir = path.join(homeDir, '.fieldtheory', 'library', 'Codex Context', 'sessions');
+    const runtimeManifest = writeContext(runtimeSessionsDir, 'runtime', 'Runtime Page', 'runtime body', '2026-01-03T00:00:00.000Z');
+    const legacyManifest = writeContext(legacySessionsDir, 'legacy', 'Legacy Page', 'legacy body', '2026-01-02T00:00:00.000Z');
+    const runtimeTime = new Date('2026-01-03T00:00:00.000Z');
+    const legacyTime = new Date('2026-01-02T00:00:00.000Z');
+    fs.utimesSync(runtimeManifest, runtimeTime, runtimeTime);
+    fs.utimesSync(legacyManifest, legacyTime, legacyTime);
+
+    assert.equal(findCurrentContextManifest(), runtimeManifest);
+    assert.equal(readCurrentDocumentSummary().activeDocument.title, 'Runtime Page');
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalLibraryDir === undefined) delete process.env.FT_LIBRARY_DIR;
+    else process.env.FT_LIBRARY_DIR = originalLibraryDir;
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('readCurrentDocumentSummary exposes selection, recent, and included page metadata', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-context-fields-'));
+  try {
+    const sessionsDir = path.join(tmpDir, 'sessions');
+    const sessionDir = path.join(sessionsDir, 'session');
+    const selectionPath = path.join(sessionDir, 'selection.md');
+    const recentPath = path.join(sessionDir, 'recent.md');
+    const includedPath = path.join(sessionDir, 'included.md');
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.writeFileSync(selectionPath, 'selected text');
+    fs.writeFileSync(recentPath, 'recent text');
+    fs.writeFileSync(includedPath, 'included text');
+    const manifestPath = writeContext(sessionsDir, 'session', 'Page', 'body', '2026-01-01T00:00:00.000Z', {
+      selection: {
+        textPath: selectionPath,
+        preview: 'selected text',
+      },
+      recent: [{
+        title: 'Recent Page',
+        path: '/library/recent.md',
+        kind: 'wiki',
+        contentPath: recentPath,
+      }],
+      includedPages: [{
+        title: 'Included Page',
+        path: '/library/included.md',
+        kind: 'wiki',
+        contentPath: includedPath,
+      }],
+    });
+
+    const summary = readCurrentDocumentSummary(manifestPath);
+    assert.equal(summary.selection?.textPath, selectionPath);
+    assert.equal(summary.selection?.preview, 'selected text');
+    assert.equal(summary.recent[0]?.path, '/library/recent.md');
+    assert.equal(summary.recent[0]?.contentPath, recentPath);
+    assert.equal(summary.includedPages[0]?.path, '/library/included.md');
+    assert.equal(summary.includedPages[0]?.contentPath, includedPath);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

@@ -1,6 +1,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { codexContextSessionsDir } from './paths.js';
+import { legacyCodexContextSessionsDir, runtimeContextSessionsDir } from './paths.js';
+
+export interface CurrentDocumentSelection {
+  textPath: string;
+  preview: string | null;
+}
+
+export interface CurrentDocumentRelatedPage {
+  title: string | null;
+  path: string | null;
+  kind: string | null;
+  contentPath: string | null;
+}
 
 export interface CurrentDocumentSummary {
   manifestPath: string;
@@ -12,6 +24,9 @@ export interface CurrentDocumentSummary {
     contentMode: string | null;
     contentPath: string;
   };
+  selection: CurrentDocumentSelection | null;
+  recent: CurrentDocumentRelatedPage[];
+  includedPages: CurrentDocumentRelatedPage[];
 }
 
 export interface CurrentDocumentContext extends CurrentDocumentSummary {
@@ -40,6 +55,10 @@ function statMtimeMs(filePath: string): number {
   }
 }
 
+function arrayField(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
 function assertInsideDirectory(filePath: string, dirPath: string): void {
   const resolvedFilePath = path.resolve(filePath);
   const resolvedDirPath = path.resolve(dirPath);
@@ -49,21 +68,61 @@ function assertInsideDirectory(filePath: string, dirPath: string): void {
   }
 }
 
-export function findCurrentContextManifest(sessionsDir = codexContextSessionsDir()): string | null {
+function readSessionManifests(sessionsDir: string): string[] {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(sessionsDir, { withFileTypes: true });
   } catch {
-    return null;
+    return [];
   }
 
-  const manifests = entries
+  return entries
     .filter((entry) => entry.isDirectory())
     .map((entry) => path.join(sessionsDir, entry.name, 'context.json'))
-    .filter((manifestPath) => fs.existsSync(manifestPath))
+    .filter((manifestPath) => fs.existsSync(manifestPath));
+}
+
+function contextSessionDirs(): string[] {
+  return Array.from(new Set([
+    runtimeContextSessionsDir(),
+    legacyCodexContextSessionsDir(),
+  ]));
+}
+
+export function findCurrentContextManifest(sessionsDir?: string): string | null {
+  const manifests = (sessionsDir ? readSessionManifests(sessionsDir) : contextSessionDirs().flatMap(readSessionManifests))
     .sort((a, b) => statMtimeMs(b) - statMtimeMs(a));
 
   return manifests[0] ?? null;
+}
+
+function readSelection(value: unknown, sessionDir: string): CurrentDocumentSelection | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as ManifestRecord;
+  const textPath = stringField(record.textPath);
+  if (!textPath) return null;
+  assertInsideDirectory(textPath, sessionDir);
+  return {
+    textPath,
+    preview: stringField(record.preview),
+  };
+}
+
+function readRelatedPages(value: unknown, sessionDir: string): CurrentDocumentRelatedPage[] {
+  return arrayField(value)
+    .map((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+      const record = item as ManifestRecord;
+      const contentPath = stringField(record.contentPath);
+      if (contentPath) assertInsideDirectory(contentPath, sessionDir);
+      return {
+        title: stringField(record.title),
+        path: stringField(record.path),
+        kind: stringField(record.kind),
+        contentPath,
+      };
+    })
+    .filter((item): item is CurrentDocumentRelatedPage => item !== null);
 }
 
 export function readCurrentDocumentSummary(manifestPath = findCurrentContextManifest()): CurrentDocumentSummary {
@@ -82,7 +141,8 @@ export function readCurrentDocumentSummary(manifestPath = findCurrentContextMani
   if (!contentPath) {
     throw new Error(`Context manifest has no activeDocument.contentPath: ${manifestPath}`);
   }
-  assertInsideDirectory(contentPath, path.dirname(manifestPath));
+  const sessionDir = path.dirname(manifestPath);
+  assertInsideDirectory(contentPath, sessionDir);
 
   return {
     manifestPath,
@@ -94,6 +154,9 @@ export function readCurrentDocumentSummary(manifestPath = findCurrentContextMani
       contentMode: stringField(documentRecord.contentMode),
       contentPath,
     },
+    selection: readSelection(manifest.selection, sessionDir),
+    recent: readRelatedPages(manifest.recent, sessionDir),
+    includedPages: readRelatedPages(manifest.includedPages, sessionDir),
   };
 }
 
