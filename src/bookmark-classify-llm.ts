@@ -7,9 +7,11 @@
  */
 
 import { openDb, saveDb } from './db.js';
-import { twitterBookmarksIndexPath } from './paths.js';
+import { twitterBookmarksIndexPath, twitterClassificationsPath } from './paths.js';
+import { appendLine } from './fs.js';
 import type { ResolvedEngine } from './engine.js';
 import { invokeEngine } from './engine.js';
+import type { ClassificationRecord } from './types.js';
 
 const BATCH_SIZE = 50;
 
@@ -180,7 +182,7 @@ export async function classifyWithLlm(
   try {
     // Fetch unclassified bookmarks
     const rows = db.exec(
-      `SELECT id, text, author_handle, links_json FROM bookmarks
+      `SELECT id, text, author_handle, links_json, domains, primary_domain FROM bookmarks
        WHERE primary_category = 'unclassified' OR primary_category IS NULL
        ORDER BY RANDOM()`
     );
@@ -189,11 +191,13 @@ export async function classifyWithLlm(
       return { engine: engine.name, totalUnclassified: 0, classified: 0, failed: 0, batches: 0 };
     }
 
-    const unclassified: UnclassifiedBookmark[] = rows[0].values.map(r => ({
+    const unclassified: (UnclassifiedBookmark & { domains: string | null; primaryDomain: string | null })[] = rows[0].values.map(r => ({
       id: r[0] as string,
       text: r[1] as string,
       authorHandle: r[2] as string | null,
       links: r[3] as string | null,
+      domains: r[4] as string | null,
+      primaryDomain: r[5] as string | null,
     }));
 
     const totalUnclassified = unclassified.length;
@@ -218,8 +222,23 @@ export async function classifyWithLlm(
         const stmt = db.prepare(
           `UPDATE bookmarks SET categories = ?, primary_category = ? WHERE id = ?`
         );
+        const now = new Date().toISOString();
+        const classificationsPath = twitterClassificationsPath();
+
+        const batchMap = new Map(batch.map(b => [b.id, b]));
+
         for (const r of results) {
           stmt.run([r.categories.join(','), r.primary, r.id]);
+          const b = batchMap.get(r.id);
+          const record: ClassificationRecord = {
+            id: r.id,
+            categories: r.categories,
+            primaryCategory: r.primary,
+            domains: b?.domains ? b.domains.split(',') : undefined,
+            primaryDomain: b?.primaryDomain ?? undefined,
+            classifiedAt: now,
+          };
+          await appendLine(classificationsPath, JSON.stringify(record));
         }
         stmt.free();
 
@@ -299,7 +318,7 @@ export async function classifyDomainsWithLlm(
       ? '1=1'
       : 'primary_domain IS NULL';
     const rows = db.exec(
-      `SELECT id, text, author_handle, categories FROM bookmarks
+      `SELECT id, text, author_handle, categories, primary_category FROM bookmarks
        WHERE ${where} ORDER BY RANDOM()`
     );
 
@@ -307,11 +326,12 @@ export async function classifyDomainsWithLlm(
       return { engine: engine.name, totalUnclassified: 0, classified: 0, failed: 0, batches: 0 };
     }
 
-    const bookmarks: DomainBookmark[] = rows[0].values.map(r => ({
+    const bookmarks: (DomainBookmark & { primaryCategory: string | null })[] = rows[0].values.map(r => ({
       id: r[0] as string,
       text: r[1] as string,
       authorHandle: r[2] as string | null,
       categories: r[3] as string | null,
+      primaryCategory: r[4] as string | null,
     }));
 
     const total = bookmarks.length;
@@ -335,8 +355,22 @@ export async function classifyDomainsWithLlm(
         const stmt = db.prepare(
           `UPDATE bookmarks SET domains = ?, primary_domain = ? WHERE id = ?`
         );
+        const now = new Date().toISOString();
+        const classificationsPath = twitterClassificationsPath();
+        const batchMap = new Map(batch.map(b => [b.id, b]));
+
         for (const r of results) {
           stmt.run([r.categories.join(','), r.primary, r.id]);
+          const b = batchMap.get(r.id);
+          const record: ClassificationRecord = {
+            id: r.id,
+            categories: b?.categories ? b.categories.split(',') : [],
+            primaryCategory: b?.primaryCategory ?? 'unclassified',
+            domains: r.categories,
+            primaryDomain: r.primary,
+            classifiedAt: now,
+          };
+          await appendLine(classificationsPath, JSON.stringify(record));
         }
         stmt.free();
 
