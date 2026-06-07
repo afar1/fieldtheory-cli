@@ -4,6 +4,19 @@ Sync and store bookmarks locally, manage Field Theory Library and command workfl
 
 Free and open source. Designed for Mac.
 
+Field Theory CLI also acts as the command-line companion to the Field Theory Mac app: it knows the local `~/.fieldtheory` paths, can open Library pages in the packaged app, installs agent skills, and can download packaged app releases from the release feed.
+
+## Repository Family
+
+Field Theory is split across sibling repositories:
+
+- `afar1/fieldtheory`: Field Theory Mac app source.
+- `afar1/fieldtheory-cli`: this CLI, licensed under MIT.
+- `afar1/fieldtheory-plugin`: Field Theory Codex plugin and skills.
+- `afar1/field-releases`: packaged Mac app release artifacts and updater metadata.
+
+Use the app source repo for Mac app issues, this repo for CLI issues, the plugin repo for agent-plugin issues, and the release feed only for installer, download, update-feed, or release-artifact problems.
+
 ## Install
 
 ```bash
@@ -225,10 +238,10 @@ To remove bookmark and Library data: `rm -rf ~/.fieldtheory/bookmarks ~/.fieldth
 
 The CLI is one piece of the Field Theory repo family.
 
-- `afar1/fieldtheory-cli`: this CLI, licensed under MIT.
 - `afar1/fieldtheory`: Field Theory Mac app source, licensed under AGPL-3.0-or-later.
-- `afar1/fieldtheory-plugin`: Field Theory plugin ecosystem, licensed under MIT.
-- `afar1/field-releases`: packaged Mac app release artifacts only.
+- `afar1/fieldtheory-cli`: this CLI, licensed under MIT.
+- `afar1/fieldtheory-plugin`: Field Theory Codex plugin and skills, licensed under MIT.
+- `afar1/field-releases`: packaged Mac app release artifacts and updater metadata only.
 
 File app-source issues in the app source repo. Keep binary installer, updater, and release-feed issues out of this CLI repo unless the bug is caused by `ft install app` or CLI launch behavior.
 
