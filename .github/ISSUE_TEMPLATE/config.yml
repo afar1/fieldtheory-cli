@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Field Theory Mac app issues
+    url: https://github.com/afar1/fieldtheory/issues
+    about: Use this for Mac app behavior, Library UI, auth, River, sync, updater, or app packaging issues not caused by the CLI.
+  - name: Field Theory plugin issues
+    url: https://github.com/afar1/fieldtheory-plugin/issues
+    about: Use this for Codex plugin, skills, and agent integration issues.
+  - name: Field Theory release feed issues
+    url: https://github.com/afar1/field-releases/issues
+    about: Use this only for installer, download, updater-feed, or release-artifact problems.
