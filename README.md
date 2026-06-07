@@ -221,6 +221,17 @@ export FT_COMMANDS_DIR=/path/to/custom/commands
 
 To remove bookmark and Library data: `rm -rf ~/.fieldtheory/bookmarks ~/.fieldtheory/library`
 
+## Field Theory Repos
+
+The CLI is one piece of the Field Theory source release.
+
+- `afar1/fieldtheory-cli`: this CLI, licensed under MIT.
+- `afar1/field-releases`: packaged Mac app release artifacts only.
+- `afar1/fieldtheory`: planned canonical Mac app source repo after the private-first app audit is complete.
+- `afar1/fieldtheory-plugin`: planned plugin ecosystem repo.
+
+File app-source issues in the app source repo once it is available. Keep binary installer, updater, and release-feed issues out of this CLI repo unless the bug is caused by `ft install app` or CLI launch behavior.
+
 ## Categories
 
 | Category | What it catches |
@@ -275,6 +286,14 @@ Session sync extracts cookies from your browser's local database. Use `ft sync -
 **OAuth tokens** are stored with `chmod 600` (owner-only). Treat `~/.fieldtheory/bookmarks/oauth-token.json` like a password.
 
 **The default sync uses X's internal GraphQL API**, the same API that x.com uses in your browser. For the official v2 API, use `ft auth` + `ft sync --api`.
+
+Do not open a public issue for suspected vulnerabilities, exposed credentials, auth bypasses, token-handling bugs, or private data exposure. Use the private maintainer contact in `SECURITY.md`.
+
+## Contributing
+
+By submitting a PR, patch, or contribution, you certify that you have the right to contribute it and agree to license it under the MIT License.
+
+No CLA is required. Maintainers may ask for explicit signoff on larger, sensitive, or ambiguous contributions.
 
 ## License
 
