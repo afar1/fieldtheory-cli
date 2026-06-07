@@ -1,6 +1,6 @@
 # Field Theory CLI
 
-Sync and store locally all of your X/Twitter bookmarks. Search, classify, and make them available to Claude Code, Codex, or any agent with shell access.
+Sync and store bookmarks locally, manage Field Theory Library and command workflows, and make local context available to Claude Code, Codex, or any agent with shell access.
 
 Free and open source. Designed for Mac.
 
@@ -223,14 +223,14 @@ To remove bookmark and Library data: `rm -rf ~/.fieldtheory/bookmarks ~/.fieldth
 
 ## Field Theory Repos
 
-The CLI is one piece of the Field Theory source release.
+The CLI is one piece of the Field Theory repo family.
 
 - `afar1/fieldtheory-cli`: this CLI, licensed under MIT.
+- `afar1/fieldtheory`: Field Theory Mac app source, licensed under AGPL-3.0-or-later.
+- `afar1/fieldtheory-plugin`: Field Theory plugin ecosystem, licensed under MIT.
 - `afar1/field-releases`: packaged Mac app release artifacts only.
-- `afar1/fieldtheory`: planned canonical Mac app source repo after the private-first app audit is complete.
-- `afar1/fieldtheory-plugin`: planned plugin ecosystem repo.
 
-File app-source issues in the app source repo once it is available. Keep binary installer, updater, and release-feed issues out of this CLI repo unless the bug is caused by `ft install app` or CLI launch behavior.
+File app-source issues in the app source repo. Keep binary installer, updater, and release-feed issues out of this CLI repo unless the bug is caused by `ft install app` or CLI launch behavior.
 
 ## Categories
 
