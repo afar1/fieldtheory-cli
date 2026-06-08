@@ -2,7 +2,7 @@
 
 Sync and store bookmarks locally, manage Field Theory Library and command workflows, and make local context available to Claude Code, Codex, or any agent with shell access.
 
-Free and open source. Designed for Mac.
+Free and open source.
 
 Field Theory CLI also acts as the command-line companion to the Field Theory Mac app: it knows the local `~/.fieldtheory` paths, can open Library pages in the packaged app, installs agent skills, and can download packaged app releases from the release feed.
 
