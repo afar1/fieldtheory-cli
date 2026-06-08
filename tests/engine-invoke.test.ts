@@ -96,3 +96,42 @@ test('invokeEngineAsync: captures multi-line stderr in the error message', async
     },
   );
 });
+
+function withEnv(key: string, value: string | undefined, fn: () => Promise<void>): Promise<void> {
+  const prior = process.env[key];
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+  return fn().finally(() => {
+    if (prior === undefined) delete process.env[key];
+    else process.env[key] = prior;
+  });
+}
+
+test('invokeEngineAsync: FT_TIMEOUT_MULTIPLIER scales the per-call deadline', async () => {
+  const { invokeEngineAsync } = await import('../src/engine.js');
+  // Caller asks for 200ms; multiplier 5 → effective 1000ms. A 500ms sleep
+  // would have timed out under the raw 200ms deadline, but completes when
+  // the multiplier widens it.
+  await withEnv('FT_TIMEOUT_MULTIPLIER', '5', async () => {
+    const out = await invokeEngineAsync(
+      shEngine('fake-fits-under-multiplier', 'sleep 0.5; printf "ok\\n"'),
+      'ignored',
+      { timeout: 200 },
+    );
+    assert.equal(out, 'ok');
+  });
+});
+
+test('invokeEngineAsync: invalid FT_TIMEOUT_MULTIPLIER values fall back to 1', async () => {
+  const { invokeEngineAsync } = await import('../src/engine.js');
+  // Garbage values must not crash and must not silently change the deadline.
+  for (const bad of ['not-a-number', '0', '-2', '']) {
+    await withEnv('FT_TIMEOUT_MULTIPLIER', bad, async () => {
+      await assert.rejects(
+        () => invokeEngineAsync(shEngine('fake-slow', 'sleep 5'), 'ignored', { timeout: 200 }),
+        /timed out after 200ms/,
+        `bad value ${JSON.stringify(bad)} should fall back to multiplier=1`,
+      );
+    });
+  }
+});
