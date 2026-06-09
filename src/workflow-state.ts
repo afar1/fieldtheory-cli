@@ -8,9 +8,10 @@ export interface WorkflowStateOptions {
 }
 
 export interface WorkflowStateRow {
-  category: string;
-  state: string;
+  active: string;
   plainEnglish: string;
+  includedInRoot: string;
+  inOrigin: string;
   next: string;
 }
 
@@ -81,6 +82,28 @@ function changedFiles(root: string): string[] {
   return output ? output.split('\n').filter(Boolean) : [];
 }
 
+function revParse(root: string, rev: string): string | null {
+  return runGit(['rev-parse', '--verify', rev], { cwd: root });
+}
+
+function refExists(root: string, ref: string): boolean {
+  return Boolean(revParse(root, ref));
+}
+
+function isAncestor(root: string, ancestor: string, descendant: string): boolean {
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], {
+      cwd: root,
+      encoding: 'utf-8',
+      timeout: 10_000,
+      stdio: ['pipe', 'pipe', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function parseWorktrees(root: string): { path: string; branch: string | null; prunable: boolean }[] {
   const output = runGit(['worktree', 'list', '--porcelain'], { cwd: root });
   if (!output) return [];
@@ -134,16 +157,37 @@ function formatCount(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? '' : 's'}`;
 }
 
+function worktreeName(worktreePath: string): string {
+  return path.basename(worktreePath);
+}
+
+function workerPlainEnglish(worktreePath: string, branch: string | null, changes: string[], includedInRoot: string, inOrigin: string): string {
+  const name = branch ? `\`${branch}\`` : worktreeName(worktreePath);
+  if (changes.length > 0) return `${name} has local file changes in its own worktree.`;
+  if (includedInRoot === 'yes' && inOrigin === 'yes') return `${name} is clean and already preserved in root and remote history.`;
+  if (includedInRoot === 'yes') return `${name} is clean and already present in root, but not obviously preserved remotely.`;
+  if (inOrigin === 'yes') return `${name} is clean and preserved remotely, but not included in root.`;
+  return `${name} is clean, local-only active work.`;
+}
+
+function workerNext(changes: string[], includedInRoot: string, inOrigin: string): string {
+  if (changes.length > 0) return 'save, ship, or abandon';
+  if (includedInRoot === 'yes' && inOrigin === 'yes') return 'clean';
+  if (includedInRoot === 'yes') return 'ship or clean';
+  return 'save, ship, or abandon';
+}
+
 export function getWorkflowState(options: WorkflowStateOptions = {}): WorkflowState {
   const repo = path.resolve(options.repo ?? process.cwd());
   const root = runGit(['rev-parse', '--show-toplevel'], { cwd: repo });
 
   if (!root) {
-    const rows = [
+    const rows: WorkflowStateRow[] = [
       {
-        category: 'Root',
-        state: 'not a git repo',
+        active: 'Root',
         plainEnglish: 'This directory is not inside a Git checkout.',
+        includedInRoot: 'root',
+        inOrigin: 'unknown',
         next: 'choose a repo',
       },
     ];
@@ -161,13 +205,20 @@ export function getWorkflowState(options: WorkflowStateOptions = {}): WorkflowSt
     runGit(['fetch', '--quiet', '--all', '--prune'], { cwd: root, timeout: 30_000 });
   }
 
-  const { branch, upstream, ahead, behind } = branchSummary(root);
-  const changes = changedFiles(root);
   const worktrees = parseWorktrees(root);
-  const activeWorkers = worktrees.filter((worktree) => path.resolve(worktree.path) !== path.resolve(root) && !worktree.prunable);
+  const stagingRoot = worktrees.find((worktree) => !worktree.prunable)?.path ?? root;
+  const { branch, upstream, ahead, behind } = branchSummary(stagingRoot);
+  const changes = changedFiles(stagingRoot);
+  const activeWorkers = worktrees.filter((worktree) => path.resolve(worktree.path) !== path.resolve(stagingRoot) && !worktree.prunable);
   const prunableWorktrees = worktrees.filter((worktree) => worktree.prunable);
-  const abandonedCount = countAbandonedRefs(root);
-  const openPullRequests = readOpenPullRequests(root);
+  const abandonedCount = countAbandonedRefs(stagingRoot);
+  const openPullRequests = readOpenPullRequests(stagingRoot);
+  const rootHead = revParse(stagingRoot, 'HEAD');
+  const targetRemote = upstream && upstream.startsWith('origin/')
+    ? upstream
+    : refExists(stagingRoot, 'origin/main')
+      ? 'origin/main'
+      : null;
 
   const rootBits = [
     changes.length === 0 ? 'clean' : `${formatCount(changes.length, 'changed file')}`,
@@ -176,80 +227,53 @@ export function getWorkflowState(options: WorkflowStateOptions = {}): WorkflowSt
   if (ahead > 0) rootBits.push(`ahead ${ahead}`);
   if (behind > 0) rootBits.push(`behind ${behind}`);
 
-  const rows: WorkflowStateRow[] = [
-    {
-      category: 'Root',
-      state: `${branch}: ${rootBits.join(', ')}`,
-      plainEnglish: changes.length === 0
-        ? 'The main checkout has no local file changes.'
-        : 'The main checkout has local work that is not clean yet.',
-      next: changes.length === 0 ? 'no action' : 'save, ship, or abandon',
-    },
-    {
-      category: 'Active workers',
-      state: activeWorkers.length === 0 ? 'none' : formatCount(activeWorkers.length, 'worktree'),
-      plainEnglish: activeWorkers.length === 0
-        ? 'There are no separate local task worktrees.'
-        : 'Separate local work exists outside this checkout.',
-      next: activeWorkers.length === 0 ? 'no action' : 'inspect each worker',
-    },
-    {
-      category: 'Included work',
-      state: changes.length === 0 && ahead === 0 ? 'none' : `${formatCount(changes.length, 'changed file')}, ahead ${ahead}`,
-      plainEnglish: changes.length === 0 && ahead === 0
-        ? 'Root does not contain obvious unsaved local work.'
-        : 'Root contains local changes or commits that may need to be saved or shipped.',
-      next: changes.length === 0 && ahead === 0 ? 'no action' : 'ship or clean up',
-    },
-    {
-      category: 'Excluded work',
-      state: activeWorkers.length === 0 ? 'none' : formatCount(activeWorkers.length, 'worker'),
-      plainEnglish: activeWorkers.length === 0
-        ? 'There is no separate local work waiting outside root.'
-        : 'Work in task worktrees is outside root until it is saved or shipped.',
-      next: activeWorkers.length === 0 ? 'no action' : 'save, ship, or abandon',
-    },
-    {
-      category: 'Shipped work',
-      state: openPullRequests.length === 0 ? 'none' : formatCount(openPullRequests.length, 'open PR'),
-      plainEnglish: openPullRequests.length === 0
-        ? 'No GitHub PRs are currently open for this repo.'
-        : 'GitHub has active review surfaces for this repo.',
-      next: openPullRequests.length === 0 ? 'no action' : 'review, merge, or abandon',
-    },
-    {
-      category: 'Landed work',
-      state: behind > 0 ? `behind ${behind}` : 'up to date or unknown',
-      plainEnglish: behind > 0
-        ? 'Remote has commits that are not in this checkout yet.'
-        : 'This checkout is not obviously missing remote base commits.',
-      next: behind > 0 ? 'update root' : 'no action',
-    },
-    {
-      category: 'Abandoned work',
-      state: abandonedCount === 0 ? 'none' : formatCount(abandonedCount, 'remote abandoned ref'),
-      plainEnglish: abandonedCount === 0
-        ? 'No abandoned remote refs were found under origin/abandoned.'
-        : 'Old work is preserved remotely and is not active locally.',
-      next: 'no action',
-    },
-    {
-      category: 'Open PRs',
-      state: openPullRequests.length === 0 ? 'none' : formatCount(openPullRequests.length, 'open PR'),
-      plainEnglish: openPullRequests.length === 0
-        ? 'There are no open PR decisions visible from GitHub.'
-        : 'These PRs still need review, merge, or abandon decisions.',
-      next: openPullRequests.length === 0 ? 'no action' : 'review, merge, or abandon',
-    },
-    {
-      category: 'Local cleanup',
-      state: prunableWorktrees.length === 0 ? 'none' : formatCount(prunableWorktrees.length, 'prunable worktree'),
-      plainEnglish: prunableWorktrees.length === 0
-        ? 'There are no stale worktree registrations.'
-        : 'Git has stale worktree records that can be pruned after inspection.',
-      next: prunableWorktrees.length === 0 ? 'no action' : 'clean-slate',
-    },
-  ];
+  const rows: WorkflowStateRow[] = activeWorkers.map((worktree) => {
+    const workerChanges = changedFiles(worktree.path);
+    const workerHead = revParse(worktree.path, 'HEAD');
+    const branchRemote = worktree.branch ? `origin/${worktree.branch}` : null;
+    const includedInRoot = workerHead && rootHead && isAncestor(stagingRoot, workerHead, rootHead) ? 'yes' : 'no';
+    const inOrigin = workerHead && (
+      (branchRemote && refExists(stagingRoot, branchRemote) && isAncestor(stagingRoot, workerHead, branchRemote)) ||
+      (targetRemote && isAncestor(stagingRoot, workerHead, targetRemote))
+    ) ? 'yes' : 'no';
+    return {
+      active: worktreeName(worktree.path),
+      plainEnglish: workerPlainEnglish(worktree.path, worktree.branch, workerChanges, includedInRoot, inOrigin),
+      includedInRoot,
+      inOrigin,
+      next: workerNext(workerChanges, includedInRoot, inOrigin),
+    };
+  });
+
+  rows.push({
+    active: 'Root',
+    plainEnglish: changes.length === 0
+      ? 'The staging checkout has no local file changes.'
+      : 'The staging checkout has local work that is not clean yet.',
+    includedInRoot: 'root',
+    inOrigin: [ahead > 0 ? `ahead ${ahead}` : null, behind > 0 ? `behind ${behind}` : null].filter(Boolean).join(', ') || 'up to date',
+    next: changes.length === 0 ? '' : 'save, ship, or abandon',
+  });
+
+  if (prunableWorktrees.length > 0) {
+    rows.push({
+      active: 'Local cleanup',
+      plainEnglish: 'Git has stale worktree records that can be pruned after inspection.',
+      includedInRoot: 'unknown',
+      inOrigin: 'unknown',
+      next: 'clean-slate',
+    });
+  }
+
+  if (abandonedCount > 0) {
+    rows.push({
+      active: 'Abandoned work',
+      plainEnglish: 'Old work is preserved remotely and is not active locally.',
+      includedInRoot: 'no',
+      inOrigin: 'yes',
+      next: '',
+    });
+  }
 
   let verdict = 'clean working state';
   let summary = `Root is on ${branch}`;
@@ -268,37 +292,23 @@ export function getWorkflowState(options: WorkflowStateOptions = {}): WorkflowSt
     summary = `Root is clean on ${branch}, with no active local workers or open PRs.`;
   }
 
-  rows.push({
-    category: 'Recommended next',
-    state: verdict,
-    plainEnglish: summary,
-    next: verdict === 'clean working state' ? 'start' : 'clean-slate',
-  });
-
-  return { repo, root, rows, openPullRequests, verdict, summary };
-}
-
-function pad(value: string, width: number): string {
-  return value + ' '.repeat(Math.max(0, width - value.length));
+  return { repo, root: stagingRoot, rows, openPullRequests, verdict, summary };
 }
 
 export function formatWorkflowState(state: WorkflowState): string {
-  const headers = ['Category', 'State', 'Plain English', 'Next'];
-  const widths = headers.map((header, index) => Math.max(
-    header.length,
-    ...state.rows.map((row) => [row.category, row.state, row.plainEnglish, row.next][index].length),
-  ));
+  const headers = ['Active', 'Root?', 'Origin?', 'Next', 'Plain English'];
 
   const lines = ['FT state', ''];
-  lines.push(`| ${headers.map((header, index) => pad(header, widths[index])).join(' | ')} |`);
-  lines.push(`| ${widths.map((width) => '-'.repeat(width)).join(' | ')} |`);
+  lines.push(`| ${headers.join(' | ')} |`);
+  lines.push(`| ${headers.map(() => '---').join(' | ')} |`);
   for (const row of state.rows) {
     lines.push(`| ${[
-      row.category,
-      row.state,
-      row.plainEnglish,
+      row.active,
+      row.includedInRoot,
+      row.inOrigin,
       row.next,
-    ].map((value, index) => pad(value, widths[index])).join(' | ')} |`);
+      row.plainEnglish,
+    ].join(' | ')} |`);
   }
 
   lines.push('');

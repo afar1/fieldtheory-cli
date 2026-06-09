@@ -420,8 +420,10 @@ test('ft state prints a read-only repo workflow table', async () => {
     });
     assert.match(output, /^FT state/);
     assert.match(output, /FT state/);
+    assert.match(output, /Root\?/);
+    assert.match(output, /Origin\?/);
     assert.match(output, /Root/);
-    assert.match(output, /not a git repo/);
+    assert.match(output, /not inside a Git checkout/);
     assert.match(output, /Verdict: not a repo\./);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
