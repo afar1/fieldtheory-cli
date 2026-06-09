@@ -420,6 +420,8 @@ test('ft state prints a read-only repo workflow table', async () => {
     });
     assert.match(output, /^FT state/);
     assert.match(output, /FT state/);
+    assert.match(output, /Included In Root/);
+    assert.match(output, /In Origin\?/);
     assert.match(output, /Root/);
     assert.match(output, /not a git repo/);
     assert.match(output, /Verdict: not a repo\./);
