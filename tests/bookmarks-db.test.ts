@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, listBookmarks, sanitizeFtsQuery, getCategoryCounts, sampleByCategory, getClassificationProgress } from '../src/bookmarks-db.js';
+import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, listBookmarks, sanitizeFtsQuery, getCategoryCounts, sampleByCategory, getClassificationProgress, deleteBookmark } from '../src/bookmarks-db.js';
 import { openDb, saveDb } from '../src/db.js';
-import { twitterBookmarksIndexPath } from '../src/paths.js';
+import { twitterBookmarksIndexPath, bookmarkMediaDir, bookmarkMediaManifestPath } from '../src/paths.js';
+import type { MediaFetchManifest } from '../src/bookmark-media.js';
 
 const FIXTURES = [
   { id: '1', tweetId: '1', url: 'https://x.com/alice/status/1', text: 'Machine learning is transforming healthcare', authorHandle: 'alice', authorName: 'Alice Smith', syncedAt: '2026-01-01T00:00:00Z', postedAt: '2026-01-01T12:00:00Z', language: 'en', engagement: { likeCount: 100, repostCount: 10 }, mediaObjects: [], links: ['https://example.com'], tags: [], ingestedVia: 'graphql' },
@@ -57,10 +58,10 @@ test('buildIndex refreshes existing rows without dropping classifications', asyn
     const updatedFixtures = FIXTURES.map((fixture) =>
       fixture.id === '1'
         ? {
-            ...fixture,
-            text: 'Machine learning note updated',
-            bookmarkedAt: '2026-04-02T00:00:00Z',
-          }
+          ...fixture,
+          text: 'Machine learning note updated',
+          bookmarkedAt: '2026-04-02T00:00:00Z',
+        }
         : fixture
     );
     const jsonl = updatedFixtures.map((r) => JSON.stringify(r)).join('\n') + '\n';
@@ -332,4 +333,105 @@ test('sanitizeFtsQuery: strips internal quotes to avoid double-escaping', () => 
   const result = sanitizeFtsQuery('"foo"bar');
   // Internal quotes stripped; term wrapped once
   assert.ok(!result.includes('""'));
+});
+
+// ── deleteBookmark: media cleanup ─────────────────────────────────────────────
+
+async function withMediaFixture(fn: (mediaDir: string) => Promise<void>): Promise<void> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ft-media-test-'));
+  const jsonl = FIXTURES.map((r) => JSON.stringify(r)).join('\n') + '\n';
+  await writeFile(path.join(dir, 'bookmarks.jsonl'), jsonl);
+
+  const mediaDir = path.join(dir, 'media');
+  await mkdir(mediaDir, { recursive: true });
+
+  // Write two fake image files: one for bookmark 1, one for bookmark 2
+  const file1 = path.join(mediaDir, 'tweet1-aabbcc.jpg');
+  const file2 = path.join(mediaDir, 'tweet2-ddeeff.jpg');
+  await writeFile(file1, 'fake-image-1');
+  await writeFile(file2, 'fake-image-2');
+
+  const manifest: MediaFetchManifest = {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    limit: 100,
+    maxBytes: 10_000_000,
+    processed: 2,
+    downloaded: 2,
+    skippedTooLarge: 0,
+    failed: 0,
+    entries: [
+      {
+        bookmarkId: '1',
+        tweetId: '1',
+        tweetUrl: 'https://x.com/alice/status/1',
+        sourceUrl: 'https://img.com/a.jpg',
+        localPath: file1,
+        contentType: 'image/jpeg',
+        bytes: 12,
+        status: 'downloaded',
+        fetchedAt: new Date().toISOString(),
+      },
+      {
+        bookmarkId: '2',
+        tweetId: '2',
+        tweetUrl: 'https://x.com/bob/status/2',
+        sourceUrl: 'https://img.com/b.jpg',
+        localPath: file2,
+        contentType: 'image/jpeg',
+        bytes: 12,
+        status: 'downloaded',
+        fetchedAt: new Date().toISOString(),
+      },
+    ],
+  };
+  await writeFile(path.join(dir, 'media-manifest.json'), JSON.stringify(manifest));
+
+  const saved = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = dir;
+  try {
+    await fn(mediaDir);
+  } finally {
+    if (saved !== undefined) process.env.FT_DATA_DIR = saved;
+    else delete process.env.FT_DATA_DIR;
+  }
+}
+
+async function fileExists(p: string): Promise<boolean> {
+  try { await access(p); return true; } catch { return false; }
+}
+
+test('deleteBookmark removes associated media file from disk', async () => {
+  await withMediaFixture(async (mediaDir) => {
+    await buildIndex();
+    const file1 = path.join(mediaDir, 'tweet1-aabbcc.jpg');
+    const file2 = path.join(mediaDir, 'tweet2-ddeeff.jpg');
+
+    await deleteBookmark('1');
+
+    assert.equal(await fileExists(file1), false, 'media file for deleted bookmark should be gone');
+    assert.equal(await fileExists(file2), true, 'media file for unrelated bookmark should remain');
+  });
+});
+
+test('deleteBookmark removes manifest entries for deleted bookmark', async () => {
+  await withMediaFixture(async () => {
+    await buildIndex();
+
+    await deleteBookmark('1');
+
+    const { readJson } = await import('../src/fs.js');
+    const manifest = await readJson<MediaFetchManifest>(bookmarkMediaManifestPath());
+    assert.equal(manifest.entries.every((e) => e.bookmarkId !== '1'), true);
+    assert.equal(manifest.entries.some((e) => e.bookmarkId === '2'), true);
+  });
+});
+
+test('deleteBookmark leaves media intact when no manifest exists', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    // No manifest → should not throw
+    const result = await deleteBookmark('1');
+    assert.ok(result !== null);
+  });
 });
