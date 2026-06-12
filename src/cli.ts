@@ -3,9 +3,9 @@ import { Command, InvalidArgumentError, Option } from 'commander';
 import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
 import { runTwitterOAuthFlow } from './xauth.js';
-import { syncBookmarksGraphQL, syncGaps, syncBookmarkFolders } from './graphql-bookmarks.js';
-import type { SyncProgress, GapFillProgress, FolderSyncProgress } from './graphql-bookmarks.js';
-import type { BookmarkFolder, QuotedTweetSnapshot } from './types.js';
+import { syncBookmarksGraphQL, syncGaps, syncBookmarkFolders, syncThreads } from './graphql-bookmarks.js';
+import type { SyncProgress, GapFillProgress, FolderSyncProgress, ThreadSyncProgress } from './graphql-bookmarks.js';
+import type { BookmarkFolder, QuotedTweetSnapshot, ThreadTweetSnapshot } from './types.js';
 import { DEFAULT_MEDIA_MAX_BYTES, fetchBookmarkMediaBatch } from './bookmark-media.js';
 import type { MediaFetchManifest, MediaFetchProgress } from './bookmark-media.js';
 import {
@@ -640,6 +640,26 @@ function formatQuotedTweetLines(quoted: QuotedTweetSnapshot): string[] {
   ];
 }
 
+function formatThreadTweetLines(tweet: ThreadTweetSnapshot): string[] {
+  const author = tweet.authorHandle ? `@${tweet.authorHandle}` : (tweet.authorName ?? 'thread tweet');
+  const date = tweet.postedAt ? ` · ${tweet.postedAt.slice(0, 10)}` : '';
+  const text = tweet.text.split(/\r?\n/).map((line) => `  | ${sanitizeForDisplay(line)}`);
+  return [
+    `  | ${sanitizeForDisplay(author)}${date}`,
+    ...text,
+    `  | ${tweet.url}`,
+  ];
+}
+
+function formatThreadSectionLines(title: string, tweets: ThreadTweetSnapshot[]): string[] {
+  if (tweets.length === 0) return [];
+  const lines = ['', title];
+  for (const tweet of tweets) {
+    lines.push(...formatThreadTweetLines(tweet), '');
+  }
+  return lines;
+}
+
 export function formatFolderMirrorStats(stats: { added: number; tagged: number; untagged: number; unchanged: number }): string {
   const parts: string[] = [];
   if (stats.added > 0) parts.push(`${stats.added} new`);
@@ -832,6 +852,7 @@ export function buildCli() {
     .option('--firefox-profile-dir <path>', 'Firefox profile directory')
     .option('--folders', 'Also sync bookmark folder tags (mirrors X\u2019s current folder state)', false)
     .option('--folder <name>', 'Sync only this folder (case-insensitive, supports unambiguous prefix)')
+    .option('--threads', 'Capture parent context and same-author thread continuations', false)
     .addOption(engineOption())
     .action(async (options) => {
       const firstRun = isFirstRun();
@@ -844,9 +865,15 @@ export function buildCli() {
           await resolveEngine({ override: engineOverride });
         }
 
+        const syncThreadsEnabled = Boolean(options.threads);
         const mutuallyExclusive = [options.rebuild, options.continue, options.gaps].filter(Boolean).length;
         if (mutuallyExclusive > 1) {
           console.error('  Error: --rebuild, --continue, and --gaps cannot be used together.');
+          process.exitCode = 1;
+          return;
+        }
+        if (syncThreadsEnabled && options.gaps) {
+          console.error('  Error: --threads cannot be combined with --gaps yet. Run them separately.');
           process.exitCode = 1;
           return;
         }
@@ -865,6 +892,11 @@ export function buildCli() {
           process.exitCode = 1;
           return;
         }
+        if (syncThreadsEnabled && options.api) {
+          console.error('  Error: Thread sync requires browser session (GraphQL). Remove --api.');
+          process.exitCode = 1;
+          return;
+        }
         if (folderMode !== 'off' && options.gaps) {
           console.error('  Error: --folders/--folder cannot be combined with --gaps. Run them separately.');
           process.exitCode = 1;
@@ -879,6 +911,54 @@ export function buildCli() {
         const postSyncMediaFetch = async (): Promise<void> => {
           if (!downloadMedia) return;
           await runMediaFetchWithProgress({ maxBytes: mediaMaxBytes, skipProfileImages: Boolean(options.skipProfileImages) });
+          console.log('');
+        };
+
+        const runThreadSync = async (cookieArgs: { csrfToken?: string; cookieHeader?: string }): Promise<void> => {
+          if (!syncThreadsEnabled) return;
+          const startTime = Date.now();
+          process.stderr.write(`\n  Expanding reply threads...\n`);
+          let lastProgress: ThreadSyncProgress = { done: 0, total: 0, contextFilled: 0, belowFilled: 0, emptyChecked: 0, failed: 0 };
+          const spinner = createSpinner(() => {
+            const p = lastProgress;
+            const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : 0;
+            const elapsed = Math.round((Date.now() - startTime) / 1000);
+            const parts = [`${p.done}/${p.total} (${pct}%)`];
+            if (p.contextFilled) parts.push(`${p.contextFilled} context`);
+            if (p.belowFilled) parts.push(`${p.belowFilled} continuations`);
+            if (p.emptyChecked) parts.push(`${p.emptyChecked} empty`);
+            if (p.failed) parts.push(`${p.failed} failed`);
+            parts.push(`${elapsed}s`);
+            return parts.join(' \u2502 ');
+          });
+          let result;
+          try {
+            result = await runWithSpinner(spinner, () => syncThreads({
+              delayMs: Number(options.delayMs) || 300,
+              browser: options.browser ? String(options.browser) : undefined,
+              chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+              chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+              firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+              csrfToken: cookieArgs.csrfToken,
+              cookieHeader: cookieArgs.cookieHeader,
+              onProgress: (progress: ThreadSyncProgress) => {
+                lastProgress = progress;
+                spinner.update();
+              },
+            }));
+          } catch (err) {
+            console.error(`\n  Thread sync paused: ${(err as Error).message}`);
+            console.error('  Partial progress was saved. Re-run `ft sync --threads` later to resume.\n');
+            return;
+          }
+          if (result.total === 0) {
+            console.log('  No thread gaps found.');
+          } else {
+            if (result.contextFilled > 0) console.log(`  \u2713 ${result.contextFilled} bookmarks got parent context`);
+            if (result.belowFilled > 0) console.log(`  \u2713 ${result.belowFilled} bookmarks got same-author continuations`);
+            if (result.emptyChecked > 0) console.log(`  \u2713 ${result.emptyChecked} bookmarks checked with no thread continuation`);
+            if (result.failed > 0) console.log(`  ${result.failed} thread expansions failed`);
+          }
           console.log('');
         };
 
@@ -1125,6 +1205,8 @@ export function buildCli() {
             }
           }
 
+          await runThreadSync({ csrfToken, cookieHeader });
+
           await postSyncMediaFetch();
 
           const newCount = await rebuildIndex();
@@ -1286,6 +1368,12 @@ export function buildCli() {
       console.log(`${item.id} \u00b7 ${item.authorHandle ? `@${item.authorHandle}` : '@?'}`);
       console.log(item.url);
       console.log(item.text);
+      if (item.threadContext.length) {
+        console.log(formatThreadSectionLines('thread context', item.threadContext).join('\n'));
+      }
+      if (item.threadBelow.length) {
+        console.log(formatThreadSectionLines('thread continuation', item.threadBelow).join('\n'));
+      }
       if (item.quotedTweet) {
         console.log(formatQuotedTweetLines(item.quotedTweet).join('\n'));
       }

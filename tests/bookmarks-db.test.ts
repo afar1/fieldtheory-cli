@@ -118,6 +118,64 @@ test('searchBookmarks: full-text search returns matching results', async () => {
   });
 });
 
+test('searchBookmarks: indexes captured reply thread text', async () => {
+  const fixtures = [{
+    ...FIXTURES[0],
+    text: 'Launch post with details in replies',
+    threadBelow: [{
+      id: '11',
+      text: 'The actual release is Saperly with the paper link.',
+      authorHandle: 'alice',
+      links: ['https://saperly.com'],
+      url: 'https://x.com/alice/status/11',
+    }],
+    threadExpandedAt: '2026-01-01T12:05:00Z',
+  }];
+
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    const results = await searchBookmarks({ query: 'Saperly', limit: 10 });
+    assert.equal(results.length, 1);
+    assert.equal(results[0].id, '1');
+  }, fixtures);
+});
+
+test('searchBookmarks: migration backfills thread text from existing thread JSON', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+
+    const dbPath = twitterBookmarksIndexPath();
+    const db = await openDb(dbPath);
+    try {
+      db.run(
+        `UPDATE bookmarks
+         SET thread_below_json = ?, thread_text = NULL
+         WHERE id = ?`,
+        [JSON.stringify([{
+          id: '12',
+          text: 'Migration-only reply mentioning Portola.',
+          authorHandle: 'alice',
+          url: 'https://x.com/alice/status/12',
+        }]), '1']
+      );
+      db.run('DROP TABLE IF EXISTS bookmarks_fts');
+      db.run(`CREATE VIRTUAL TABLE bookmarks_fts USING fts5(
+        text, author_handle, author_name, article_text,
+        content=bookmarks, content_rowid=rowid,
+        tokenize='porter unicode61'
+      )`);
+      db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
+      saveDb(db, dbPath);
+    } finally {
+      db.close();
+    }
+
+    const results = await searchBookmarks({ query: 'Portola', limit: 10 });
+    assert.equal(results.length, 1);
+    assert.equal(results[0].id, '1');
+  });
+});
+
 test('searchBookmarks: author filter works', async () => {
   await withIsolatedDataDir(async () => {
     await buildIndex();
