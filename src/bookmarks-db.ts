@@ -182,8 +182,13 @@ function buildBookmarkWhereClause(filters: BookmarkTimelineFilters): {
   const params: Array<string | number> = [];
 
   if (filters.query) {
-    conditions.push(`b.rowid IN (SELECT rowid FROM bookmarks_fts WHERE bookmarks_fts MATCH ?)`);
-    params.push(filters.query);
+    if (isCjkQuery(filters.query)) {
+      conditions.push(cjkLikeCondition('b', filters.query));
+      params.push(...cjkLikeParams(filters.query));
+    } else {
+      conditions.push(`b.rowid IN (SELECT rowid FROM bookmarks_fts WHERE bookmarks_fts MATCH ?)`);
+      params.push(filters.query);
+    }
   }
   if (filters.author) {
     conditions.push(`b.author_handle = ? COLLATE NOCASE`);
@@ -536,19 +541,70 @@ export function sanitizeFtsQuery(query: string): string {
     .join(' ');
 }
 
+function isCjkQuery(query: string): boolean {
+  return /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]/u.test(query);
+}
+
+function escapeLikeQuery(query: string): string {
+  return query
+    .replace(/\\/g, '\\\\')
+    .replace(/%/g, '\\%')
+    .replace(/_/g, '\\_');
+}
+
+function cjkLikePattern(query: string): string {
+  return `%${escapeLikeQuery(query)}%`;
+}
+
+function cjkLikeCondition(alias: string, query: string): string {
+  const columns = [
+    'text',
+    'author_handle',
+    'author_name',
+    'article_title',
+    'article_text',
+    'article_site',
+    'links_json',
+  ];
+  const perTermCondition = `(${columns.map((column) => `COALESCE(${alias}.${column}, '') LIKE ? ESCAPE '\\'`).join(' OR ')})`;
+  return cjkSearchTerms(query).map(() => perTermCondition).join(' AND ');
+}
+
+function cjkLikeParams(query: string): string[] {
+  return cjkSearchTerms(query).flatMap((term) => {
+    const pattern = cjkLikePattern(term);
+    return Array.from({ length: 7 }, () => pattern);
+  });
+}
+
+function cjkSearchTerms(query: string): string[] {
+  const terms = query
+    .trim()
+    .split(/\s+/)
+    .map((term) => term.trim())
+    .filter(Boolean);
+  return terms.length ? terms : [query.trim()];
+}
+
 export async function searchBookmarks(options: SearchOptions): Promise<SearchResult[]> {
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
   ensureMigrations(db);
   const limit = options.limit ?? 20;
+  const useCjkSearch = Boolean(options.query && isCjkQuery(options.query));
 
   try {
     const conditions: string[] = [];
     const params: any[] = [];
 
     if (options.query) {
-      conditions.push(`b.rowid IN (SELECT rowid FROM bookmarks_fts WHERE bookmarks_fts MATCH ?)`);
-      params.push(sanitizeFtsQuery(options.query));
+      if (useCjkSearch) {
+        conditions.push(cjkLikeCondition('b', options.query));
+        params.push(...cjkLikeParams(options.query));
+      } else {
+        conditions.push(`b.rowid IN (SELECT rowid FROM bookmarks_fts WHERE bookmarks_fts MATCH ?)`);
+        params.push(sanitizeFtsQuery(options.query));
+      }
     }
     if (options.author) {
       conditions.push(`b.author_handle = ? COLLATE NOCASE`);
@@ -566,13 +622,13 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     // If we have an FTS query, use bm25 for ranking; otherwise sort by posted_at
-    const orderBy = options.query
+    const orderBy = options.query && !useCjkSearch
       ? `ORDER BY bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0) ASC`
       : `ORDER BY b.posted_at DESC`;
 
     // For FTS ranking we need to join with the FTS table for bm25
     let sql: string;
-    if (options.query) {
+    if (options.query && !useCjkSearch) {
       sql = `
         SELECT b.id, b.url, b.text, b.author_handle, b.author_name, b.posted_at,
                bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0) as score
