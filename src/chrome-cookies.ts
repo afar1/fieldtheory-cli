@@ -45,24 +45,80 @@ interface LinuxKeys {
   v11: Buffer | null;
 }
 
-function getLinuxKeys(browser: BrowserDef): LinuxKeys {
-  const v10 = pbkdf2Sync('peanuts', 'saltysalt', 1, 16, 'sha1');
+export interface LinuxSecretToolLookup {
+  args: string[];
+  description: string;
+}
 
+export interface LinuxKWalletLookup {
+  wallet: string;
+  folder: string;
+  entry: string;
+  description: string;
+}
+
+export function linuxSecretToolLookups(browser: BrowserDef): LinuxSecretToolLookup[] {
   // Map browser ids to the Secret Service application names Chrome uses.
   const appNames: Record<string, string[]> = {
     chrome: ['chrome'],
     chromium: ['chromium'],
     brave: ['brave'],
+    edge: ['microsoft-edge', 'edge'],
     helium: ['chrome'], // Helium typically uses Chrome's keyring entry
     comet: ['chrome'],
   };
   const apps = appNames[browser.id] ?? ['chrome'];
+  const lookups: LinuxSecretToolLookup[] = apps.map((app) => ({
+    args: ['application', app],
+    description: `application ${app}`,
+  }));
 
-  for (const app of apps) {
+  // Chrome's newer KDE / Secret Portal path stores the OS crypt password under
+  // the v2 schema instead of the older "application chrome" attribute.
+  lookups.push({
+    args: ['xdg:schema', 'chrome_libsecret_os_crypt_password_v2'],
+    description: 'xdg:schema chrome_libsecret_os_crypt_password_v2',
+  });
+
+  return lookups;
+}
+
+export function linuxKWalletLookups(browser: BrowserDef, env: NodeJS.ProcessEnv = process.env): LinuxKWalletLookup[] {
+  const wallet = env.FT_KWALLET_NAME || 'kdewallet';
+  const entries: Record<string, Array<{ folder: string; entry: string }>> = {
+    chrome: [
+      { folder: 'Chrome Keys', entry: 'Chrome Safe Storage' },
+      { folder: 'Chrome', entry: 'Chrome Safe Storage' },
+    ],
+    chromium: [
+      { folder: 'Chromium Keys', entry: 'Chromium Safe Storage' },
+      { folder: 'Chromium', entry: 'Chromium Safe Storage' },
+    ],
+    brave: [
+      { folder: 'Brave Keys', entry: 'Brave Safe Storage' },
+      { folder: 'Brave', entry: 'Brave Safe Storage' },
+    ],
+    edge: [
+      { folder: 'Microsoft Edge Keys', entry: 'Microsoft Edge Safe Storage' },
+      { folder: 'Microsoft Edge', entry: 'Microsoft Edge Safe Storage' },
+    ],
+  };
+
+  return (entries[browser.id] ?? entries.chrome!).map((item) => ({
+    wallet,
+    ...item,
+    description: `${wallet}/${item.folder}/${item.entry}`,
+  }));
+}
+
+function getLinuxKeys(browser: BrowserDef): LinuxKeys {
+  const v10 = pbkdf2Sync('peanuts', 'saltysalt', 1, 16, 'sha1');
+
+  for (const lookup of linuxSecretToolLookups(browser)) {
     try {
       const pw = execFileSync(
         'secret-tool',
-        ['lookup', 'application', app],
+        ['lookup', ...lookup.args],
         { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 }
       ).trim();
       if (pw) {
@@ -70,6 +126,21 @@ function getLinuxKeys(browser: BrowserDef): LinuxKeys {
       }
     } catch {
       // secret-tool not available or no entry — try next
+    }
+  }
+
+  for (const lookup of linuxKWalletLookups(browser)) {
+    try {
+      const pw = execFileSync(
+        'kwallet-query',
+        [lookup.wallet, '-f', lookup.folder, '--read-password', lookup.entry],
+        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 }
+      ).trim();
+      if (pw) {
+        return { v10, v11: pbkdf2Sync(pw, 'saltysalt', 1, 16, 'sha1') };
+      }
+    } catch {
+      // kwallet-query not available, locked, or no matching entry — try next
     }
   }
 
@@ -317,8 +388,10 @@ export function decryptCookieValue(
         'password could not be retrieved.\n\n' +
         'Fix:\n' +
         '  1. Install libsecret-tools:  sudo apt-get install libsecret-tools\n' +
-        '  2. Check the entry exists:   secret-tool lookup application chrome\n' +
-        '  3. Or pass cookies manually: ft sync --cookies <ct0> <auth_token>'
+        '  2. Check the legacy entry:  secret-tool lookup application chrome\n' +
+        '  3. Check the KDE entry:     secret-tool lookup xdg:schema chrome_libsecret_os_crypt_password_v2\n' +
+        '  4. Check KWallet:           kwallet-query kdewallet -f "Chrome Keys" --read-password "Chrome Safe Storage"\n' +
+        '  5. Or pass cookies manually: ft sync --cookies <ct0> <auth_token>'
       );
     }
 
