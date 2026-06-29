@@ -388,7 +388,7 @@ export function decryptCookieValue(
         'password could not be retrieved.\n\n' +
         'Fix:\n' +
         '  1. Install libsecret-tools:  sudo apt-get install libsecret-tools\n' +
-        '  2. Check the legacy entry:  secret-tool lookup application chrome\n' +
+        '  2. Check the Chrome application entry:  secret-tool lookup application chrome\n' +
         '  3. Check the KDE entry:     secret-tool lookup xdg:schema chrome_libsecret_os_crypt_password_v2\n' +
         '  4. Check KWallet:           kwallet-query kdewallet -f "Chrome Keys" --read-password "Chrome Safe Storage"\n' +
         '  5. Or pass cookies manually: ft sync --cookies <ct0> <auth_token>'

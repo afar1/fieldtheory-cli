@@ -73,7 +73,7 @@ test('decryptCookieValue: uses correct PBKDF2 parameters (1003 iterations, sha1,
   assert.equal(result, 'test-value');
 });
 
-test('linuxSecretToolLookups: includes legacy Chrome and KDE portal schema lookups', () => {
+test('linuxSecretToolLookups: includes Chrome application and KDE portal schema lookups', () => {
   const lookups = linuxSecretToolLookups({
     id: 'chrome',
     displayName: 'Google Chrome',
