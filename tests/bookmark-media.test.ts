@@ -842,3 +842,44 @@ test('fetchBookmarkMediaBatch with skipProfileImages excludes pfp-only bookmarks
     globalThis.fetch = originalFetch;
   }
 });
+
+test('fetchBookmarkMediaBatch can be bounded to an exact in-memory record', async () => {
+  const selectedUrl = 'https://pbs.twimg.com/media/selected.jpg';
+  const excludedUrl = 'https://pbs.twimg.com/media/excluded.jpg';
+  const selected = {
+    id: '1', tweetId: '1', url: 'https://x.com/a/status/1', text: 'selected', syncedAt: '2026-08-11T00:00:00Z',
+    mediaObjects: [{ type: 'photo', url: selectedUrl }], links: [], tags: [], ingestedVia: 'graphql',
+  };
+  const excluded = {
+    id: '2', tweetId: '2', url: 'https://x.com/b/status/2', text: 'excluded', syncedAt: '2026-08-11T00:00:00Z',
+    mediaObjects: [{ type: 'photo', url: excludedUrl }], links: [], tags: [], ingestedVia: 'graphql',
+  };
+  const fetched: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if ((init?.method ?? 'GET') === 'HEAD') {
+      return new Response(null, { status: 200, headers: { 'content-length': '4', 'content-type': 'image/jpeg' } });
+    }
+    fetched.push(url);
+    return new Response(Uint8Array.from([1, 2, 3, 4]), {
+      status: 200,
+      headers: { 'content-type': 'image/jpeg' },
+    });
+  }) as typeof fetch;
+  try {
+    await withMediaDataDir([selected, excluded], async () => {
+      const manifest = await fetchBookmarkMediaBatch({
+        records: [selected],
+        limit: 1,
+        maxBytes: 1024,
+        skipProfileImages: true,
+      });
+      assert.deepEqual(fetched, [selectedUrl]);
+      assert.ok(manifest.entries.some((entry) => entry.sourceUrl === selectedUrl));
+      assert.ok(!manifest.entries.some((entry) => entry.sourceUrl === excludedUrl));
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

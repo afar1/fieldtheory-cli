@@ -262,7 +262,7 @@ function hasPendingMediaTarget(
 }
 
 export async function fetchBookmarkMediaBatch(
-  options: { limit?: number; maxBytes?: number; skipProfileImages?: boolean; retryFailed?: boolean; signal?: AbortSignal; onProgress?: (progress: MediaFetchProgress) => void } = {}
+  options: { limit?: number; maxBytes?: number; skipProfileImages?: boolean; retryFailed?: boolean; records?: BookmarkRecord[]; signal?: AbortSignal; onProgress?: (progress: MediaFetchProgress) => void } = {}
 ): Promise<MediaFetchManifest> {
   const limit = typeof options.limit === 'number' && !Number.isNaN(options.limit)
     ? Math.max(0, options.limit)
@@ -278,7 +278,7 @@ export async function fetchBookmarkMediaBatch(
   const previous = await loadManifest();
   const coveredAssetKeys = buildCoveredAssetKeys(previous, maxBytes, retryFailed, nowMs);
   const coveredProfileImageUrls = buildCoveredProfileImageUrls(previous, maxBytes, retryFailed, nowMs);
-  const bookmarks = await readJsonLines<BookmarkRecord>(twitterBookmarksCachePath());
+  const bookmarks = options.records ?? await readJsonLines<BookmarkRecord>(twitterBookmarksCachePath());
   const candidates = bookmarks
     .filter(hasMediaCandidate)
     .filter((bookmark) => hasPendingMediaTarget(bookmark, coveredAssetKeys, coveredProfileImageUrls, skipProfileImages))

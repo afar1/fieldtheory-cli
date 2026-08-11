@@ -4,11 +4,18 @@ import { loadChromeSessionConfig } from './config.js';
 import { extractChromeXCookies } from './chrome-cookies.js';
 import { extractFirefoxXCookies } from './firefox-cookies.js';
 import { parseTimestampMs } from './date-utils.js';
-import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkFolder, BookmarkRecord, QuotedTweetSnapshot } from './types.js';
+import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkFolder, BookmarkRecord, QuotedTweetSnapshot, ThreadTweetSnapshot } from './types.js';
 import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText, updateArticleContent } from './bookmarks-db.js';
 import type { ArticleUpdate } from './bookmarks-db.js';
 import { fetchArticle, resolveTcoLink } from './bookmark-enrich.js';
 import type { ArticleContent } from './bookmark-enrich.js';
+import {
+  compareThreadTweetsChronologically,
+  expandVisibleUrlEntities,
+  extractExpandedLinks,
+  parseTweetDetailResponse,
+  tweetUrlEntities,
+} from './tweet-snapshots.js';
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
 
@@ -25,6 +32,8 @@ const BOOKMARKS_OPERATION = 'Bookmarks';
 // working against Karpathy's 2039805659525644595 note_tweet on 2026-04-15.
 const TWEET_RESULT_BY_REST_ID_QUERY_ID = 'fHLDP3qFEjnTqhWBVvsREg';
 const TWEET_RESULT_BY_REST_ID_OPERATION = 'TweetResultByRestId';
+const TWEET_DETAIL_QUERY_ID = '-0WTL1e9Pij-JWAF5ztCCA';
+const TWEET_DETAIL_OPERATION = 'TweetDetail';
 
 // ──────────────────────────────────────────────────────────────────────────
 // Folder endpoints — READ ONLY. We never POST/PUT/DELETE to X.
@@ -1436,6 +1445,41 @@ const TWEET_RESULT_FIELD_TOGGLES = {
   withAuxiliaryUserLabels: false,
 };
 
+const TWEET_DETAIL_FEATURES = {
+  rweb_video_screen_enabled: false,
+  payments_enabled: false,
+  profile_label_improvements_pcf_label_in_post_enabled: true,
+  rweb_tipjar_consumption_enabled: true,
+  verified_phone_label_enabled: false,
+  creator_subscriptions_tweet_preview_api_enabled: true,
+  responsive_web_graphql_timeline_navigation_enabled: true,
+  responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
+  premium_content_api_read_enabled: false,
+  communities_web_enable_tweet_community_results_fetch: true,
+  c9s_tweet_anatomy_moderator_badge_enabled: true,
+  responsive_web_grok_analyze_button_fetch_trends_enabled: false,
+  responsive_web_grok_analyze_post_followups_enabled: true,
+  responsive_web_jetfuel_frame: false,
+  responsive_web_grok_share_attachment_enabled: true,
+  articles_preview_enabled: true,
+  responsive_web_edit_tweet_api_enabled: true,
+  graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
+  view_counts_everywhere_api_enabled: true,
+  longform_notetweets_consumption_enabled: true,
+  responsive_web_twitter_article_tweet_consumption_enabled: true,
+  tweet_awards_web_tipping_enabled: false,
+  responsive_web_grok_show_grok_translated_post: false,
+  responsive_web_grok_analysis_button_from_backend: false,
+  creator_subscriptions_quote_tweet_preview_enabled: false,
+  freedom_of_speech_not_reach_fetch_enabled: true,
+  standardized_nudges_misinfo: true,
+  tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
+  longform_notetweets_rich_text_read_enabled: true,
+  longform_notetweets_inline_media_enabled: true,
+  responsive_web_grok_image_annotation_enabled: true,
+  responsive_web_enhance_cards_enabled: false,
+};
+
 export type TweetFetchSource = 'graphql' | 'syndication';
 
 export interface TweetFetchResult {
@@ -1461,8 +1505,9 @@ export function parseTweetResultByRestId(json: any, tweetId: string): QuotedTwee
   const legacy = tweet?.legacy;
   if (!legacy) return null;
 
+  const urlEntities = tweetUrlEntities(tweet, legacy);
   const noteText = tweet?.note_tweet?.note_tweet_results?.result?.text;
-  const text = noteText ?? legacy.full_text ?? legacy.text ?? '';
+  const text = expandVisibleUrlEntities(noteText ?? legacy.full_text ?? legacy.text ?? '', urlEntities);
   if (!text) return null;
 
   const userResult = tweet?.core?.user_results?.result;
@@ -1485,7 +1530,16 @@ export function parseTweetResultByRestId(json: any, tweetId: string): QuotedTwee
       expandedUrl: m.expanded_url,
       width: m.original_info?.width,
       height: m.original_info?.height,
+      altText: m.ext_alt_text,
+      videoVariants: Array.isArray(m.video_info?.variants)
+        ? m.video_info.variants
+            .filter((v: any) => v.content_type === 'video/mp4')
+            .map((v: any) => ({ bitrate: v.bitrate, url: v.url }))
+        : undefined,
     })),
+    links: extractExpandedLinks(urlEntities),
+    conversationId: legacy.conversation_id_str,
+    inReplyToStatusId: legacy.in_reply_to_status_id_str,
     url: `https://x.com/${handle ?? '_'}/status/${resolvedId}`,
   };
 }
@@ -1591,6 +1645,27 @@ function buildTweetResultByRestIdUrl(tweetId: string): string {
   return `https://x.com/i/api/graphql/${TWEET_RESULT_BY_REST_ID_QUERY_ID}/${TWEET_RESULT_BY_REST_ID_OPERATION}?${params}`;
 }
 
+function buildTweetDetailUrl(tweetId: string, cursor?: string): string {
+  const variables: Record<string, unknown> = {
+    focalTweetId: tweetId,
+    with_rux_injections: false,
+    includePromotedContent: false,
+    withCommunity: true,
+    withQuickPromoteEligibilityTweetFields: true,
+    withBirdwatchNotes: true,
+    withVoice: true,
+    withV2Timeline: true,
+    rankingMode: 'Relevance',
+    count: 40,
+  };
+  if (cursor) variables.cursor = cursor;
+  const params = new URLSearchParams({
+    variables: JSON.stringify(variables),
+    features: JSON.stringify(TWEET_DETAIL_FEATURES),
+  });
+  return `https://x.com/i/api/graphql/${TWEET_DETAIL_QUERY_ID}/${TWEET_DETAIL_OPERATION}?${params}`;
+}
+
 export async function fetchTweetByIdViaGraphQL(
   tweetId: string,
   csrfToken: string,
@@ -1645,6 +1720,60 @@ export async function fetchTweetByIdViaGraphQL(
     return { snapshot: null, status: 'error', httpStatus: response.status, source: 'graphql' };
   }
   return { snapshot: null, status: 'rate_limited', source: 'graphql' };
+}
+
+export async function fetchTweetDetailViaGraphQL(
+  tweetId: string,
+  csrfToken: string,
+  cookieHeader?: string,
+  options: { maxPages?: number; delayMs?: number } = {},
+): Promise<{ tweets: ThreadTweetSnapshot[]; status: TweetFetchResult['status']; httpStatus?: number }> {
+  const maxPages = options.maxPages ?? 3;
+  const delayMs = options.delayMs ?? 300;
+  const tweets: ThreadTweetSnapshot[] = [];
+  let cursor: string | undefined;
+  let sawRecognizedTimeline = false;
+  let sawTweetResult = false;
+  let sawUnavailableTweet = false;
+  let sawUnparseableTweet = false;
+
+  for (let page = 0; page < maxPages; page++) {
+    let response: Response;
+    try {
+      response = await fetch(buildTweetDetailUrl(tweetId, cursor), {
+        headers: buildHeaders(csrfToken, cookieHeader),
+      });
+    } catch {
+      return { tweets, status: 'error' };
+    }
+    if (response.status === 429) return { tweets, status: 'rate_limited', httpStatus: 429 };
+    if (response.status === 404) return { tweets, status: 'not_found', httpStatus: 404 };
+    if (response.status === 401 || response.status === 403) return { tweets, status: 'forbidden', httpStatus: response.status };
+    if (response.status >= 500) return { tweets, status: 'server_error', httpStatus: response.status };
+    if (!response.ok) return { tweets, status: 'error', httpStatus: response.status };
+
+    const parsed = parseTweetDetailResponse(await response.json());
+    sawRecognizedTimeline ||= parsed.recognizedTimeline;
+    sawTweetResult ||= parsed.sawTweetResult;
+    sawUnavailableTweet ||= parsed.sawUnavailableTweet;
+    sawUnparseableTweet ||= parsed.sawUnparseableTweet;
+    tweets.push(...parsed.tweets);
+    if (!parsed.nextCursor || parsed.nextCursor === cursor) break;
+    cursor = parsed.nextCursor;
+    if (page < maxPages - 1) await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+
+  const byId = new Map<string, ThreadTweetSnapshot>();
+  for (const tweet of tweets) if (!byId.has(tweet.id)) byId.set(tweet.id, tweet);
+  if (byId.size === 0) {
+    if (sawUnavailableTweet && !sawUnparseableTweet) return { tweets: [], status: 'not_found' };
+    if (sawRecognizedTimeline && !sawTweetResult) return { tweets: [], status: 'empty' };
+    return { tweets: [], status: 'error' };
+  }
+  return {
+    tweets: Array.from(byId.values()).sort(compareThreadTweetsChronologically),
+    status: 'ok',
+  };
 }
 
 async function fetchTweetViaSyndication(tweetId: string): Promise<TweetFetchResult> {
@@ -1764,7 +1893,7 @@ export interface SyncGapsOptions {
   tweetFetcher?: TweetFetcher;
 }
 
-function resolveGapFillCookies(options: SyncGapsOptions): { csrfToken?: string; cookieHeader?: string } {
+export function resolveGapFillCookies(options: SyncGapsOptions): { csrfToken?: string; cookieHeader?: string } {
   if (options.csrfToken) {
     return { csrfToken: options.csrfToken, cookieHeader: options.cookieHeader };
   }

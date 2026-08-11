@@ -68,6 +68,7 @@ On first run, `ft sync` extracts your X session from your browser and downloads 
 | `ft list` | Filter by author, date, category, domain, or folder |
 | `ft list --folder <name>` | Show bookmarks in an X bookmark folder |
 | `ft show <id>` | Show one bookmark in detail |
+| `ft materialize <id> --json` | Emit source/component depth and explicit gaps for one exact archived X bookmark |
 | `ft sample <category>` | Random sample from a category |
 | `ft stats` | Top authors, languages, date range |
 | `ft viz` | Terminal dashboard with sparklines, categories, and domains |
@@ -174,6 +175,21 @@ Then ask your agent:
 > "Every day please sync any new X bookmarks using the Field Theory CLI."
 
 Works with Claude Code, Codex, or any agent with shell access.
+
+### Exact bookmark materialization
+
+`ft materialize <id> --json` is a bounded, non-LLM foreground read of one
+archived X bookmark. It emits the root, author/time identity, parent context,
+same-author continuations, quote post, X Article, outbound identities, media
+metadata, exact source-local media hashes when available, and explicit
+unresolved or unavailable component dispositions. Local asset paths are never
+emitted.
+
+Use `--refresh` to refresh only that bookmark's thread through the existing
+signed-in X route, and `--fetch-media` to fetch only that bookmark's media.
+Neither option searches the corpus, classifies content, follows outbound pages,
+or invokes an LLM. Outbound PDFs/pages and media interpretation remain explicit
+gaps for the destination source owner or consuming research system.
 
 ## Scheduling
 

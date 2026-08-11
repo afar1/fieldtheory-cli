@@ -123,6 +123,7 @@ ft list --after/--before DATE  # Date range (YYYY-MM-DD)
 ft stats                       # Collection overview
 ft viz                         # Terminal dashboard
 ft show <id>                   # Full detail for one bookmark
+ft materialize <id> --json     # Exact root/component depth and explicit source gaps
 ft seeds search <query> --create
 ft repos add <path>
 ft possible run --seed <id> --repos <paths...>
@@ -152,6 +153,8 @@ Combine filters: \`ft list --category tool --domain ai --limit 10\`
 - Start with Library pages for durable project knowledge, then search bookmarks for source material
 - Don't dump raw output; summarize and connect findings to the user's current work
 - Cross-reference multiple queries to build a complete picture
+- After selecting a bookmark for research, use \`ft materialize <id> --json\`; use \`--refresh\` and \`--fetch-media\` only when current exact-source depth is required
+- Treat unresolved outbound pages, PDFs, media interpretation, or thread completeness as visible source-depth gaps; never infer them from the root post
 - Look for recurring authors, topic clusters, and connections between bookmarks
 - Ground roadmap work in actual bookmark-backed seeds
 - Lead roadmap reports with the plotted grid and concrete next actions, not just prose

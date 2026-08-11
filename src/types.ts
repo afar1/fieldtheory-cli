@@ -49,6 +49,30 @@ export interface QuotedTweetSnapshot {
   postedAt?: string | null;
   media?: string[];
   mediaObjects?: BookmarkMediaObject[];
+  links?: string[];
+  conversationId?: string;
+  inReplyToStatusId?: string;
+  url: string;
+}
+
+export interface ThreadTweetSnapshot {
+  id: string;
+  text: string;
+  authorHandle?: string;
+  authorName?: string;
+  authorProfileImageUrl?: string;
+  postedAt?: string | null;
+  media?: string[];
+  mediaObjects?: BookmarkMediaObject[];
+  links?: string[];
+  conversationId?: string;
+  inReplyToStatusId?: string;
+  threadRole?: 'post-thread';
+  conversationEntryId?: string;
+  conversationDisplayType?: string;
+  conversationSection?: string;
+  conversationRootId?: string;
+  conversationItemIndex?: number;
   url: string;
 }
 
@@ -71,6 +95,14 @@ export interface BookmarkRecord {
   inReplyToUserId?: string;
   quotedStatusId?: string;
   quotedTweet?: QuotedTweetSnapshot;
+  /** Query-local parent posts above this root, oldest first. */
+  threadContext?: ThreadTweetSnapshot[];
+  /** Query-local same-author continuations below this root. */
+  threadBelow?: ThreadTweetSnapshot[];
+  /** Exact time the query-local thread traversal completed. */
+  threadExpandedAt?: string;
+  /** Exact time a permanent query-local thread traversal failure was observed. */
+  threadExpansionFailedAt?: string | null;
   articleTitle?: string | null;
   articleText?: string | null;
   articleSite?: string | null;

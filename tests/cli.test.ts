@@ -880,6 +880,18 @@ test('ft sync: media is on by default and exposes --no-media', () => {
   assert.equal(mediaOption.long, '--no-media');
 });
 
+test('ft materialize exposes one exact-id bounded source-depth operation', () => {
+  const program = buildCli();
+  const command = program.commands.find((candidate: any) => candidate.name() === 'materialize');
+  assert.ok(command, 'materialize command should be registered');
+  const options = command.options.map((option: any) => option.long);
+  assert.ok(options.includes('--refresh'));
+  assert.ok(options.includes('--fetch-media'));
+  assert.ok(options.includes('--json'));
+  assert.ok(!options.includes('--classify'));
+  assert.ok(!options.includes('--engine'));
+});
+
 test('ft wiki: description mentions engine prerequisite', () => {
   const program = buildCli();
   const wikiCmd = program.commands.find((c: any) => c.name() === 'wiki');

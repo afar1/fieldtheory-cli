@@ -32,6 +32,7 @@ describe('skill content', () => {
       assert.ok(content.includes('ft list'));
       assert.ok(content.includes('ft stats'));
       assert.ok(content.includes('ft show'));
+      assert.ok(content.includes('ft materialize <id> --json'));
       assert.ok(content.includes('ft seeds search'));
       assert.ok(content.includes('ft possible run'));
       assert.ok(content.includes('ft possible grid'));
