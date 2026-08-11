@@ -143,12 +143,12 @@ function isXArticleLink(value: string): boolean {
 
 function xArticleLink(values: string[]): string | undefined {
   const articleLinks = values.filter(isXArticleLink);
-  const first = articleLinks[0];
-  if (!first) return undefined;
-  const identity = xArticleIdentity(first);
+  const identities = new Set(articleLinks.map(xArticleIdentity).filter((value): value is string => value !== null));
+  if (identities.size !== 1) return undefined;
+  const identity = identities.values().next().value as string;
   return articleLinks.find((value) => (
     new URL(value).hostname === 'x.com' && xArticleIdentity(value) === identity
-  )) ?? first;
+  )) ?? articleLinks[0];
 }
 
 function xArticleIdentity(value: string): string | null {

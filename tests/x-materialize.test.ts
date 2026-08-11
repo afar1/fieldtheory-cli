@@ -286,6 +286,74 @@ test('refreshExactXBookmark requires the focal tweet before completing traversal
   }
 });
 
+test('refreshExactXBookmark converts a malformed TweetDetail body into a partial observation', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      return new Response(JSON.stringify({ data: { tweetResult: { result: tweet('100', 'Current root.') } } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response('<html>transient edge response</html>', {
+      status: 200,
+      headers: { 'content-type': 'text/html' },
+    });
+  }) as typeof fetch;
+  try {
+    const result = await refreshExactXBookmark(archived(), {
+      csrfToken: 'ct0',
+      delayMs: 0,
+      now: '2026-08-11T00:00:00.000Z',
+    });
+    assert.equal(result.observation.status, 'partial');
+    assert.equal(result.observation.continuation_status, 'error');
+    assert.equal(result.observation.continuation_enumeration_complete, false);
+    assert.equal(result.record.threadExpandedAt, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('refreshExactXBookmark applies the configured delay before every request after the root', async () => {
+  const originalFetch = globalThis.fetch;
+  const requestTimes: number[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    requestTimes.push(Date.now());
+    const url = String(input);
+    if (url.includes('/TweetDetail?')) {
+      return new Response(JSON.stringify(detailResponse([tweet('100', 'Current root.')])), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    const variables = JSON.parse(new URL(url).searchParams.get('variables') ?? '{}');
+    const row = variables.tweetId === '98'
+      ? tweet('98', 'Current quoted source.')
+      : tweet('100', 'Current root.');
+    return new Response(JSON.stringify({ data: { tweetResult: { result: row } } }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const source = archived();
+  source.quotedStatusId = '98';
+  try {
+    const result = await refreshExactXBookmark(source, {
+      csrfToken: 'ct0',
+      delayMs: 20,
+      now: '2026-08-11T00:00:00.000Z',
+    });
+    assert.equal(result.observation.status, 'complete');
+    assert.equal(requestTimes.length, 3);
+    assert.ok(requestTimes[1] - requestTimes[0] >= 15);
+    assert.ok(requestTimes[2] - requestTimes[1] >= 15);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('refreshExactXBookmark does not promote stale archived article text under a fresh cutoff', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: string | URL | Request) => {

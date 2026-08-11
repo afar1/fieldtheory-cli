@@ -77,6 +77,14 @@ export async function refreshExactXBookmark(
 ): Promise<ExactXRefreshResult> {
   const delayMs = options.delayMs ?? 300;
   const maxParents = options.maxParents ?? 25;
+  let requestCount = 0;
+  const waitForNextRequest = async (): Promise<void> => {
+    if (requestCount > 0 && delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    requestCount += 1;
+  };
+  await waitForNextRequest();
   const root = await fetchTweetByIdViaGraphQL(
     archived.tweetId,
     options.csrfToken,
@@ -105,6 +113,7 @@ export async function refreshExactXBookmark(
   let nextParent = record.inReplyToStatusId;
   while (nextParent && !seen.has(nextParent) && context.length < maxParents) {
     seen.add(nextParent);
+    await waitForNextRequest();
     const parent = await fetchTweetByIdViaGraphQL(
       nextParent,
       options.csrfToken,
@@ -117,11 +126,11 @@ export async function refreshExactXBookmark(
     const snapshot = parent.snapshot as ThreadTweetSnapshot;
     context.unshift(snapshot);
     nextParent = snapshot.inReplyToStatusId;
-    if (nextParent) await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
   const parentLimitReached = Boolean(nextParent && context.length >= maxParents);
   if (parentLimitReached) parentStatus = 'error';
 
+  await waitForNextRequest();
   const detail = await fetchTweetDetailViaGraphQL(
     archived.tweetId,
     options.csrfToken,
@@ -137,6 +146,7 @@ export async function refreshExactXBookmark(
   let quoteStatus: TweetFetchResult['status'] = 'ok';
   let quotedTweet = record.quotedTweet;
   if (record.quotedStatusId) {
+    await waitForNextRequest();
     const quoted = await fetchTweetByIdViaGraphQL(
       record.quotedStatusId,
       options.csrfToken,

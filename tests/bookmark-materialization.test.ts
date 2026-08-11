@@ -150,9 +150,8 @@ test('materializeBookmark exposes missing thread and quote content as explicit g
 test('materializeBookmark does not duplicate a recovered X Article as an unresolved outbound gap', async () => {
   const articleUrl = 'https://x.com/i/article/2042676487711584257';
   const articleAlias = 'https://twitter.com/i/article/2042676487711584257';
-  const distinctArticle = 'https://x.com/i/article/1000000000000000000';
   const result = await materializeBookmark(record({
-    links: [articleAlias, articleUrl, distinctArticle, 'https://example.com/other'],
+    links: [articleAlias, articleUrl, 'https://example.com/other'],
   }));
   const article = result.components.find((row) => row.relation === 'embedded_x_article');
   assert.equal(article?.source_locator, articleUrl);
@@ -165,13 +164,28 @@ test('materializeBookmark does not duplicate a recovered X Article as an unresol
     false,
   );
   assert.equal(
-    result.components.find((row) => row.source_locator === distinctArticle)?.disposition,
-    'unresolved',
-  );
-  assert.equal(
     result.components.find((row) => row.source_locator === 'https://example.com/other')?.disposition,
     'unresolved',
   );
+});
+
+test('materializeBookmark leaves every X Article locator unresolved when body identity is ambiguous', async () => {
+  const firstArticle = 'https://x.com/i/article/2042676487711584257';
+  const secondArticle = 'https://x.com/i/article/1000000000000000000';
+  const result = await materializeBookmark(record({
+    links: [firstArticle, secondArticle],
+  }));
+
+  const recovered = result.components.find((row) => row.relation === 'embedded_x_article');
+  assert.equal(recovered?.source_locator, result.locator);
+  assert.equal(recovered?.disposition, 'used');
+  for (const locator of [firstArticle, secondArticle]) {
+    assert.equal(
+      result.components.find((row) => row.source_locator === locator)?.disposition,
+      'unresolved',
+    );
+  }
+  assert.equal(result.achieved_depth, 'source-owned root and enumerated components with explicit unresolved depth');
 });
 
 test('materializeBookmark binds poster and video variant to separate exact assets', async () => {

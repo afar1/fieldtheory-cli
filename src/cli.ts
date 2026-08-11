@@ -1342,7 +1342,19 @@ export function buildCli() {
         throw new Error(`Archived X bookmark not found: ${exactId}`);
       }
 
-      let record = archived;
+      const indexed = await pathExists(twitterBookmarksIndexPath())
+        ? await getBookmarkById(archived.id)
+        : null;
+      let record: BookmarkRecord = {
+        ...archived,
+        text: indexed?.text?.trim() ? indexed.text : archived.text,
+        quotedStatusId: indexed?.quotedStatusId ?? archived.quotedStatusId,
+        quotedTweet: indexed?.quotedTweet ?? archived.quotedTweet,
+        articleTitle: indexed?.articleTitle ?? archived.articleTitle,
+        articleText: indexed?.articleText ?? archived.articleText,
+        articleSite: indexed?.articleSite ?? archived.articleSite,
+        enrichedAt: indexed?.enrichedAt ?? archived.enrichedAt,
+      };
       let refreshObservation = null;
       if (options.refresh) {
         const directCookies = parseCookieOption(options.cookies);

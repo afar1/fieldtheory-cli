@@ -1768,7 +1768,13 @@ export async function fetchTweetDetailViaGraphQL(
     if (response.status >= 500) return { tweets, status: 'server_error', httpStatus: response.status, enumerationComplete: false, parserGap: false };
     if (!response.ok) return { tweets, status: 'error', httpStatus: response.status, enumerationComplete: false, parserGap: false };
 
-    const parsed = parseTweetDetailResponse(await response.json());
+    let json: unknown;
+    try {
+      json = await response.json();
+    } catch {
+      return { tweets, status: 'error', httpStatus: response.status, enumerationComplete: false, parserGap: true };
+    }
+    const parsed = parseTweetDetailResponse(json);
     sawRecognizedTimeline ||= parsed.recognizedTimeline;
     sawTweetResult ||= parsed.sawTweetResult;
     sawUnavailableTweet ||= parsed.sawUnavailableTweet;

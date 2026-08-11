@@ -6,6 +6,7 @@ import os from 'node:os';
 import { compareVersions, runWithSpinner, buildCli, parseCookieOption, shouldInferStdinFromStats } from '../src/cli.js';
 import { dataDir } from '../src/paths.js';
 import { skillWithFrontmatter } from '../src/skill.js';
+import { buildIndex, updateArticleContent, updateQuotedTweets } from '../src/bookmarks-db.js';
 
 async function captureStdout(fn: () => Promise<void>): Promise<string> {
   const chunks: string[] = [];
@@ -890,6 +891,58 @@ test('ft materialize exposes one exact-id bounded source-depth operation', () =>
   assert.ok(options.includes('--json'));
   assert.ok(!options.includes('--classify'));
   assert.ok(!options.includes('--engine'));
+});
+
+test('ft materialize overlays article and quote enrichment retained in the bookmark index', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-materialize-index-'));
+  const origEnv = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = tmpDir;
+  const id = '2042685676949270724';
+  const raw = {
+    id,
+    tweetId: id,
+    url: `https://x.com/operator/status/${id}`,
+    text: 'Archived root.',
+    authorHandle: 'operator',
+    syncedAt: '2026-08-11T00:00:00.000Z',
+    quotedStatusId: '2042685676949270000',
+    links: ['https://x.com/i/article/2042676487711584257'],
+  };
+  fs.writeFileSync(path.join(tmpDir, 'bookmarks.jsonl'), `${JSON.stringify(raw)}\n`);
+
+  try {
+    await buildIndex();
+    await updateArticleContent([{
+      id,
+      articleTitle: 'Indexed article',
+      articleText: 'Exact long-form content retained only in the SQLite index.',
+      articleSite: 'X Articles',
+    }]);
+    await updateQuotedTweets([{
+      id,
+      quotedTweet: {
+        id: '2042685676949270000',
+        text: 'Indexed quoted source.',
+        url: 'https://x.com/quoted/status/2042685676949270000',
+      },
+    }]);
+
+    const output = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'materialize', id, '--json']);
+    });
+    const result = JSON.parse(output);
+    assert.equal(
+      result.components.find((row: any) => row.relation === 'embedded_x_article')?.content,
+      'Exact long-form content retained only in the SQLite index.',
+    );
+    assert.equal(
+      result.components.find((row: any) => row.relation === 'quoted_post')?.content,
+      'Indexed quoted source.',
+    );
+  } finally {
+    process.env.FT_DATA_DIR = origEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 test('ft wiki: description mentions engine prerequisite', () => {
