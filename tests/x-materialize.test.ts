@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { refreshExactXBookmark } from '../src/x-materialize.js';
+import { parseTweetDetailResponse } from '../src/tweet-snapshots.js';
 import type { BookmarkRecord } from '../src/types.js';
 
 function tweet(id: string, text: string, parent?: string) {
@@ -205,6 +206,81 @@ test('refreshExactXBookmark does not promote stale archived article text under a
     assert.equal(result.observation.article_status, 'unresolved');
     assert.equal(result.record.articleText, null);
     assert.equal(result.record.threadExpandedAt, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('TweetDetail recognizes every supported continuation cursor location', () => {
+  const entries = [
+    { entryId: 'cursor-bottom-a', content: { value: 'BOTTOM' } },
+    { entryId: 'cursor-showmorethreads-b', content: { itemContent: { value: 'ITEM' } } },
+    { entryId: 'cursor-showmorethreads-c', content: { operation: { cursor: { value: 'OPERATION' } } } },
+  ];
+  for (const [entry, expected] of entries.map((entry, index) => [entry, ['BOTTOM', 'ITEM', 'OPERATION'][index]] as const)) {
+    const parsed = parseTweetDetailResponse({
+      data: {
+        threaded_conversation_with_injections_v2: {
+          instructions: [{ type: 'TimelineAddEntries', entries: [entry] }],
+        },
+      },
+    });
+    assert.equal(parsed.nextCursor, expected);
+    assert.equal(parsed.sawUnparseableTweet, false);
+  }
+});
+
+test('TweetDetail fails closed on an unsupported or valueless cursor entry', () => {
+  for (const entry of [
+    { entryId: 'cursor-showmorethreads-empty', content: {} },
+    { entryId: 'cursor-new-continuation-shape', content: { value: 'UNKNOWN' } },
+  ]) {
+    const parsed = parseTweetDetailResponse({
+      data: {
+        threaded_conversation_with_injections_v2: {
+          instructions: [{ type: 'TimelineAddEntries', entries: [entry] }],
+        },
+      },
+    });
+    assert.equal(parsed.nextCursor, undefined);
+    assert.equal(parsed.sawUnparseableTweet, true);
+  }
+});
+
+test('refreshExactXBookmark rejects identity-less parent and quote responses', async () => {
+  const originalFetch = globalThis.fetch;
+  const identityless = (text: string) => {
+    const row = tweet('999', text);
+    delete row.rest_id;
+    delete row.legacy.id_str;
+    return row;
+  };
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      const variables = JSON.parse(new URL(url).searchParams.get('variables') ?? '{}');
+      const row = variables.tweetId === '100'
+        ? tweet('100', 'Current root.', '99')
+        : identityless(variables.tweetId === '99' ? 'Identity-less parent.' : 'Identity-less quote.');
+      return new Response(JSON.stringify({ data: { tweetResult: { result: row } } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify(detailResponse([tweet('100', 'Current root.')])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const source = archived();
+  source.quotedStatusId = '98';
+  try {
+    const result = await refreshExactXBookmark(source, { csrfToken: 'ct0', delayMs: 0 });
+    assert.equal(result.observation.status, 'partial');
+    assert.equal(result.observation.parent_status, 'error');
+    assert.equal(result.observation.quote_status, 'error');
+    assert.equal(result.record.threadExpandedAt, undefined);
+    assert.equal(result.record.quotedTweet, undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }

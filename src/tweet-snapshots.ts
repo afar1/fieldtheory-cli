@@ -189,11 +189,39 @@ function parseResultInto(
   return { sawTweetResult: true, sawUnavailableTweet: false, sawUnparseableTweet: false };
 }
 
+function continuationCursor(entry: any): {
+  recognized: boolean;
+  cursor?: string;
+  parserGap: boolean;
+} {
+  const entryId = typeof entry?.entryId === 'string' ? entry.entryId : '';
+  if (entryId.startsWith('cursor-top')) {
+    return { recognized: true, parserGap: false };
+  }
+  const supported = entryId.startsWith('cursor-bottom')
+    || entryId.startsWith('cursor-showmorethreads');
+  if (!supported) {
+    return {
+      recognized: entryId.startsWith('cursor-'),
+      parserGap: entryId.startsWith('cursor-'),
+    };
+  }
+  const value = entry?.content?.value
+    ?? entry?.content?.itemContent?.value
+    ?? entry?.content?.operation?.cursor?.value;
+  if (typeof value !== 'string' || value.length === 0) {
+    return { recognized: true, parserGap: true };
+  }
+  return { recognized: true, cursor: value, parserGap: false };
+}
+
 function collectThreadEntries(entries: any[], out: ThreadTweetSnapshot[]): CollectThreadResult {
   const result = emptyCollectThreadResult();
   for (const entry of entries) {
-    if (entry?.entryId?.startsWith('cursor-bottom')) {
-      result.nextCursor = entry?.content?.value;
+    const cursor = continuationCursor(entry);
+    if (cursor.recognized) {
+      result.nextCursor = cursor.cursor ?? result.nextCursor;
+      result.sawUnparseableTweet ||= cursor.parserGap;
       continue;
     }
 

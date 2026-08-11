@@ -1513,7 +1513,9 @@ export function parseTweetResultByRestId(json: any, tweetId: string): QuotedTwee
   const userResult = tweet?.core?.user_results?.result;
   const handle = userResult?.core?.screen_name ?? userResult?.legacy?.screen_name;
   const mediaEntities: any[] = legacy?.extended_entities?.media ?? legacy?.entities?.media ?? [];
-  const resolvedId = String(legacy.id_str ?? tweet?.rest_id ?? tweetId);
+  const responseId = legacy.id_str ?? tweet?.rest_id;
+  if (responseId === undefined || responseId === null || String(responseId).length === 0) return null;
+  const resolvedId = String(responseId);
 
   return {
     id: resolvedId,
@@ -1698,7 +1700,7 @@ export async function fetchTweetByIdViaGraphQL(
       }
       const snapshot = parseTweetResultByRestId(json, tweetId);
       const article = parseTweetArticleByRestId(json);
-      if (!snapshot) return { snapshot: null, article, status: article ? 'ok' : 'empty', source: 'graphql' };
+      if (!snapshot) return { snapshot: null, article: null, status: 'error', source: 'graphql' };
       if (snapshot.id !== tweetId) {
         return { snapshot: null, article: null, status: 'error', source: 'graphql' };
       }
