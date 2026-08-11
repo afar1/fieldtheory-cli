@@ -275,7 +275,7 @@ export function parseTweetDetailResponse(json: any): TweetDetailParseResult {
   const collectResult = emptyCollectThreadResult();
 
   for (const instruction of instructions) {
-    if (instruction?.type === 'TimelineAddEntries' && Array.isArray(instruction.entries)) {
+    if (Array.isArray(instruction?.entries)) {
       mergeCollectThreadResult(collectResult, collectThreadEntries(instruction.entries, tweets));
     }
     if (instruction?.entry) {

@@ -246,6 +246,21 @@ test('TweetDetail consumes a continuation cursor from TimelineReplaceEntry', () 
   assert.equal(parsed.sawUnparseableTweet, false);
 });
 
+test('TweetDetail fails closed on cursor entries in an unknown instruction envelope', () => {
+  const parsed = parseTweetDetailResponse({
+    data: {
+      threaded_conversation_with_injections_v2: {
+        instructions: [{
+          type: 'TimelineUnknownEntries',
+          entries: [{ entryId: 'cursor-new-envelope', content: { value: 'MORE' } }],
+        }],
+      },
+    },
+  });
+  assert.equal(parsed.nextCursor, undefined);
+  assert.equal(parsed.sawUnparseableTweet, true);
+});
+
 test('TweetDetail fails closed on an unsupported or valueless cursor entry', () => {
   for (const entry of [
     { entryId: 'cursor-showmorethreads-empty', content: {} },
