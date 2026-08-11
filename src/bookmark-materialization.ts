@@ -143,7 +143,23 @@ function isXArticleLink(value: string): boolean {
 
 function xArticleLink(values: string[]): string | undefined {
   const articleLinks = values.filter(isXArticleLink);
-  return articleLinks.find((value) => new URL(value).hostname === 'x.com') ?? articleLinks[0];
+  const first = articleLinks[0];
+  if (!first) return undefined;
+  const identity = xArticleIdentity(first);
+  return articleLinks.find((value) => (
+    new URL(value).hostname === 'x.com' && xArticleIdentity(value) === identity
+  )) ?? first;
+}
+
+function xArticleIdentity(value: string): string | null {
+  if (!isXArticleLink(value)) return null;
+  const parsed = new URL(value);
+  return parsed.pathname.replace(/\/+$/, '');
+}
+
+function isSameXArticleLink(value: string, recovered: string): boolean {
+  const valueIdentity = xArticleIdentity(value);
+  return valueIdentity !== null && valueIdentity === xArticleIdentity(recovered);
 }
 
 function mediaUrls(mediaObject: BookmarkMediaObject): string[] {
@@ -378,7 +394,7 @@ export async function materializeBookmark(
   const rootId = `x-${sha256(item.tweetId).slice(0, 20)}`;
   const components: SourceComponent[] = [];
   const rootLinks = uniquePublicLinks(item.links ?? []);
-  const recoveredArticleLink = item.articleText ? xArticleLink(rootLinks) : undefined;
+  const recoveredArticleLink = item.articleText ? xArticleLink(item.links ?? []) : undefined;
   const rootSource: SourceTweet = {
     id: item.tweetId,
     text: item.text,
@@ -387,7 +403,7 @@ export async function materializeBookmark(
     authorName: item.authorName,
     postedAt: item.postedAt,
     links: recoveredArticleLink
-      ? rootLinks.filter((link) => !isXArticleLink(link))
+      ? rootLinks.filter((link) => !isSameXArticleLink(link, recoveredArticleLink))
       : rootLinks,
     media: item.media,
     mediaObjects: item.mediaObjects,

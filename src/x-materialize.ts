@@ -129,7 +129,9 @@ export async function refreshExactXBookmark(
     { maxPages: options.maxPages ?? 3, delayMs },
   );
   const continuationStatus = detail.status;
-  const below = detail.status === 'ok'
+  const continuationHasFocal = detail.status === 'ok'
+    && detail.tweets.some((tweet) => tweet.id === record.tweetId);
+  const below = continuationHasFocal
     ? extractSameAuthorThreadBelow(detail.tweets, record.tweetId, record.authorHandle)
     : [];
   let quoteStatus: TweetFetchResult['status'] = 'ok';
@@ -151,6 +153,7 @@ export async function refreshExactXBookmark(
   const complete = parentStatus === 'ok'
     && continuationStatus === 'ok'
     && detail.enumerationComplete
+    && continuationHasFocal
     && quoteStatus === 'ok'
     && articleStatus !== 'unresolved';
 

@@ -513,6 +513,29 @@ test('parseTweetArticleByRestId: extracts current X Article content_state shape'
   assert.match(article.text, /components, styles, variables, and props/);
 });
 
+test('parseTweetArticleByRestId: rejects preview-only X Article payloads', () => {
+  const fixture = {
+    data: {
+      tweetResult: {
+        result: {
+          rest_id: '2045577435484221722',
+          article: {
+            article_results: {
+              result: {
+                title: 'Preview is not the article',
+                preview_text: 'This preview is deliberately longer than fifty characters but is not a recovered article body.',
+                summary_text: 'This summary is also not source-complete long-form content.',
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  assert.equal(parseTweetArticleByRestId(fixture), null);
+});
+
 test('parseTweetResultByRestId: returns null on tombstone / unavailable tweets', () => {
   assert.equal(
     parseTweetResultByRestId({ data: { tweetResult: { result: { __typename: 'TweetTombstone' } } } }, '123'),

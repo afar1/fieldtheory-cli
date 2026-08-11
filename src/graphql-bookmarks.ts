@@ -1590,7 +1590,7 @@ function articleFromCandidate(candidate: any): ArticleContent | null {
       : '';
 
   let text = '';
-  for (const key of ['articleBody', 'plain_text', 'plainText', 'body', 'text', 'description', 'preview_text', 'summary_text']) {
+  for (const key of ['articleBody', 'plain_text', 'plainText', 'body']) {
     if (typeof candidate[key] === 'string' && candidate[key].length > text.length) {
       text = candidate[key];
     }
