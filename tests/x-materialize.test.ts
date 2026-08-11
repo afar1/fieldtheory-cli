@@ -292,6 +292,42 @@ test('refreshExactXBookmark does not promote stale archived article text under a
   }
 });
 
+test('refreshExactXBookmark remains partial when the current root identifies an unrecovered X Article', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      const row = tweet('100', 'Current root with an X Article.');
+      row.legacy.entities.urls = [{
+        expanded_url: 'https://x.com/i/article/2042676487711584257',
+      }];
+      return new Response(JSON.stringify({ data: { tweetResult: { result: row } } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify(detailResponse([
+      tweet('100', 'Current root with an X Article.'),
+    ])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  try {
+    const result = await refreshExactXBookmark(archived(), {
+      csrfToken: 'ct0',
+      delayMs: 0,
+      now: '2026-08-11T00:00:00.000Z',
+    });
+    assert.equal(result.observation.status, 'partial');
+    assert.equal(result.observation.article_status, 'unresolved');
+    assert.equal(result.record.articleText, null);
+    assert.equal(result.record.threadExpandedAt, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('TweetDetail recognizes every supported continuation cursor location', () => {
   const entries = [
     { entryId: 'cursor-bottom-a', content: { value: 'BOTTOM' } },

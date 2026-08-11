@@ -130,16 +130,19 @@ function sourceTweetLinks(source: SourceTweet): string[] {
   return uniquePublicLinks(source.links ?? []);
 }
 
+function isXArticleLink(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return (parsed.hostname === 'x.com' || parsed.hostname === 'twitter.com')
+      && parsed.pathname.startsWith('/i/article/');
+  } catch {
+    return false;
+  }
+}
+
 function xArticleLink(values: string[]): string | undefined {
-  return values.find((value) => {
-    try {
-      const parsed = new URL(value);
-      return (parsed.hostname === 'x.com' || parsed.hostname === 'twitter.com')
-        && parsed.pathname.startsWith('/i/article/');
-    } catch {
-      return false;
-    }
-  });
+  const articleLinks = values.filter(isXArticleLink);
+  return articleLinks.find((value) => new URL(value).hostname === 'x.com') ?? articleLinks[0];
 }
 
 function mediaUrls(mediaObject: BookmarkMediaObject): string[] {
@@ -383,7 +386,7 @@ export async function materializeBookmark(
     authorName: item.authorName,
     postedAt: item.postedAt,
     links: recoveredArticleLink
-      ? rootLinks.filter((link) => link !== recoveredArticleLink)
+      ? rootLinks.filter((link) => !isXArticleLink(link))
       : rootLinks,
     media: item.media,
     mediaObjects: item.mediaObjects,

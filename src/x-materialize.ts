@@ -31,6 +31,22 @@ export interface ExactXRefreshOptions {
   now?: string;
 }
 
+function hasXArticleIdentity(record: BookmarkRecord): boolean {
+  return Boolean(
+    record.articleTitle
+    || record.articleSite
+    || record.links?.some((value) => {
+      try {
+        const parsed = new URL(value);
+        return (parsed.hostname === 'x.com' || parsed.hostname === 'twitter.com')
+          && parsed.pathname.startsWith('/i/article/');
+      } catch {
+        return false;
+      }
+    }),
+  );
+}
+
 function refreshedRoot(record: BookmarkRecord, result: TweetFetchResult): BookmarkRecord {
   const snapshot = result.snapshot;
   if (!snapshot) return record;
@@ -129,7 +145,7 @@ export async function refreshExactXBookmark(
   }
   const articleStatus = root.article
     ? 'ok'
-    : archived.articleText
+    : archived.articleText || hasXArticleIdentity(record)
       ? 'unresolved'
       : 'not_applicable';
   const complete = parentStatus === 'ok'

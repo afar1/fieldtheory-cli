@@ -141,14 +141,18 @@ test('materializeBookmark exposes missing thread and quote content as explicit g
 
 test('materializeBookmark does not duplicate a recovered X Article as an unresolved outbound gap', async () => {
   const articleUrl = 'https://x.com/i/article/2042676487711584257';
+  const articleAlias = 'https://twitter.com/i/article/2042676487711584257';
   const result = await materializeBookmark(record({
-    links: [articleUrl, 'https://example.com/other'],
+    links: [articleUrl, articleAlias, 'https://example.com/other'],
   }));
   const article = result.components.find((row) => row.relation === 'embedded_x_article');
   assert.equal(article?.source_locator, articleUrl);
   assert.equal(article?.disposition, 'used');
   assert.equal(
-    result.components.some((row) => row.source_locator === articleUrl && row.disposition === 'unresolved'),
+    result.components.some((row) => (
+      (row.source_locator === articleUrl || row.source_locator === articleAlias)
+      && row.disposition === 'unresolved'
+    )),
     false,
   );
   assert.equal(
