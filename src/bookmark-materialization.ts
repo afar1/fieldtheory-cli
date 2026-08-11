@@ -117,6 +117,15 @@ function uniquePublicLinks(values: Array<string | undefined>): string[] {
   }))].sort();
 }
 
+function isPublicHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
 function sourceTweetLinks(source: SourceTweet): string[] {
   return uniquePublicLinks(source.links ?? []);
 }
@@ -171,48 +180,101 @@ async function appendMediaComponents(
   const entries = mediaEntriesFor(source, manifest);
   const objects = source.mediaObjects ?? [];
   const fallbackUrls = objects.length === 0 ? uniquePublicLinks(source.media ?? []) : [];
-  const rows: Array<{ metadata: Record<string, unknown>; urls: string[] }> = [
-    ...objects.map((item) => ({
-      metadata: {
-        type: item.type ?? null,
-        width: item.width ?? null,
-        height: item.height ?? null,
-        alt_text: item.altText ?? null,
-      },
-      urls: mediaUrls(item),
-    })),
-    ...fallbackUrls.map((url) => ({ metadata: { type: null }, urls: [url] })),
-  ];
+  for (const [objectIndex, item] of objects.entries()) {
+    const candidates: Array<{
+      url?: string;
+      role: 'preview' | 'media' | 'video_variant';
+      contentType?: string;
+      bitrate?: number;
+    }> = [
+      { url: item.previewUrl, role: 'preview' },
+      { url: item.url, role: 'media' },
+      { url: item.mediaUrl, role: 'media' },
+      ...(item.videoVariants ?? item.variants ?? []).map((variant) => ({
+        url: variant.url,
+        role: 'video_variant' as const,
+        contentType: variant.contentType,
+        bitrate: variant.bitrate,
+      })),
+    ];
+    const seen = new Set<string>();
+    const assets = candidates.filter((candidate) => {
+      if (!candidate.url || !isPublicHttpUrl(candidate.url) || seen.has(candidate.url)) return false;
+      seen.add(candidate.url);
+      return true;
+    });
 
-  for (const [index, row] of rows.entries()) {
-    const locator = row.urls[0] ?? source.url;
-    const matchingEntry = entries.find((entry) => row.urls.includes(entry.sourceUrl));
-    const asset = await exactAsset(matchingEntry);
+    for (const [assetIndex, candidate] of assets.entries()) {
+      const locator = candidate.url!;
+      const matchingEntry = entries.find((entry) => entry.sourceUrl === locator);
+      const asset = await exactAsset(matchingEntry);
+      target.push(component(
+        rootId,
+        `${relationPrefix}-media-${objectIndex + 1}-asset-${assetIndex + 1}`,
+        `${relationPrefix}_attached_media`,
+        locator,
+        canonicalJson({
+          type: item.type ?? null,
+          width: item.width ?? null,
+          height: item.height ?? null,
+          alt_text: item.altText ?? null,
+          asset_role: candidate.role,
+          declared_content_type: candidate.contentType ?? null,
+          bitrate: candidate.bitrate ?? null,
+          source_url: locator,
+        }),
+        'used',
+        asset ? 'media metadata and exact source-local asset recovered' : 'media metadata recovered; exact source-local asset unavailable',
+        {
+          hop,
+          achievedDepth: asset
+            ? 'exact media metadata plus source-local asset hash and byte count'
+            : 'exact media metadata only; source bytes are not recovered',
+          sourceAsset: asset,
+        },
+      ));
+    }
+    const locator = assets[0]?.url ?? source.url;
     target.push(component(
       rootId,
-      `${relationPrefix}-media-${index + 1}`,
-      `${relationPrefix}_attached_media`,
-      locator,
-      canonicalJson({ ...row.metadata, source_urls: row.urls }),
-      'used',
-      asset ? 'media metadata and exact source-local asset recovered' : 'media metadata recovered; exact source-local asset unavailable',
-      {
-        hop,
-        achievedDepth: asset
-          ? 'exact media metadata plus source-local asset hash and byte count'
-          : 'exact media metadata only; source bytes are not recovered',
-        sourceAsset: asset,
-      },
-    ));
-    target.push(component(
-      rootId,
-      `${relationPrefix}-media-${index + 1}-interpretation`,
+      `${relationPrefix}-media-${objectIndex + 1}-interpretation`,
       `${relationPrefix}_media_interpretation`,
       locator,
       null,
       'unresolved',
       'OCR, transcript, captions, or material visual interpretation are not produced by Field Theory',
       { hop, achievedDepth: 'media identity and metadata only' },
+    ));
+  }
+
+  for (const [index, locator] of fallbackUrls.entries()) {
+    const matchingEntry = entries.find((entry) => entry.sourceUrl === locator);
+    const asset = await exactAsset(matchingEntry);
+    target.push(component(
+      rootId,
+      `${relationPrefix}-fallback-media-${index + 1}`,
+      `${relationPrefix}_attached_media`,
+      locator,
+      canonicalJson({ type: null, asset_role: 'media', source_url: locator }),
+      'used',
+      asset ? 'media identity and exact source-local asset recovered' : 'media identity recovered; exact source-local asset unavailable',
+      {
+        hop,
+        achievedDepth: asset
+          ? 'exact media identity plus source-local asset hash and byte count'
+          : 'exact media identity only; source bytes are not recovered',
+        sourceAsset: asset,
+      },
+    ));
+    target.push(component(
+      rootId,
+      `${relationPrefix}-fallback-media-${index + 1}-interpretation`,
+      `${relationPrefix}_media_interpretation`,
+      locator,
+      null,
+      'unresolved',
+      'OCR, transcript, captions, or material visual interpretation are not produced by Field Theory',
+      { hop, achievedDepth: 'media identity only' },
     ));
   }
 }
@@ -413,7 +475,11 @@ export async function materializeBookmark(
       'used',
       'X long-form article content recovered',
     ));
-  } else if ((item.links ?? []).some((link) => link.includes('x.com/i/article/'))) {
+  } else if (
+    item.articleTitle
+    || item.articleSite
+    || (item.links ?? []).some((link) => link.includes('x.com/i/article/'))
+  ) {
     components.push(component(
       rootId,
       'x-article',

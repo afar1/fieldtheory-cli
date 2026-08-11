@@ -108,7 +108,10 @@ function hasTargets(source: { media?: unknown[]; mediaObjects?: unknown[]; autho
 }
 
 function hasMediaCandidate(bookmark: BookmarkRecord): boolean {
-  return hasTargets(bookmark) || hasTargets(bookmark.quotedTweet);
+  return hasTargets(bookmark)
+    || hasTargets(bookmark.quotedTweet)
+    || (bookmark.threadContext ?? []).some(hasTargets)
+    || (bookmark.threadBelow ?? []).some(hasTargets);
 }
 
 function pushTarget(
@@ -199,6 +202,21 @@ function resolveMediaTargets(
       authorProfileImageUrl: bookmark.quotedTweet.authorProfileImageUrl,
       media: bookmark.quotedTweet.media,
       mediaObjects: bookmark.quotedTweet.mediaObjects,
+    }, downloadedProfileImageUrls, skipProfileImages);
+  }
+
+  for (const threadTweet of [
+    ...(bookmark.threadContext ?? []),
+    ...(bookmark.threadBelow ?? []),
+  ]) {
+    appendMediaTargets(targets, seenKeys, bookmark.id, {
+      tweetId: threadTweet.id,
+      tweetUrl: threadTweet.url,
+      authorHandle: threadTweet.authorHandle,
+      authorName: threadTweet.authorName,
+      authorProfileImageUrl: threadTweet.authorProfileImageUrl,
+      media: threadTweet.media,
+      mediaObjects: threadTweet.mediaObjects,
     }, downloadedProfileImageUrls, skipProfileImages);
   }
 

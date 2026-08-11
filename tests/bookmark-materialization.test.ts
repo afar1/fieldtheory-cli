@@ -138,3 +138,85 @@ test('materializeBookmark exposes missing thread and quote content as explicit g
     'unavailable',
   );
 });
+
+test('materializeBookmark binds poster and video variant to separate exact assets', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ft-materialize-video-'));
+  const posterPath = path.join(dir, 'poster.jpg');
+  const videoPath = path.join(dir, 'video.mp4');
+  await writeFile(posterPath, Buffer.from([1, 2, 3, 4]));
+  await writeFile(videoPath, Buffer.from([5, 6, 7, 8]));
+  try {
+    const posterUrl = 'https://pbs.twimg.com/amplify_video_thumb/root.jpg';
+    const videoUrl = 'https://video.twimg.com/ext_tw_video/root.mp4';
+    const source = record({
+      mediaObjects: [{
+        type: 'video',
+        url: posterUrl,
+        videoVariants: [{ url: videoUrl, contentType: 'video/mp4', bitrate: 832000 }],
+      }],
+    });
+    const manifest: MediaFetchManifest = {
+      schemaVersion: 1,
+      generatedAt: '2026-08-10T12:02:00.000Z',
+      limit: 1,
+      maxBytes: 1024,
+      processed: 2,
+      downloaded: 2,
+      skippedTooLarge: 0,
+      failed: 0,
+      entries: [
+        {
+          bookmarkId: source.id,
+          tweetId: source.tweetId,
+          tweetUrl: source.url,
+          sourceUrl: posterUrl,
+          localPath: posterPath,
+          contentType: 'image/jpeg',
+          bytes: 4,
+          status: 'downloaded',
+          fetchedAt: '2026-08-10T12:02:00.000Z',
+        },
+        {
+          bookmarkId: source.id,
+          tweetId: source.tweetId,
+          tweetUrl: source.url,
+          sourceUrl: videoUrl,
+          localPath: videoPath,
+          contentType: 'video/mp4',
+          bytes: 4,
+          status: 'downloaded',
+          fetchedAt: '2026-08-10T12:02:00.000Z',
+        },
+      ],
+    };
+
+    const result = await materializeBookmark(source, manifest);
+    const assets = result.components
+      .filter((row) => row.relation === 'post_attached_media')
+      .map((row) => ({ locator: row.source_locator, asset: row.source_asset, content: row.content }));
+
+    assert.deepEqual(assets.map(({ locator, asset }) => ({ locator, asset })), [
+      {
+        locator: posterUrl,
+        asset: {
+          sha256: '9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a',
+          bytes: 4,
+          content_type: 'image/jpeg',
+        },
+      },
+      {
+        locator: videoUrl,
+        asset: {
+          sha256: '55e5509f8052998294266ee5b50cb592938191fb5d67f73cac2e60b0276b1bdd',
+          bytes: 4,
+          content_type: 'video/mp4',
+        },
+      },
+    ]);
+    assert.match(assets[0].content ?? '', /\"asset_role\":\"media\"/);
+    assert.match(assets[1].content ?? '', /\"asset_role\":\"video_variant\"/);
+    assert.match(assets[1].content ?? '', /\"bitrate\":832000/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

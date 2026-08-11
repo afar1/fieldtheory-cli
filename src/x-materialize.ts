@@ -11,7 +11,9 @@ export interface ExactXRefreshObservation {
   root_status: TweetFetchResult['status'];
   parent_status: TweetFetchResult['status'];
   continuation_status: TweetFetchResult['status'];
+  continuation_enumeration_complete: boolean;
   quote_status: TweetFetchResult['status'];
+  article_status: 'ok' | 'not_applicable' | 'unresolved';
   parent_limit_reached: boolean;
 }
 
@@ -48,7 +50,7 @@ function refreshedRoot(record: BookmarkRecord, result: TweetFetchResult): Bookma
     mediaObjects: snapshot.mediaObjects ?? record.mediaObjects,
     links: snapshot.links ?? record.links,
     articleTitle: result.article?.title ?? record.articleTitle,
-    articleText: result.article?.text ?? record.articleText,
+    articleText: result.article?.text ?? null,
     articleSite: result.article?.siteName ?? record.articleSite,
   };
 }
@@ -72,7 +74,9 @@ export async function refreshExactXBookmark(
         root_status: root.status,
         parent_status: 'empty',
         continuation_status: 'empty',
+        continuation_enumeration_complete: false,
         quote_status: archived.quotedStatusId ? 'empty' : 'ok',
+        article_status: archived.articleText ? 'unresolved' : 'not_applicable',
         parent_limit_reached: false,
       },
     };
@@ -123,7 +127,16 @@ export async function refreshExactXBookmark(
     quoteStatus = quoted.status;
     if (quoted.status === 'ok' && quoted.snapshot) quotedTweet = quoted.snapshot;
   }
-  const complete = parentStatus === 'ok' && continuationStatus === 'ok' && quoteStatus === 'ok';
+  const articleStatus = root.article
+    ? 'ok'
+    : archived.articleText
+      ? 'unresolved'
+      : 'not_applicable';
+  const complete = parentStatus === 'ok'
+    && continuationStatus === 'ok'
+    && detail.enumerationComplete
+    && quoteStatus === 'ok'
+    && articleStatus !== 'unresolved';
 
   return {
     record: {
@@ -131,14 +144,16 @@ export async function refreshExactXBookmark(
       threadContext: context,
       threadBelow: below,
       quotedTweet,
-      ...(complete ? { threadExpandedAt: options.now ?? new Date().toISOString() } : {}),
+      threadExpandedAt: complete ? options.now ?? new Date().toISOString() : undefined,
     },
     observation: {
       status: complete ? 'complete' : 'partial',
       root_status: root.status,
       parent_status: parentStatus,
       continuation_status: continuationStatus,
+      continuation_enumeration_complete: detail.enumerationComplete,
       quote_status: quoteStatus,
+      article_status: articleStatus,
       parent_limit_reached: parentLimitReached,
     },
   };

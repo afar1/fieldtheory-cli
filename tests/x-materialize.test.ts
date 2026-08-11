@@ -26,16 +26,19 @@ function tweet(id: string, text: string, parent?: string) {
   };
 }
 
-function detailResponse(rows: unknown[]) {
+function detailResponse(rows: unknown[], cursor?: string) {
   return {
     data: {
       threaded_conversation_with_injections_v2: {
         instructions: [{
           type: 'TimelineAddEntries',
-          entries: rows.map((row: any) => ({
-            entryId: `tweet-${row.rest_id}`,
-            content: { itemContent: { tweet_results: { result: row } } },
-          })),
+          entries: [
+            ...rows.map((row: any) => ({
+              entryId: `tweet-${row.rest_id}`,
+              content: { itemContent: { tweet_results: { result: row } } },
+            })),
+            ...(cursor ? [{ entryId: 'cursor-bottom-next', content: { value: cursor } }] : []),
+          ],
         }],
       },
     },
@@ -122,6 +125,86 @@ test('refreshExactXBookmark preserves archived bytes when the exact root is unav
     assert.equal(result.observation.status, 'unavailable');
     assert.deepEqual(result.record, source);
     assert.equal(result.observation.quote_status, 'ok');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('refreshExactXBookmark rejects a mismatched exact-id response', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    data: { tweetResult: { result: tweet('999', 'Wrong root.') } },
+  }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+  const source = archived();
+  try {
+    const result = await refreshExactXBookmark(source, { csrfToken: 'ct0', delayMs: 0 });
+    assert.equal(result.observation.status, 'unavailable');
+    assert.equal(result.observation.root_status, 'error');
+    assert.deepEqual(result.record, source);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('refreshExactXBookmark reports a remaining continuation cursor as partial', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      return new Response(JSON.stringify({ data: { tweetResult: { result: tweet('100', 'Current root.') } } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify(detailResponse([
+      tweet('100', 'Current root.'),
+      tweet('101', 'Continuation.', '100'),
+    ], 'MORE')), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    const result = await refreshExactXBookmark(archived(), {
+      csrfToken: 'ct0',
+      delayMs: 0,
+      maxPages: 1,
+      now: '2026-08-11T00:00:00.000Z',
+    });
+    assert.equal(result.observation.status, 'partial');
+    assert.equal(result.observation.continuation_enumeration_complete, false);
+    assert.equal(result.record.threadExpandedAt, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('refreshExactXBookmark does not promote stale archived article text under a fresh cutoff', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      return new Response(JSON.stringify({ data: { tweetResult: { result: tweet('100', 'Current root.') } } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify(detailResponse([tweet('100', 'Current root.')])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const source = archived();
+  source.articleTitle = 'Archived article';
+  source.articleText = 'Stale archived article body that must not inherit the refresh cutoff.';
+  source.articleSite = 'X Articles';
+  try {
+    const result = await refreshExactXBookmark(source, {
+      csrfToken: 'ct0',
+      delayMs: 0,
+      now: '2026-08-11T00:00:00.000Z',
+    });
+    assert.equal(result.observation.status, 'partial');
+    assert.equal(result.observation.article_status, 'unresolved');
+    assert.equal(result.record.articleText, null);
+    assert.equal(result.record.threadExpandedAt, undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }

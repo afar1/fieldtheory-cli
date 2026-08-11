@@ -1699,6 +1699,9 @@ export async function fetchTweetByIdViaGraphQL(
       const snapshot = parseTweetResultByRestId(json, tweetId);
       const article = parseTweetArticleByRestId(json);
       if (!snapshot) return { snapshot: null, article, status: article ? 'ok' : 'empty', source: 'graphql' };
+      if (snapshot.id !== tweetId) {
+        return { snapshot: null, article: null, status: 'error', source: 'graphql' };
+      }
       return { snapshot, article, status: 'ok', source: 'graphql' };
     }
 
@@ -1727,7 +1730,14 @@ export async function fetchTweetDetailViaGraphQL(
   csrfToken: string,
   cookieHeader?: string,
   options: { maxPages?: number; delayMs?: number } = {},
-): Promise<{ tweets: ThreadTweetSnapshot[]; status: TweetFetchResult['status']; httpStatus?: number }> {
+): Promise<{
+  tweets: ThreadTweetSnapshot[];
+  status: TweetFetchResult['status'];
+  httpStatus?: number;
+  enumerationComplete: boolean;
+  remainingCursor?: string;
+  parserGap: boolean;
+}> {
   const maxPages = options.maxPages ?? 3;
   const delayMs = options.delayMs ?? 300;
   const tweets: ThreadTweetSnapshot[] = [];
@@ -1744,13 +1754,13 @@ export async function fetchTweetDetailViaGraphQL(
         headers: buildHeaders(csrfToken, cookieHeader),
       });
     } catch {
-      return { tweets, status: 'error' };
+      return { tweets, status: 'error', enumerationComplete: false, parserGap: true };
     }
-    if (response.status === 429) return { tweets, status: 'rate_limited', httpStatus: 429 };
-    if (response.status === 404) return { tweets, status: 'not_found', httpStatus: 404 };
-    if (response.status === 401 || response.status === 403) return { tweets, status: 'forbidden', httpStatus: response.status };
-    if (response.status >= 500) return { tweets, status: 'server_error', httpStatus: response.status };
-    if (!response.ok) return { tweets, status: 'error', httpStatus: response.status };
+    if (response.status === 429) return { tweets, status: 'rate_limited', httpStatus: 429, enumerationComplete: false, parserGap: false };
+    if (response.status === 404) return { tweets, status: 'not_found', httpStatus: 404, enumerationComplete: false, parserGap: false };
+    if (response.status === 401 || response.status === 403) return { tweets, status: 'forbidden', httpStatus: response.status, enumerationComplete: false, parserGap: false };
+    if (response.status >= 500) return { tweets, status: 'server_error', httpStatus: response.status, enumerationComplete: false, parserGap: false };
+    if (!response.ok) return { tweets, status: 'error', httpStatus: response.status, enumerationComplete: false, parserGap: false };
 
     const parsed = parseTweetDetailResponse(await response.json());
     sawRecognizedTimeline ||= parsed.recognizedTimeline;
@@ -1758,21 +1768,30 @@ export async function fetchTweetDetailViaGraphQL(
     sawUnavailableTweet ||= parsed.sawUnavailableTweet;
     sawUnparseableTweet ||= parsed.sawUnparseableTweet;
     tweets.push(...parsed.tweets);
-    if (!parsed.nextCursor || parsed.nextCursor === cursor) break;
+    if (!parsed.nextCursor) {
+      cursor = undefined;
+      break;
+    }
+    if (parsed.nextCursor === cursor) break;
     cursor = parsed.nextCursor;
     if (page < maxPages - 1) await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 
   const byId = new Map<string, ThreadTweetSnapshot>();
   for (const tweet of tweets) if (!byId.has(tweet.id)) byId.set(tweet.id, tweet);
+  const parserGap = sawUnavailableTweet || sawUnparseableTweet;
+  const enumerationComplete = !cursor && !parserGap;
   if (byId.size === 0) {
-    if (sawUnavailableTweet && !sawUnparseableTweet) return { tweets: [], status: 'not_found' };
-    if (sawRecognizedTimeline && !sawTweetResult) return { tweets: [], status: 'empty' };
-    return { tweets: [], status: 'error' };
+    if (sawUnavailableTweet && !sawUnparseableTweet) return { tweets: [], status: 'not_found', enumerationComplete: false, parserGap };
+    if (sawRecognizedTimeline && !sawTweetResult) return { tweets: [], status: 'empty', enumerationComplete, parserGap };
+    return { tweets: [], status: 'error', enumerationComplete: false, parserGap: true };
   }
   return {
     tweets: Array.from(byId.values()).sort(compareThreadTweetsChronologically),
     status: 'ok',
+    enumerationComplete,
+    ...(cursor ? { remainingCursor: cursor } : {}),
+    parserGap,
   };
 }
 

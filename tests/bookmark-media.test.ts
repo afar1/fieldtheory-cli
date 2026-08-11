@@ -845,10 +845,15 @@ test('fetchBookmarkMediaBatch with skipProfileImages excludes pfp-only bookmarks
 
 test('fetchBookmarkMediaBatch can be bounded to an exact in-memory record', async () => {
   const selectedUrl = 'https://pbs.twimg.com/media/selected.jpg';
+  const parentUrl = 'https://pbs.twimg.com/media/selected-parent.jpg';
+  const continuationUrl = 'https://pbs.twimg.com/media/selected-continuation.jpg';
   const excludedUrl = 'https://pbs.twimg.com/media/excluded.jpg';
   const selected = {
     id: '1', tweetId: '1', url: 'https://x.com/a/status/1', text: 'selected', syncedAt: '2026-08-11T00:00:00Z',
-    mediaObjects: [{ type: 'photo', url: selectedUrl }], links: [], tags: [], ingestedVia: 'graphql',
+    mediaObjects: [{ type: 'photo', url: selectedUrl }],
+    threadContext: [{ id: '0', url: 'https://x.com/a/status/0', text: 'parent', mediaObjects: [{ type: 'photo', url: parentUrl }] }],
+    threadBelow: [{ id: '3', url: 'https://x.com/a/status/3', text: 'continuation', mediaObjects: [{ type: 'photo', url: continuationUrl }] }],
+    links: [], tags: [], ingestedVia: 'graphql',
   };
   const excluded = {
     id: '2', tweetId: '2', url: 'https://x.com/b/status/2', text: 'excluded', syncedAt: '2026-08-11T00:00:00Z',
@@ -875,8 +880,10 @@ test('fetchBookmarkMediaBatch can be bounded to an exact in-memory record', asyn
         maxBytes: 1024,
         skipProfileImages: true,
       });
-      assert.deepEqual(fetched, [selectedUrl]);
+      assert.deepEqual(fetched, [selectedUrl, parentUrl, continuationUrl]);
       assert.ok(manifest.entries.some((entry) => entry.sourceUrl === selectedUrl));
+      assert.ok(manifest.entries.some((entry) => entry.sourceUrl === parentUrl && entry.tweetId === '0'));
+      assert.ok(manifest.entries.some((entry) => entry.sourceUrl === continuationUrl && entry.tweetId === '3'));
       assert.ok(!manifest.entries.some((entry) => entry.sourceUrl === excludedUrl));
     });
   } finally {
