@@ -214,10 +214,11 @@ test('refreshExactXBookmark does not promote stale archived article text under a
 test('TweetDetail recognizes every supported continuation cursor location', () => {
   const entries = [
     { entryId: 'cursor-bottom-a', content: { value: 'BOTTOM' } },
+    { entryId: 'sq-cursor-bottom-a', content: { value: 'SQ_BOTTOM' } },
     { entryId: 'cursor-showmorethreads-b', content: { itemContent: { value: 'ITEM' } } },
     { entryId: 'cursor-showmorethreads-c', content: { operation: { cursor: { value: 'OPERATION' } } } },
   ];
-  for (const [entry, expected] of entries.map((entry, index) => [entry, ['BOTTOM', 'ITEM', 'OPERATION'][index]] as const)) {
+  for (const [entry, expected] of entries.map((entry, index) => [entry, ['BOTTOM', 'SQ_BOTTOM', 'ITEM', 'OPERATION'][index]] as const)) {
     const parsed = parseTweetDetailResponse({
       data: {
         threaded_conversation_with_injections_v2: {
@@ -228,6 +229,21 @@ test('TweetDetail recognizes every supported continuation cursor location', () =
     assert.equal(parsed.nextCursor, expected);
     assert.equal(parsed.sawUnparseableTweet, false);
   }
+});
+
+test('TweetDetail consumes a continuation cursor from TimelineReplaceEntry', () => {
+  const parsed = parseTweetDetailResponse({
+    data: {
+      threaded_conversation_with_injections_v2: {
+        instructions: [{
+          type: 'TimelineReplaceEntry',
+          entry: { entryId: 'cursor-bottom-replacement', content: { value: 'REPLACED' } },
+        }],
+      },
+    },
+  });
+  assert.equal(parsed.nextCursor, 'REPLACED');
+  assert.equal(parsed.sawUnparseableTweet, false);
 });
 
 test('TweetDetail fails closed on an unsupported or valueless cursor entry', () => {

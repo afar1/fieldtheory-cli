@@ -195,16 +195,17 @@ function continuationCursor(entry: any): {
   parserGap: boolean;
 } {
   const entryId = typeof entry?.entryId === 'string' ? entry.entryId : '';
-  if (entryId.startsWith('cursor-top')) {
+  const cursorMarker = entryId.toLowerCase();
+  if (!cursorMarker.includes('cursor')) {
+    return { recognized: false, parserGap: false };
+  }
+  if (cursorMarker.includes('cursor-top')) {
     return { recognized: true, parserGap: false };
   }
-  const supported = entryId.startsWith('cursor-bottom')
-    || entryId.startsWith('cursor-showmorethreads');
+  const supported = cursorMarker.includes('cursor-bottom')
+    || cursorMarker.includes('cursor-showmorethreads');
   if (!supported) {
-    return {
-      recognized: entryId.startsWith('cursor-'),
-      parserGap: entryId.startsWith('cursor-'),
-    };
+    return { recognized: true, parserGap: true };
   }
   const value = entry?.content?.value
     ?? entry?.content?.itemContent?.value
@@ -277,7 +278,7 @@ export function parseTweetDetailResponse(json: any): TweetDetailParseResult {
     if (instruction?.type === 'TimelineAddEntries' && Array.isArray(instruction.entries)) {
       mergeCollectThreadResult(collectResult, collectThreadEntries(instruction.entries, tweets));
     }
-    if (instruction?.type === 'TimelinePinEntry' && instruction.entry) {
+    if (instruction?.entry) {
       mergeCollectThreadResult(collectResult, collectThreadEntries([instruction.entry], tweets));
     }
   }
