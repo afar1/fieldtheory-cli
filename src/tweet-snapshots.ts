@@ -146,6 +146,7 @@ function isUnavailableTweetResult(result: any): boolean {
 
 interface CollectThreadResult {
   nextCursor?: string;
+  continuationCursors: string[];
   sawTweetResult: boolean;
   sawUnavailableTweet: boolean;
   sawUnparseableTweet: boolean;
@@ -153,6 +154,7 @@ interface CollectThreadResult {
 
 function emptyCollectThreadResult(): CollectThreadResult {
   return {
+    continuationCursors: [],
     sawTweetResult: false,
     sawUnavailableTweet: false,
     sawUnparseableTweet: false,
@@ -161,6 +163,9 @@ function emptyCollectThreadResult(): CollectThreadResult {
 
 function mergeCollectThreadResult(target: CollectThreadResult, source: CollectThreadResult): void {
   target.nextCursor = source.nextCursor ?? target.nextCursor;
+  for (const cursor of source.continuationCursors) {
+    if (!target.continuationCursors.includes(cursor)) target.continuationCursors.push(cursor);
+  }
   target.sawTweetResult = target.sawTweetResult || source.sawTweetResult;
   target.sawUnavailableTweet = target.sawUnavailableTweet || source.sawUnavailableTweet;
   target.sawUnparseableTweet = target.sawUnparseableTweet || source.sawUnparseableTweet;
@@ -222,6 +227,9 @@ function collectThreadEntries(entries: any[], out: ThreadTweetSnapshot[]): Colle
     const cursor = continuationCursor(entry);
     if (cursor.recognized) {
       result.nextCursor = cursor.cursor ?? result.nextCursor;
+      if (cursor.cursor && !result.continuationCursors.includes(cursor.cursor)) {
+        result.continuationCursors.push(cursor.cursor);
+      }
       result.sawUnparseableTweet ||= cursor.parserGap;
       continue;
     }
@@ -261,6 +269,7 @@ function collectThreadEntries(entries: any[], out: ThreadTweetSnapshot[]): Colle
 export interface TweetDetailParseResult {
   tweets: ThreadTweetSnapshot[];
   nextCursor?: string;
+  continuationCursors: string[];
   recognizedTimeline: boolean;
   sawTweetResult: boolean;
   sawUnavailableTweet: boolean;
@@ -290,6 +299,7 @@ export function parseTweetDetailResponse(json: any): TweetDetailParseResult {
   return {
     tweets: Array.from(byId.values()).sort(compareThreadTweetsChronologically),
     nextCursor: collectResult.nextCursor,
+    continuationCursors: collectResult.continuationCursors,
     recognizedTimeline,
     sawTweetResult: collectResult.sawTweetResult,
     sawUnavailableTweet: collectResult.sawUnavailableTweet,

@@ -1738,18 +1738,22 @@ export async function fetchTweetDetailViaGraphQL(
   httpStatus?: number;
   enumerationComplete: boolean;
   remainingCursor?: string;
+  remainingCursors?: string[];
   parserGap: boolean;
 }> {
   const maxPages = options.maxPages ?? 3;
   const delayMs = options.delayMs ?? 300;
   const tweets: ThreadTweetSnapshot[] = [];
-  let cursor: string | undefined;
+  const pendingCursors: Array<string | undefined> = [undefined];
+  const processedCursors = new Set<string>();
   let sawRecognizedTimeline = false;
   let sawTweetResult = false;
   let sawUnavailableTweet = false;
   let sawUnparseableTweet = false;
 
-  for (let page = 0; page < maxPages; page++) {
+  for (let page = 0; page < maxPages && pendingCursors.length > 0; page++) {
+    const cursor = pendingCursors.shift();
+    if (cursor) processedCursors.add(cursor);
     let response: Response;
     try {
       response = await fetch(buildTweetDetailUrl(tweetId, cursor), {
@@ -1770,29 +1774,41 @@ export async function fetchTweetDetailViaGraphQL(
     sawUnavailableTweet ||= parsed.sawUnavailableTweet;
     sawUnparseableTweet ||= parsed.sawUnparseableTweet;
     tweets.push(...parsed.tweets);
-    if (!parsed.nextCursor) {
-      cursor = undefined;
-      break;
+    for (const nextCursor of parsed.continuationCursors) {
+      if (processedCursors.has(nextCursor)) {
+        sawUnparseableTweet = true;
+        continue;
+      }
+      if (!pendingCursors.includes(nextCursor)) pendingCursors.push(nextCursor);
     }
-    if (parsed.nextCursor === cursor) break;
-    cursor = parsed.nextCursor;
-    if (page < maxPages - 1) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    if (page < maxPages - 1 && pendingCursors.length > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
   }
 
   const byId = new Map<string, ThreadTweetSnapshot>();
   for (const tweet of tweets) if (!byId.has(tweet.id)) byId.set(tweet.id, tweet);
   const parserGap = sawUnavailableTweet || sawUnparseableTweet;
-  const enumerationComplete = !cursor && !parserGap;
+  const remainingCursors = pendingCursors.filter((value): value is string => Boolean(value));
+  const enumerationComplete = pendingCursors.length === 0 && !parserGap;
   if (byId.size === 0) {
     if (sawUnavailableTweet && !sawUnparseableTweet) return { tweets: [], status: 'not_found', enumerationComplete: false, parserGap };
-    if (sawRecognizedTimeline && !sawTweetResult) return { tweets: [], status: 'empty', enumerationComplete, parserGap };
+    if (sawRecognizedTimeline && !sawTweetResult) return {
+      tweets: [],
+      status: 'empty',
+      enumerationComplete: false,
+      ...(remainingCursors[0] ? { remainingCursor: remainingCursors[0] } : {}),
+      ...(remainingCursors.length > 0 ? { remainingCursors } : {}),
+      parserGap,
+    };
     return { tweets: [], status: 'error', enumerationComplete: false, parserGap: true };
   }
   return {
     tweets: Array.from(byId.values()).sort(compareThreadTweetsChronologically),
     status: 'ok',
     enumerationComplete,
-    ...(cursor ? { remainingCursor: cursor } : {}),
+    ...(remainingCursors[0] ? { remainingCursor: remainingCursors[0] } : {}),
+    ...(remainingCursors.length > 0 ? { remainingCursors } : {}),
     parserGap,
   };
 }

@@ -130,6 +130,18 @@ function sourceTweetLinks(source: SourceTweet): string[] {
   return uniquePublicLinks(source.links ?? []);
 }
 
+function xArticleLink(values: string[]): string | undefined {
+  return values.find((value) => {
+    try {
+      const parsed = new URL(value);
+      return (parsed.hostname === 'x.com' || parsed.hostname === 'twitter.com')
+        && parsed.pathname.startsWith('/i/article/');
+    } catch {
+      return false;
+    }
+  });
+}
+
 function mediaUrls(mediaObject: BookmarkMediaObject): string[] {
   const variantUrls = (mediaObject.videoVariants ?? mediaObject.variants ?? [])
     .map((variant) => variant.url);
@@ -361,6 +373,8 @@ export async function materializeBookmark(
 ): Promise<BookmarkMaterialization> {
   const rootId = `x-${sha256(item.tweetId).slice(0, 20)}`;
   const components: SourceComponent[] = [];
+  const rootLinks = uniquePublicLinks(item.links ?? []);
+  const recoveredArticleLink = item.articleText ? xArticleLink(rootLinks) : undefined;
   const rootSource: SourceTweet = {
     id: item.tweetId,
     text: item.text,
@@ -368,7 +382,9 @@ export async function materializeBookmark(
     authorHandle: item.authorHandle,
     authorName: item.authorName,
     postedAt: item.postedAt,
-    links: uniquePublicLinks(item.links ?? []),
+    links: recoveredArticleLink
+      ? rootLinks.filter((link) => link !== recoveredArticleLink)
+      : rootLinks,
     media: item.media,
     mediaObjects: item.mediaObjects,
   };
@@ -470,7 +486,7 @@ export async function materializeBookmark(
       rootId,
       'x-article',
       'embedded_x_article',
-      item.url,
+      recoveredArticleLink ?? item.url,
       item.articleText,
       'used',
       'X long-form article content recovered',

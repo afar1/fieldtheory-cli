@@ -112,7 +112,7 @@ export async function refreshExactXBookmark(
     options.cookieHeader,
     { maxPages: options.maxPages ?? 3, delayMs },
   );
-  const continuationStatus = detail.status === 'empty' ? 'ok' : detail.status;
+  const continuationStatus = detail.status;
   const below = detail.status === 'ok'
     ? extractSameAuthorThreadBelow(detail.tweets, record.tweetId, record.authorHandle)
     : [];

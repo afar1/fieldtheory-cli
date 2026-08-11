@@ -139,6 +139,24 @@ test('materializeBookmark exposes missing thread and quote content as explicit g
   );
 });
 
+test('materializeBookmark does not duplicate a recovered X Article as an unresolved outbound gap', async () => {
+  const articleUrl = 'https://x.com/i/article/2042676487711584257';
+  const result = await materializeBookmark(record({
+    links: [articleUrl, 'https://example.com/other'],
+  }));
+  const article = result.components.find((row) => row.relation === 'embedded_x_article');
+  assert.equal(article?.source_locator, articleUrl);
+  assert.equal(article?.disposition, 'used');
+  assert.equal(
+    result.components.some((row) => row.source_locator === articleUrl && row.disposition === 'unresolved'),
+    false,
+  );
+  assert.equal(
+    result.components.find((row) => row.source_locator === 'https://example.com/other')?.disposition,
+    'unresolved',
+  );
+});
+
 test('materializeBookmark binds poster and video variant to separate exact assets', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'ft-materialize-video-'));
   const posterPath = path.join(dir, 'poster.jpg');
