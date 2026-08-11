@@ -88,11 +88,12 @@ function component(
     sourceAsset?: SourceComponent['source_asset'];
   } = {},
 ): SourceComponent {
+  const hop = options.hop ?? 1;
   return {
     component_id: componentId(rootId, label),
     relation,
-    traversal_hop: options.hop ?? 1,
-    mandatory_direct: options.mandatory ?? true,
+    traversal_hop: hop,
+    mandatory_direct: options.mandatory ?? hop === 1,
     materiality: options.materiality ?? 'answer_required',
     achieved_depth: options.achievedDepth ?? (disposition === 'used'
       ? 'exact source-owned representation at materialization time'

@@ -111,6 +111,14 @@ test('materializeBookmark emits exact components without leaking source-local pa
       'unresolved',
     );
     assert.equal(
+      result.components.find((row) => row.relation === 'post_outbound_pdf')?.traversal_hop,
+      2,
+    );
+    assert.equal(
+      result.components.find((row) => row.relation === 'post_outbound_pdf')?.mandatory_direct,
+      false,
+    );
+    assert.equal(
       result.components.find((row) => row.relation === 'post_media_interpretation')?.disposition,
       'unresolved',
     );
