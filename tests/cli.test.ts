@@ -6,6 +6,7 @@ import os from 'node:os';
 import { compareVersions, runWithSpinner, buildCli, parseCookieOption, shouldInferStdinFromStats } from '../src/cli.js';
 import { dataDir } from '../src/paths.js';
 import { skillWithFrontmatter } from '../src/skill.js';
+import { buildIndex, updateArticleContent, updateQuotedTweets } from '../src/bookmarks-db.js';
 
 async function captureStdout(fn: () => Promise<void>): Promise<string> {
   const chunks: string[] = [];
@@ -24,6 +25,18 @@ async function captureStdout(fn: () => Promise<void>): Promise<string> {
   }
 
   return chunks.join('');
+}
+
+async function captureConsoleLog(fn: () => Promise<void>): Promise<string> {
+  const chunks: string[] = [];
+  const originalLog = console.log;
+  console.log = (...values: unknown[]) => { chunks.push(values.map(String).join(' ')); };
+  try {
+    await fn();
+  } finally {
+    console.log = originalLog;
+  }
+  return chunks.join('\n');
 }
 
 async function captureStderr(fn: () => Promise<void>): Promise<string> {
@@ -878,6 +891,402 @@ test('ft sync: media is on by default and exposes --no-media', () => {
   assert.ok(mediaOption, 'a media option must be registered');
   assert.equal(mediaOption.negate, true, 'the media option must be --no-media (negated)');
   assert.equal(mediaOption.long, '--no-media');
+});
+
+test('ft materialize exposes one exact-id bounded source-depth operation', () => {
+  const program = buildCli();
+  const command = program.commands.find((candidate: any) => candidate.name() === 'materialize');
+  assert.ok(command, 'materialize command should be registered');
+  const options = command.options.map((option: any) => option.long);
+  assert.ok(options.includes('--refresh'));
+  assert.ok(options.includes('--fetch-media'));
+  assert.ok(options.includes('--json'));
+  assert.ok(!options.includes('--classify'));
+  assert.ok(!options.includes('--engine'));
+});
+
+test('ft materialize overlays article and quote enrichment retained in the bookmark index', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-materialize-index-'));
+  const origEnv = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = tmpDir;
+  const id = '2042685676949270724';
+  const raw = {
+    id,
+    tweetId: id,
+    url: `https://x.com/operator/status/${id}`,
+    text: 'Archived root.',
+    authorHandle: 'operator',
+    syncedAt: '2026-08-11T00:00:00.000Z',
+    quotedStatusId: '2042685676949270000',
+    links: ['https://x.com/i/article/2042676487711584257'],
+  };
+  fs.writeFileSync(path.join(tmpDir, 'bookmarks.jsonl'), `${JSON.stringify(raw)}\n`);
+
+  try {
+    await buildIndex();
+    await updateArticleContent([{
+      id,
+      sourceTweetId: id,
+      sourceLocator: 'https://x.com/i/article/2042676487711584257',
+      articleTitle: 'Indexed article',
+      articleText: 'Exact long-form content retained only in the SQLite index.',
+      articleSite: 'X Articles',
+    }]);
+    await updateQuotedTweets([{
+      id,
+      quotedTweet: {
+        id: '2042685676949270000',
+        text: 'Indexed quoted source.',
+        url: 'https://x.com/quoted/status/2042685676949270000',
+      },
+    }]);
+
+    const output = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'materialize', id, '--json']);
+    });
+    const result = JSON.parse(output);
+    assert.equal(
+      result.components.find((row: any) => row.relation === 'embedded_x_article')?.content,
+      'Exact long-form content retained only in the SQLite index.',
+    );
+    assert.equal(
+      result.components.find((row: any) => row.relation === 'quoted_post')?.content,
+      'Indexed quoted source.',
+    );
+  } finally {
+    process.env.FT_DATA_DIR = origEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ft materialize keeps indexed ordinary webpage content search-only and outbound', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-materialize-ordinary-index-'));
+  const origEnv = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = tmpDir;
+  const id = '2042685676949270724';
+  const externalArticle = 'https://example.com/article';
+  const externalBody = 'Destination-owned body retained only for index search.';
+  fs.writeFileSync(path.join(tmpDir, 'bookmarks.jsonl'), `${JSON.stringify({
+    id,
+    tweetId: id,
+    url: `https://x.com/operator/status/${id}`,
+    text: 'Archived root.',
+    authorHandle: 'operator',
+    syncedAt: '2026-08-11T00:00:00.000Z',
+    links: [externalArticle],
+  })}\n`);
+
+  try {
+    await buildIndex();
+    await updateArticleContent([{
+      id,
+      sourceTweetId: id,
+      sourceLocator: externalArticle,
+      articleTitle: 'Ordinary indexed article',
+      articleText: externalBody,
+      articleSite: 'Example',
+    }]);
+
+    const output = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'materialize', id, '--json']);
+    });
+    const result = JSON.parse(output);
+    const outbound = result.components.find((row: any) => row.source_locator === externalArticle);
+    assert.equal(outbound?.relation, 'post_outbound_link');
+    assert.equal(outbound?.disposition, 'unresolved');
+    assert.equal(result.components.some((row: any) => row.relation === 'embedded_x_article'), false);
+    assert.equal(JSON.stringify(result).includes(externalBody), false);
+    assert.equal(result.source_cutoff, '2026-08-11T00:00:00.000Z');
+  } finally {
+    process.env.FT_DATA_DIR = origEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ft materialize --refresh retains indexed article content when the current focal response does not contradict it', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-materialize-refresh-index-'));
+  const origEnv = process.env.FT_DATA_DIR;
+  const originalFetch = globalThis.fetch;
+  process.env.FT_DATA_DIR = tmpDir;
+  const id = '2042685676949270724';
+  const articleLocator = 'https://x.com/i/article/2042676487711584257';
+  fs.writeFileSync(path.join(tmpDir, 'bookmarks.jsonl'), `${JSON.stringify({
+    id,
+    tweetId: id,
+    url: `https://x.com/operator/status/${id}`,
+    text: 'Archived root.',
+    authorHandle: 'operator',
+    syncedAt: '2026-08-11T00:00:00.000Z',
+    links: [articleLocator],
+  })}\n`);
+
+  const focal = {
+    rest_id: id,
+    legacy: {
+      id_str: id,
+      full_text: 'Current root.',
+      created_at: 'Tue Aug 11 12:00:00 +0000 2026',
+      conversation_id_str: id,
+      entities: { urls: [] },
+    },
+    core: {
+      user_results: {
+        result: {
+          rest_id: '1',
+          core: { screen_name: 'operator', name: 'Operator' },
+          legacy: {},
+        },
+      },
+    },
+  };
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    const body = url.includes('/TweetResultByRestId?')
+      ? { data: { tweetResult: { result: focal } } }
+      : {
+          data: {
+            threaded_conversation_with_injections_v2: {
+              instructions: [{
+                type: 'TimelineAddEntries',
+                entries: [{
+                  entryId: `tweet-${id}`,
+                  content: { itemContent: { tweet_results: { result: focal } } },
+                }],
+              }],
+            },
+          },
+        };
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  try {
+    await buildIndex();
+    await updateArticleContent([{
+      id,
+      sourceTweetId: id,
+      sourceLocator: articleLocator,
+      articleTitle: 'Indexed article',
+      articleText: 'Legitimate bound article content retained through refresh.',
+      articleSite: 'X Articles',
+    }]);
+
+    const output = await captureStdout(async () => {
+      await buildCli().parseAsync([
+        'node',
+        'ft',
+        'materialize',
+        id,
+        '--refresh',
+        '--cookies',
+        'ct0',
+        '--delay-ms',
+        '1',
+        '--json',
+      ]);
+    });
+    const result = JSON.parse(output);
+    const article = result.components.find((row: any) => row.relation === 'embedded_x_article');
+    const currentness = result.components.find((row: any) => row.relation === 'source_currentness');
+    assert.equal(article?.content, 'Legitimate bound article content retained through refresh.');
+    assert.equal(article?.disposition, 'used');
+    assert.equal(currentness?.disposition, 'unresolved');
+    assert.equal(JSON.parse(currentness?.content ?? '{}').article_status, 'unresolved');
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.FT_DATA_DIR = origEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ft materialize shares one configured request schedule across refresh and media attempts', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-materialize-request-policy-'));
+  const origEnv = process.env.FT_DATA_DIR;
+  const originalFetch = globalThis.fetch;
+  process.env.FT_DATA_DIR = tmpDir;
+  const id = '2042685676949270724';
+  const mediaUrl = 'https://pbs.twimg.com/media/exact-policy.jpg';
+  fs.writeFileSync(path.join(tmpDir, 'bookmarks.jsonl'), `${JSON.stringify({
+    id,
+    tweetId: id,
+    url: `https://x.com/operator/status/${id}`,
+    text: 'Archived root.',
+    authorHandle: 'operator',
+    syncedAt: '2026-08-11T00:00:00.000Z',
+    mediaObjects: [{ type: 'photo', url: mediaUrl }],
+    links: [],
+  })}\n`);
+
+  const focal = {
+    rest_id: id,
+    legacy: {
+      id_str: id,
+      full_text: 'Current root.',
+      created_at: 'Tue Aug 11 12:00:00 +0000 2026',
+      conversation_id_str: id,
+      entities: { urls: [] },
+      extended_entities: { media: [{ type: 'photo', media_url_https: mediaUrl }] },
+    },
+    core: {
+      user_results: {
+        result: {
+          rest_id: '1',
+          core: { screen_name: 'operator', name: 'Operator' },
+          legacy: {},
+        },
+      },
+    },
+  };
+  const attemptTimes: number[] = [];
+  const methods: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    attemptTimes.push(Date.now());
+    methods.push(init?.method ?? 'GET');
+    const url = String(input);
+    if (url === mediaUrl && init?.method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': '4', 'content-type': 'image/jpeg' },
+      });
+    }
+    if (url === mediaUrl) {
+      return new Response(Uint8Array.from([1, 2, 3, 4]), {
+        status: 200,
+        headers: { 'content-type': 'image/jpeg' },
+      });
+    }
+    const body = url.includes('/TweetResultByRestId?')
+      ? { data: { tweetResult: { result: focal } } }
+      : {
+          data: {
+            threaded_conversation_with_injections_v2: {
+              instructions: [{
+                type: 'TimelineAddEntries',
+                entries: [{
+                  entryId: `tweet-${id}`,
+                  content: { itemContent: { tweet_results: { result: focal } } },
+                }],
+              }],
+            },
+          },
+        };
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  try {
+    const output = await captureConsoleLog(async () => {
+      await buildCli().parseAsync([
+        'node',
+        'ft',
+        'materialize',
+        id,
+        '--refresh',
+        '--fetch-media',
+        '--skip-profile-images',
+        '--cookies',
+        'ct0',
+        '--delay-ms',
+        '20',
+        '--json',
+      ]);
+    });
+    const result = JSON.parse(output);
+    assert.equal(result.components.some((row: any) => row.relation === 'post_attached_media' && row.disposition === 'used'), true);
+    assert.deepEqual(methods, ['GET', 'GET', 'HEAD', 'GET']);
+    assert.equal(attemptTimes.length, 4);
+    for (let index = 1; index < attemptTimes.length; index++) {
+      assert.ok(attemptTimes[index] - attemptTimes[index - 1] >= 15);
+    }
+
+    const zeroDelayStart = attemptTimes.length;
+    await captureConsoleLog(async () => {
+      await buildCli().parseAsync([
+        'node',
+        'ft',
+        'materialize',
+        id,
+        '--refresh',
+        '--cookies',
+        'ct0',
+        '--delay-ms',
+        '0',
+        '--json',
+      ]);
+    });
+    const zeroDelayAttempts = attemptTimes.slice(zeroDelayStart);
+    assert.equal(zeroDelayAttempts.length, 2);
+    assert.ok(zeroDelayAttempts[1] - zeroDelayAttempts[0] < 200);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.FT_DATA_DIR = origEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ft materialize never lets a stale index replace newer archive identity or content', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-materialize-stale-index-'));
+  const origEnv = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = tmpDir;
+  const id = '2042685676949270724';
+  const oldQuote = '2042685676949270000';
+  const newQuote = '2042685676949270001';
+  const oldArticle = 'https://x.com/i/article/2042676487711584257';
+  const newArticle = 'https://x.com/i/article/2042676487711584258';
+  const old = {
+    id,
+    tweetId: id,
+    url: `https://x.com/operator/status/${id}`,
+    text: 'Old archived root.',
+    authorHandle: 'operator',
+    syncedAt: '2026-08-10T00:00:00.000Z',
+    quotedStatusId: oldQuote,
+    links: [oldArticle],
+  };
+  fs.writeFileSync(path.join(tmpDir, 'bookmarks.jsonl'), `${JSON.stringify(old)}\n`);
+
+  try {
+    await buildIndex();
+    await updateArticleContent([{
+      id,
+      sourceTweetId: id,
+      sourceLocator: oldArticle,
+      articleTitle: 'Old indexed article',
+      articleText: 'Old indexed article body.',
+    }]);
+    await updateQuotedTweets([{
+      id,
+      quotedTweet: {
+        id: oldQuote,
+        text: 'Old indexed quote.',
+        url: `https://x.com/quoted/status/${oldQuote}`,
+      },
+    }]);
+    fs.writeFileSync(path.join(tmpDir, 'bookmarks.jsonl'), `${JSON.stringify({
+      ...old,
+      text: 'New archive-owned root.',
+      syncedAt: '2026-08-11T00:00:00.000Z',
+      quotedStatusId: newQuote,
+      links: [newArticle],
+    })}\n`);
+
+    const output = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'materialize', id, '--json']);
+    });
+    const result = JSON.parse(output);
+    assert.equal(result.components.find((row: any) => row.relation === 'root_post')?.content, 'New archive-owned root.');
+    assert.equal(result.source_cutoff, '2026-08-11T00:00:00.000Z');
+    assert.equal(result.components.find((row: any) => row.relation === 'quoted_post')?.source_locator, `https://x.com/i/status/${newQuote}`);
+    assert.equal(result.components.some((row: any) => row.content === 'Old indexed quote.'), false);
+    assert.equal(result.components.some((row: any) => row.content === 'Old indexed article body.'), false);
+  } finally {
+    process.env.FT_DATA_DIR = origEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 test('ft wiki: description mentions engine prerequisite', () => {

@@ -5,6 +5,12 @@ import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fetchBookmarkMediaBatch } from '../src/bookmark-media.js';
+import { materializeBookmark } from '../src/bookmark-materialization.js';
+import { XRequestExecutor } from '../src/x-request-policy.js';
+
+function mediaExecutor(): XRequestExecutor {
+  return new XRequestExecutor({ maxAttempts: 1 });
+}
 
 async function withMediaDataDir(records: any[], fn: () => Promise<void>): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), 'ft-media-test-'));
@@ -63,7 +69,7 @@ test('fetchBookmarkMediaBatch downloads post media from GraphQL mediaObjects sha
 
   try {
     await withMediaDataDir(records, async () => {
-      const manifest = await fetchBookmarkMediaBatch({ limit: 10, maxBytes: 1024 });
+      const manifest = await fetchBookmarkMediaBatch(mediaExecutor(), { limit: 10, maxBytes: 1024 });
       const downloaded = manifest.entries
         .filter((entry) => entry.status === 'downloaded')
         .map((entry) => entry.sourceUrl)
@@ -132,7 +138,7 @@ test('fetchBookmarkMediaBatch downloads quoted tweet media targets', async () =>
 
   try {
     await withMediaDataDir(records, async () => {
-      const manifest = await fetchBookmarkMediaBatch({ limit: 10, maxBytes: 1024 });
+      const manifest = await fetchBookmarkMediaBatch(mediaExecutor(), { limit: 10, maxBytes: 1024 });
       const downloaded = manifest.entries
         .filter((entry) => entry.status === 'downloaded')
         .map((entry) => ({ tweetId: entry.tweetId, sourceUrl: entry.sourceUrl }))
@@ -144,6 +150,166 @@ test('fetchBookmarkMediaBatch downloads quoted tweet media targets', async () =>
         { tweetId: '99', sourceUrl: quotedProfileUrl.replace('_normal.', '_400x400.') },
         { tweetId: '99', sourceUrl: quotedVideoUrl },
       ]);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchBookmarkMediaBatch creates root-specific associations for one shared quoted asset in one run', async () => {
+  const sharedPhotoUrl = 'https://pbs.twimg.com/media/shared-quoted.jpg';
+  const quotedTweet = {
+    id: '99',
+    url: 'https://x.com/quoted/status/99',
+    text: 'shared quote',
+    authorHandle: 'quoted',
+    mediaObjects: [{ type: 'photo', url: sharedPhotoUrl }],
+  };
+  const records = ['1', '2'].map((id) => ({
+    id,
+    tweetId: id,
+    url: `https://x.com/operator/status/${id}`,
+    text: `root ${id}`,
+    syncedAt: '2026-04-09T00:00:00.000Z',
+    quotedStatusId: quotedTweet.id,
+    quotedTweet,
+    links: [],
+  }));
+  const originalFetch = globalThis.fetch;
+  let getCalls = 0;
+  globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    if (init?.method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': '4', 'content-type': 'image/jpeg' },
+      });
+    }
+    getCalls += 1;
+    return new Response(Uint8Array.from([1, 2, 3, 4]), {
+      status: 200,
+      headers: { 'content-type': 'image/jpeg' },
+    });
+  }) as typeof fetch;
+
+  try {
+    await withMediaDataDir(records, async () => {
+      const manifest = await fetchBookmarkMediaBatch(mediaExecutor(), { maxBytes: 1024, skipProfileImages: true });
+      const shared = manifest.entries.filter((entry) => entry.sourceUrl === sharedPhotoUrl);
+      assert.equal(getCalls, 1);
+      assert.deepEqual(shared.map((entry) => entry.bookmarkId).sort(), ['1', '2']);
+      assert.equal(shared[0].localPath, shared[1].localPath);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchBookmarkMediaBatch reuses verified shared bytes across runs while preserving root custody', async () => {
+  const sharedPhotoUrl = 'https://pbs.twimg.com/media/shared-quoted-later.jpg';
+  const quotedTweet = {
+    id: '99',
+    url: 'https://x.com/quoted/status/99',
+    text: 'shared quote',
+    authorHandle: 'quoted',
+    mediaObjects: [{ type: 'photo', url: sharedPhotoUrl }],
+  };
+  const records = ['1', '2'].map((id) => ({
+    id,
+    tweetId: id,
+    url: `https://x.com/operator/status/${id}`,
+    text: `root ${id}`,
+    syncedAt: '2026-04-09T00:00:00.000Z',
+    quotedStatusId: quotedTweet.id,
+    quotedTweet,
+    links: [],
+  }));
+  const originalFetch = globalThis.fetch;
+  let getCalls = 0;
+  globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    if (init?.method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': '4', 'content-type': 'image/jpeg' },
+      });
+    }
+    getCalls += 1;
+    return new Response(Uint8Array.from([1, 2, 3, 4]), {
+      status: 200,
+      headers: { 'content-type': 'image/jpeg' },
+    });
+  }) as typeof fetch;
+
+  try {
+    await withMediaDataDir(records, async () => {
+      await fetchBookmarkMediaBatch(mediaExecutor(), { records: [records[0]], maxBytes: 1024, skipProfileImages: true });
+      assert.equal(getCalls, 1);
+      globalThis.fetch = (async () => {
+        throw new Error('verified cached bytes should avoid another request');
+      }) as typeof fetch;
+      const manifest = await fetchBookmarkMediaBatch(mediaExecutor(), { records: [records[1]], maxBytes: 1024, skipProfileImages: true });
+      const shared = manifest.entries.filter((entry) => entry.sourceUrl === sharedPhotoUrl);
+      assert.deepEqual(shared.map((entry) => entry.bookmarkId).sort(), ['1', '2']);
+      assert.equal(shared[0].localPath, shared[1].localPath);
+
+      const materialized = await materializeBookmark(records[1], manifest);
+      const component = materialized.components.find((row) => row.source_locator === sharedPhotoUrl);
+      assert.ok(component?.source_asset);
+      assert.equal(component.source_asset.bytes, 4);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchBookmarkMediaBatch refetches same-size cached bytes whose filename digest no longer matches', async () => {
+  const sharedPhotoUrl = 'https://pbs.twimg.com/media/shared-corrupted-later.jpg';
+  const quotedTweet = {
+    id: '99',
+    url: 'https://x.com/quoted/status/99',
+    text: 'shared quote',
+    authorHandle: 'quoted',
+    mediaObjects: [{ type: 'photo', url: sharedPhotoUrl }],
+  };
+  const records = ['1', '2'].map((id) => ({
+    id,
+    tweetId: id,
+    url: `https://x.com/operator/status/${id}`,
+    text: `root ${id}`,
+    syncedAt: '2026-04-09T00:00:00.000Z',
+    quotedStatusId: quotedTweet.id,
+    quotedTweet,
+    links: [],
+  }));
+  const originalFetch = globalThis.fetch;
+  let getCalls = 0;
+  globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    if (init?.method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': '4', 'content-type': 'image/jpeg' },
+      });
+    }
+    getCalls += 1;
+    return new Response(Uint8Array.from([1, 2, 3, 4]), {
+      status: 200,
+      headers: { 'content-type': 'image/jpeg' },
+    });
+  }) as typeof fetch;
+
+  try {
+    await withMediaDataDir(records, async () => {
+      const first = await fetchBookmarkMediaBatch(mediaExecutor(), { records: [records[0]], maxBytes: 1024, skipProfileImages: true });
+      const localPath = first.entries.find((entry) => entry.sourceUrl === sharedPhotoUrl)?.localPath;
+      assert.ok(localPath);
+      assert.equal(getCalls, 1);
+      await writeFile(localPath, Uint8Array.from([9, 9, 9, 9]));
+
+      const second = await fetchBookmarkMediaBatch(mediaExecutor(), { records: [records[1]], maxBytes: 1024, skipProfileImages: true });
+      assert.equal(getCalls, 2);
+      const shared = second.entries.filter((entry) => entry.sourceUrl === sharedPhotoUrl);
+      assert.deepEqual(shared.map((entry) => entry.bookmarkId).sort(), ['1', '2']);
+      assert.equal(shared[0].localPath, shared[1].localPath);
+      assert.deepEqual([...await readFile(localPath)], [1, 2, 3, 4]);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -204,7 +370,7 @@ test('fetchBookmarkMediaBatch downloads shared profile images only once across b
 
   try {
     await withMediaDataDir(records, async () => {
-      const manifest = await fetchBookmarkMediaBatch({ limit: 10, maxBytes: 1024 });
+      const manifest = await fetchBookmarkMediaBatch(mediaExecutor(), { limit: 10, maxBytes: 1024 });
       const downloadedProfileEntries = manifest.entries.filter(
         (entry) => entry.status === 'downloaded' && entry.sourceUrl === fullProfileUrl,
       );
@@ -277,7 +443,7 @@ test('fetchBookmarkMediaBatch deduplicates shared profile image failure within o
 
   try {
     await withMediaDataDir(records, async () => {
-      const manifest = await fetchBookmarkMediaBatch({ limit: 10, maxBytes: 1024 });
+      const manifest = await fetchBookmarkMediaBatch(mediaExecutor(), { limit: 10, maxBytes: 1024 });
       const downloadedProfileEntries = manifest.entries.filter(
         (entry) => entry.status === 'downloaded' && entry.sourceUrl === fullProfileUrl,
       );
@@ -330,7 +496,7 @@ test('fetchBookmarkMediaBatch retries failed profile image when requested', asyn
         return new Response(null, { status: 500 });
       };
 
-      const firstManifest = await fetchBookmarkMediaBatch({ limit: 10, maxBytes: 1024 });
+      const firstManifest = await fetchBookmarkMediaBatch(mediaExecutor(), { limit: 10, maxBytes: 1024 });
       assert.equal(
         firstManifest.entries.filter((entry) => entry.status === 'failed' && entry.sourceUrl === fullProfileUrl).length,
         1,
@@ -352,7 +518,7 @@ test('fetchBookmarkMediaBatch retries failed profile image when requested', asyn
         });
       };
 
-      const secondManifest = await fetchBookmarkMediaBatch({ limit: 10, maxBytes: 1024, retryFailed: true });
+      const secondManifest = await fetchBookmarkMediaBatch(mediaExecutor(), { limit: 10, maxBytes: 1024, retryFailed: true });
       const downloadedProfileEntries = secondManifest.entries.filter(
         (entry) => entry.status === 'downloaded' && entry.sourceUrl === fullProfileUrl,
       );
@@ -399,7 +565,7 @@ test('fetchBookmarkMediaBatch reports progress as assets complete', async () => 
 
   try {
     await withMediaDataDir(records, async () => {
-      await fetchBookmarkMediaBatch({
+      await fetchBookmarkMediaBatch(mediaExecutor(), {
         limit: 10,
         maxBytes: 1024,
         onProgress: (progress) => {
@@ -474,7 +640,7 @@ test('fetchBookmarkMediaBatch aborts at boundary and writes completed entries to
 
   try {
     await withMediaDataDir(records, async () => {
-      const manifest = await fetchBookmarkMediaBatch({
+      const manifest = await fetchBookmarkMediaBatch(mediaExecutor(), {
         maxBytes: 1024,
         signal: controller.signal,
         onProgress: (progress) => {
@@ -548,11 +714,11 @@ test('fetchBookmarkMediaBatch applies limit after filtering out already-download
 
   try {
     await withMediaDataDir(records, async () => {
-      const firstRun = await fetchBookmarkMediaBatch({ limit: 1, maxBytes: 1024 });
+      const firstRun = await fetchBookmarkMediaBatch(mediaExecutor(), { limit: 1, maxBytes: 1024 });
       assert.equal(firstRun.downloaded, 1);
       assert.equal(fetchedUrls.at(-1), firstUrl);
 
-      const secondRun = await fetchBookmarkMediaBatch({ limit: 1, maxBytes: 1024 });
+      const secondRun = await fetchBookmarkMediaBatch(mediaExecutor(), { limit: 1, maxBytes: 1024 });
       assert.equal(secondRun.downloaded, 1);
       assert.equal(fetchedUrls.at(-1), secondUrl);
     });
@@ -599,11 +765,11 @@ test('fetchBookmarkMediaBatch backs off failed non-profile media unless retry is
             });
       };
 
-      const firstRun = await fetchBookmarkMediaBatch({ maxBytes: 1024 });
+      const firstRun = await fetchBookmarkMediaBatch(mediaExecutor(), { maxBytes: 1024 });
       assert.equal(firstRun.failed, 1);
       assert.equal(firstRun.entries.filter((entry) => entry.sourceUrl === photoUrl).length, 1);
 
-      const secondRun = await fetchBookmarkMediaBatch({ maxBytes: 1024 });
+      const secondRun = await fetchBookmarkMediaBatch(mediaExecutor(), { maxBytes: 1024 });
       assert.equal(secondRun.downloaded, 0);
       assert.equal(getCalls, 1);
       assert.equal(secondRun.entries.filter((entry) => entry.sourceUrl === photoUrl).length, 1);
@@ -612,7 +778,7 @@ test('fetchBookmarkMediaBatch backs off failed non-profile media unless retry is
         'failed',
       );
 
-      const thirdRun = await fetchBookmarkMediaBatch({ maxBytes: 1024, retryFailed: true });
+      const thirdRun = await fetchBookmarkMediaBatch(mediaExecutor(), { maxBytes: 1024, retryFailed: true });
       assert.equal(thirdRun.downloaded, 1);
       assert.equal(getCalls, 2);
       assert.equal(thirdRun.entries.filter((entry) => entry.sourceUrl === photoUrl).length, 1);
@@ -664,7 +830,7 @@ test('fetchBookmarkMediaBatch retries stale failed non-profile media after backo
             });
       };
 
-      const firstRun = await fetchBookmarkMediaBatch({ maxBytes: 1024 });
+      const firstRun = await fetchBookmarkMediaBatch(mediaExecutor(), { maxBytes: 1024 });
       assert.equal(firstRun.failed, 1);
 
       const manifestPath = path.join(process.env.FT_DATA_DIR!, 'media-manifest.json');
@@ -672,7 +838,7 @@ test('fetchBookmarkMediaBatch retries stale failed non-profile media after backo
       manifest.entries[0].fetchedAt = '2026-01-01T00:00:00.000Z';
       await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
 
-      const secondRun = await fetchBookmarkMediaBatch({ maxBytes: 1024 });
+      const secondRun = await fetchBookmarkMediaBatch(mediaExecutor(), { maxBytes: 1024 });
       assert.equal(secondRun.downloaded, 1);
       assert.equal(getCalls, 2);
     });
@@ -729,7 +895,7 @@ test('fetchBookmarkMediaBatch does not retry the same failing asset twice in one
         return new Response(null, { status: 500 });
       };
 
-      const manifest = await fetchBookmarkMediaBatch({ maxBytes: 1024 });
+      const manifest = await fetchBookmarkMediaBatch(mediaExecutor(), { maxBytes: 1024 });
       assert.equal(manifest.failed, 2);
       assert.equal(getCalls, 1);
       assert.equal(manifest.entries.filter((entry) => entry.sourceUrl === sharedPhotoUrl).length, 2);
@@ -788,7 +954,7 @@ test('fetchBookmarkMediaBatch with skipProfileImages skips profile images but do
 
   try {
     await withMediaDataDir(records, async () => {
-      const manifest = await fetchBookmarkMediaBatch({ limit: 10, maxBytes: 1024, skipProfileImages: true });
+      const manifest = await fetchBookmarkMediaBatch(mediaExecutor(), { limit: 10, maxBytes: 1024, skipProfileImages: true });
 
       assert.equal(manifest.entries.filter((e) => e.sourceUrl.includes('/profile_images/')).length, 0);
       assert.ok(!fetchedUrls.some((u) => u.includes('/profile_images/')));
@@ -833,7 +999,7 @@ test('fetchBookmarkMediaBatch with skipProfileImages excludes pfp-only bookmarks
 
   try {
     await withMediaDataDir(records, async () => {
-      const manifest = await fetchBookmarkMediaBatch({ limit: 10, maxBytes: 1024, skipProfileImages: true });
+      const manifest = await fetchBookmarkMediaBatch(mediaExecutor(), { limit: 10, maxBytes: 1024, skipProfileImages: true });
       assert.equal(manifest.downloaded, 0);
       assert.equal(manifest.processed, 0);
       assert.equal(fetchCalled, false);
@@ -841,4 +1007,121 @@ test('fetchBookmarkMediaBatch with skipProfileImages excludes pfp-only bookmarks
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('fetchBookmarkMediaBatch can be bounded to an exact in-memory record', async () => {
+  const selectedUrl = 'https://pbs.twimg.com/media/selected.jpg';
+  const parentUrl = 'https://pbs.twimg.com/media/selected-parent.jpg';
+  const continuationUrl = 'https://pbs.twimg.com/media/selected-continuation.jpg';
+  const excludedUrl = 'https://pbs.twimg.com/media/excluded.jpg';
+  const selected = {
+    id: '1', tweetId: '1', url: 'https://x.com/a/status/1', text: 'selected', syncedAt: '2026-08-11T00:00:00Z',
+    mediaObjects: [{ type: 'photo', url: selectedUrl }],
+    threadContext: [{ id: '0', url: 'https://x.com/a/status/0', text: 'parent', mediaObjects: [{ type: 'photo', url: parentUrl }] }],
+    threadBelow: [{ id: '3', url: 'https://x.com/a/status/3', text: 'continuation', mediaObjects: [{ type: 'photo', url: continuationUrl }] }],
+    links: [], tags: [], ingestedVia: 'graphql',
+  };
+  const excluded = {
+    id: '2', tweetId: '2', url: 'https://x.com/b/status/2', text: 'excluded', syncedAt: '2026-08-11T00:00:00Z',
+    mediaObjects: [{ type: 'photo', url: excludedUrl }], links: [], tags: [], ingestedVia: 'graphql',
+  };
+  const fetched: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if ((init?.method ?? 'GET') === 'HEAD') {
+      return new Response(null, { status: 200, headers: { 'content-length': '4', 'content-type': 'image/jpeg' } });
+    }
+    fetched.push(url);
+    return new Response(Uint8Array.from([1, 2, 3, 4]), {
+      status: 200,
+      headers: { 'content-type': 'image/jpeg' },
+    });
+  }) as typeof fetch;
+  try {
+    await withMediaDataDir([selected, excluded], async () => {
+      const manifest = await fetchBookmarkMediaBatch(mediaExecutor(), {
+        records: [selected],
+        limit: 1,
+        maxBytes: 1024,
+        skipProfileImages: true,
+      });
+      assert.deepEqual(fetched, [selectedUrl, parentUrl, continuationUrl]);
+      assert.ok(manifest.entries.some((entry) => entry.sourceUrl === selectedUrl));
+      assert.ok(manifest.entries.some((entry) => entry.sourceUrl === parentUrl && entry.tweetId === '0'));
+      assert.ok(manifest.entries.some((entry) => entry.sourceUrl === continuationUrl && entry.tweetId === '3'));
+      assert.ok(!manifest.entries.some((entry) => entry.sourceUrl === excludedUrl));
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchBookmarkMediaBatch routes every exact media attempt through the injected request executor', async () => {
+  const selectedUrl = 'https://pbs.twimg.com/media/policy-bound.jpg';
+  const selected = {
+    id: '1', tweetId: '1', url: 'https://x.com/a/status/1', text: 'selected', syncedAt: '2026-08-11T00:00:00Z',
+    mediaObjects: [{ type: 'photo', url: selectedUrl }], links: [], tags: [], ingestedVia: 'graphql',
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error('raw global fetch escaped the injected executor');
+  }) as typeof fetch;
+  const executor = new XRequestExecutor({
+    maxAttempts: 1,
+    fetchImpl: (async (_input: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === 'HEAD') {
+        return new Response(null, {
+          status: 200,
+          headers: { 'content-length': '4', 'content-type': 'image/jpeg' },
+        });
+      }
+      return new Response(Uint8Array.from([1, 2, 3, 4]), {
+        status: 200,
+        headers: { 'content-type': 'image/jpeg' },
+      });
+    }) as typeof fetch,
+  });
+  try {
+    await withMediaDataDir([selected], async () => {
+      const manifest = await fetchBookmarkMediaBatch(executor, {
+        records: [selected],
+        limit: 1,
+        maxBytes: 1024,
+        skipProfileImages: true,
+      });
+      assert.equal(manifest.downloaded, 1);
+      assert.equal(manifest.failed, 0);
+      assert.equal(executor.attemptCount, 2);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('standalone one-attempt media policy preserves terminal HEAD network failure behavior', async () => {
+  const selectedUrl = 'https://pbs.twimg.com/media/head-network-failure.jpg';
+  const selected = {
+    id: '1', tweetId: '1', url: 'https://x.com/a/status/1', text: 'selected', syncedAt: '2026-08-11T00:00:00Z',
+    mediaObjects: [{ type: 'photo', url: selectedUrl }], links: [], tags: [], ingestedVia: 'graphql',
+  };
+  let calls = 0;
+  const executor = new XRequestExecutor({
+    maxAttempts: 1,
+    fetchImpl: (async () => {
+      calls += 1;
+      throw new Error('head transport unavailable');
+    }) as typeof fetch,
+  });
+
+  await withMediaDataDir([selected], async () => {
+    const manifest = await fetchBookmarkMediaBatch(executor, {
+      records: [selected],
+      maxBytes: 1024,
+      skipProfileImages: true,
+    });
+    assert.equal(calls, 1);
+    assert.equal(manifest.failed, 1);
+    assert.equal(manifest.entries.at(-1)?.reason, 'head transport unavailable');
+  });
 });

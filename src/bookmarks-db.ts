@@ -6,8 +6,9 @@ import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js
 import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
+import { bindArticleEnrichment, canonicalHttpLocator } from './source-bindings.js';
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 export interface SearchResult {
   id: string;
@@ -48,6 +49,8 @@ export interface BookmarkTimelineItem {
   articleTitle?: string | null;
   articleText?: string | null;
   articleSite?: string | null;
+  articleSourceTweetId?: string | null;
+  articleLocator?: string | null;
   enrichedAt?: string | null;
   quotedStatusId?: string | null;
   quotedTweet?: QuotedTweetSnapshot | null;
@@ -171,6 +174,8 @@ function mapTimelineRow(row: unknown[]): BookmarkTimelineItem {
     enrichedAt: (row[29] as string) ?? null,
     quotedStatusId: (row[30] as string) ?? null,
     quotedTweet: parseQuotedTweet(row[31]),
+    articleSourceTweetId: (row[32] as string) ?? null,
+    articleLocator: (row[33] as string) ?? null,
   };
 }
 
@@ -271,7 +276,9 @@ function initSchema(db: Database): void {
     article_site TEXT,
     enriched_at TEXT,
     folder_ids TEXT,
-    folder_names TEXT
+    folder_names TEXT,
+    article_source_tweet_id TEXT,
+    article_locator TEXT
   )`);
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_author ON bookmarks(author_handle)`);
@@ -342,6 +349,8 @@ function ensureMigrations(db: Database): void {
     ensureColumn(db, 'bookmarks', 'article_text', 'TEXT');
     ensureColumn(db, 'bookmarks', 'article_site', 'TEXT');
     ensureColumn(db, 'bookmarks', 'enriched_at', 'TEXT');
+    ensureColumn(db, 'bookmarks', 'article_source_tweet_id', 'TEXT');
+    ensureColumn(db, 'bookmarks', 'article_locator', 'TEXT');
 
     ensureColumn(db, 'bookmarks', 'folder_ids', 'TEXT');
     ensureColumn(db, 'bookmarks', 'folder_names', 'TEXT');
@@ -363,6 +372,8 @@ function ensureMigrations(db: Database): void {
 }
 
 interface PreservedBookmarkFields {
+  tweetId: string;
+  quotedStatusId: string | null;
   categories: string | null;
   primaryCategory: string | null;
   githubUrls: string | null;
@@ -373,6 +384,8 @@ interface PreservedBookmarkFields {
   articleText: string | null;
   articleSite: string | null;
   enrichedAt: string | null;
+  articleSourceTweetId: string | null;
+  articleLocator: string | null;
   folderIds: string | null;
   folderNames: string | null;
 }
@@ -382,6 +395,48 @@ function serializeJsonArray(values: string[] | undefined | null): string | null 
   return JSON.stringify(values);
 }
 
+const BOOKMARK_INSERT_COLUMNS = [
+  'id',
+  'tweet_id',
+  'url',
+  'text',
+  'author_handle',
+  'author_name',
+  'author_profile_image_url',
+  'posted_at',
+  'bookmarked_at',
+  'synced_at',
+  'conversation_id',
+  'in_reply_to_status_id',
+  'quoted_status_id',
+  'language',
+  'like_count',
+  'repost_count',
+  'reply_count',
+  'quote_count',
+  'bookmark_count',
+  'view_count',
+  'media_count',
+  'link_count',
+  'links_json',
+  'tags_json',
+  'ingested_via',
+  'categories',
+  'primary_category',
+  'github_urls',
+  'domains',
+  'primary_domain',
+  'quoted_tweet_json',
+  'article_title',
+  'article_text',
+  'article_site',
+  'enriched_at',
+  'folder_ids',
+  'folder_names',
+  'article_source_tweet_id',
+  'article_locator',
+] as const;
+
 function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBookmarkFields): void {
   // Extract GitHub URLs (kept inline — no LLM needed for URL parsing)
   const text = r.text ?? '';
@@ -389,8 +444,34 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
   const githubFromLinks = (r.links ?? []).filter((l) => /github\.com/i.test(l));
   const githubUrls = [...new Set([...githubMatches.map((m) => `https://${m}`), ...githubFromLinks])];
 
+  const preservedRootMatches = preserved?.tweetId === r.tweetId;
+  const preservedQuote = preservedRootMatches
+    && preserved?.quotedStatusId === (r.quotedStatusId ?? null)
+    && parseQuotedTweet(preserved.quotedTweetJson)?.id === r.quotedStatusId
+      ? preserved.quotedTweetJson
+      : null;
+  const rawQuote = r.quotedStatusId && r.quotedTweet?.id === r.quotedStatusId
+    ? JSON.stringify(r.quotedTweet)
+    : null;
+
+  const rawArticleLocator = bindArticleEnrichment(r.tweetId, r.links ?? [], {
+    articleText: r.articleText,
+    sourceTweetId: r.articleSourceTweetId,
+    sourceLocator: r.articleLocator,
+  });
+  const preservedArticleLocator = preservedRootMatches
+    ? bindArticleEnrichment(r.tweetId, r.links ?? [], {
+        articleText: preserved?.articleText,
+        sourceTweetId: preserved?.articleSourceTweetId,
+        sourceLocator: preserved?.articleLocator,
+      })
+    : undefined;
+  const useRawArticle = Boolean(r.articleText && rawArticleLocator);
+  const usePreservedArticle = !useRawArticle && Boolean(preservedArticleLocator);
+
   db.run(
-    `INSERT OR REPLACE INTO bookmarks VALUES (${Array(37).fill('?').join(',')})`,
+    `INSERT OR REPLACE INTO bookmarks (${BOOKMARK_INSERT_COLUMNS.join(',')})
+     VALUES (${BOOKMARK_INSERT_COLUMNS.map(() => '?').join(',')})`,
     [
       r.id,
       r.tweetId,
@@ -422,13 +503,15 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
       preserved?.githubUrls ?? (githubUrls.length ? JSON.stringify(githubUrls) : null),
       preserved?.domains ?? null,
       preserved?.primaryDomain ?? null,
-      r.quotedTweet ? JSON.stringify(r.quotedTweet) : (preserved?.quotedTweetJson ?? null),
-      preserved?.articleTitle ?? null,
-      preserved?.articleText ?? null,
-      preserved?.articleSite ?? null,
-      preserved?.enrichedAt ?? null,
+      rawQuote ?? preservedQuote,
+      useRawArticle ? (r.articleTitle ?? null) : usePreservedArticle ? preserved?.articleTitle ?? null : null,
+      useRawArticle ? r.articleText! : usePreservedArticle ? preserved?.articleText ?? null : null,
+      useRawArticle ? (r.articleSite ?? null) : usePreservedArticle ? preserved?.articleSite ?? null : null,
+      useRawArticle ? (r.enrichedAt ?? null) : usePreservedArticle ? preserved?.enrichedAt ?? null : null,
       serializeJsonArray(r.folderIds) ?? preserved?.folderIds ?? null,
       serializeJsonArray(r.folderNames) ?? preserved?.folderNames ?? null,
+      useRawArticle ? r.tweetId : usePreservedArticle ? preserved?.articleSourceTweetId ?? null : null,
+      useRawArticle ? rawArticleLocator! : usePreservedArticle ? preservedArticleLocator! : null,
     ]
   );
 }
@@ -457,25 +540,29 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
     const existingRows = new Map<string, PreservedBookmarkFields>();
     try {
       const rows = db.exec(
-        `SELECT id, categories, primary_category, github_urls, domains, primary_domain,
+        `SELECT id, tweet_id, quoted_status_id, categories, primary_category, github_urls, domains, primary_domain,
                 quoted_tweet_json, article_title, article_text, article_site, enriched_at,
-                folder_ids, folder_names
+                folder_ids, folder_names, article_source_tweet_id, article_locator
          FROM bookmarks`
       );
       for (const r of (rows[0]?.values ?? [])) {
         existingRows.set(r[0] as string, {
-          categories: (r[1] as string) ?? null,
-          primaryCategory: (r[2] as string) ?? null,
-          githubUrls: (r[3] as string) ?? null,
-          domains: (r[4] as string) ?? null,
-          primaryDomain: (r[5] as string) ?? null,
-          quotedTweetJson: (r[6] as string) ?? null,
-          articleTitle: (r[7] as string) ?? null,
-          articleText: (r[8] as string) ?? null,
-          articleSite: (r[9] as string) ?? null,
-          enrichedAt: (r[10] as string) ?? null,
-          folderIds: (r[11] as string) ?? null,
-          folderNames: (r[12] as string) ?? null,
+          tweetId: String(r[1]),
+          quotedStatusId: (r[2] as string) ?? null,
+          categories: (r[3] as string) ?? null,
+          primaryCategory: (r[4] as string) ?? null,
+          githubUrls: (r[5] as string) ?? null,
+          domains: (r[6] as string) ?? null,
+          primaryDomain: (r[7] as string) ?? null,
+          quotedTweetJson: (r[8] as string) ?? null,
+          articleTitle: (r[9] as string) ?? null,
+          articleText: (r[10] as string) ?? null,
+          articleSite: (r[11] as string) ?? null,
+          enrichedAt: (r[12] as string) ?? null,
+          folderIds: (r[13] as string) ?? null,
+          folderNames: (r[14] as string) ?? null,
+          articleSourceTweetId: (r[15] as string) ?? null,
+          articleLocator: (r[16] as string) ?? null,
         });
       }
     } catch { /* table may be empty */ }
@@ -664,7 +751,9 @@ export async function listBookmarks(
         b.synced_at,
         b.enriched_at,
         b.quoted_status_id,
-        b.quoted_tweet_json
+        b.quoted_tweet_json,
+        b.article_source_tweet_id,
+        b.article_locator
       FROM bookmarks b
       ${where}
       ${bookmarkSortClause(filters.sort)}
@@ -812,7 +901,9 @@ export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem 
         b.synced_at,
         b.enriched_at,
         b.quoted_status_id,
-        b.quoted_tweet_json
+        b.quoted_tweet_json,
+        b.article_source_tweet_id,
+        b.article_locator
       FROM bookmarks b
       WHERE b.id = ?
       LIMIT 1`,
@@ -1160,9 +1251,13 @@ export async function updateQuotedTweets(
   ensureMigrations(db);
 
   try {
-    const stmt = db.prepare('UPDATE bookmarks SET quoted_tweet_json = ? WHERE id = ?');
+    const stmt = db.prepare(
+      'UPDATE bookmarks SET quoted_tweet_json = ? WHERE id = ? AND quoted_status_id = ?',
+    );
     for (const record of records) {
-      stmt.run([JSON.stringify(record.quotedTweet), record.id]);
+      // A mismatched quote identity intentionally updates zero rows: derived
+      // content must never replace the root-owned quote binding.
+      stmt.run([JSON.stringify(record.quotedTweet), record.id, record.quotedTweet.id]);
     }
     stmt.free();
     saveDb(db, dbPath);
@@ -1194,6 +1289,8 @@ export async function updateBookmarkText(
 
 export interface ArticleUpdate {
   id: string;
+  sourceTweetId: string;
+  sourceLocator: string;
   articleTitle: string;
   articleText: string;
   articleSite?: string;
@@ -1209,11 +1306,28 @@ export async function updateArticleContent(
 
   try {
     const stmt = db.prepare(
-      'UPDATE bookmarks SET article_title = ?, article_text = ?, article_site = ?, enriched_at = ? WHERE id = ?'
+      `UPDATE bookmarks
+       SET article_title = ?, article_text = ?, article_site = ?, enriched_at = ?,
+           article_source_tweet_id = ?, article_locator = ?
+       WHERE id = ? AND tweet_id = ?`
     );
     const now = new Date().toISOString();
     for (const record of records) {
-      stmt.run([record.articleTitle, record.articleText, record.articleSite ?? null, now, record.id]);
+      if (!record.sourceTweetId || !canonicalHttpLocator(record.sourceLocator)) {
+        throw new Error(`Refusing unbound article enrichment for bookmark ${record.id}`);
+      }
+      // The tweet_id predicate intentionally rejects wrong-root enrichment by
+      // updating zero rows instead of attaching content across identities.
+      stmt.run([
+        record.articleTitle,
+        record.articleText,
+        record.articleSite ?? null,
+        now,
+        record.sourceTweetId,
+        record.sourceLocator,
+        record.id,
+        record.sourceTweetId,
+      ]);
     }
     stmt.free();
     db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");

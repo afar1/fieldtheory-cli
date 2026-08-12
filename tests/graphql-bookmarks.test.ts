@@ -18,16 +18,33 @@ import {
   applyFolderMirror,
   clearFolderEverywhere,
   formatSyncResult,
+  fetchTweetByIdViaGraphQL,
   syncBookmarksGraphQL,
   syncGaps,
 } from '../src/graphql-bookmarks.js';
-import { buildIndex, getBookmarkById } from '../src/bookmarks-db.js';
+import { buildIndex, getBookmarkById, updateArticleContent } from '../src/bookmarks-db.js';
+import { loadCanonicalBookmarkSnapshot } from '../src/bookmark-snapshot.js';
 import { resolveFolder, formatFolderMirrorStats } from '../src/cli.js';
 import type { BookmarkFolder, BookmarkRecord } from '../src/types.js';
 
 const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
 function loadFixture(name: string): any {
   return JSON.parse(readFileSync(path.join(FIXTURES_DIR, name), 'utf8'));
+}
+
+async function fetchTweetEvidenceFixture(tweetResult: any) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    data: { tweetResult: { result: tweetResult } },
+  }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })) as typeof fetch;
+  try {
+    return await fetchTweetByIdViaGraphQL('100', 'ct0', undefined, { delayMs: 0 });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 }
 
 const NOW = '2026-03-28T00:00:00.000Z';
@@ -446,6 +463,104 @@ test('parseTweetResultByRestId: extracts note_tweet body from live TweetResultBy
   assert.ok(snapshot.text.startsWith('LLM Knowledge Bases'));
 });
 
+test('parseTweetResultByRestId preserves a response-owned media-only tweet with empty text', () => {
+  const row = makeTweetResult({ legacy: { full_text: '' } });
+  const snapshot = parseTweetResultByRestId({
+    data: { tweetResult: { result: row } },
+  }, '1234567890');
+
+  assert.equal(snapshot?.id, '1234567890');
+  assert.equal(snapshot?.text, '');
+  assert.deepEqual(snapshot?.media, ['https://pbs.twimg.com/media/example.jpg']);
+});
+
+test('parseTweetResultByRestId rejects an empty focal envelope with no response-owned content', () => {
+  for (const media of [[], {}, [null], [{}]]) {
+    const row = makeTweetResult({
+      legacy: { full_text: '', extended_entities: { media } },
+    });
+
+    assert.equal(parseTweetResultByRestId({
+      data: { tweetResult: { result: row } },
+    }, '1234567890'), null);
+  }
+});
+
+test('parseTweetResultByRestId preserves the focal tweet live quote identity', () => {
+  const row = makeTweetResult({ legacy: { quoted_status_id_str: '5555555' } });
+  const snapshot = parseTweetResultByRestId({
+    data: { tweetResult: { result: row } },
+  }, '1234567890');
+
+  assert.equal(snapshot?.quotedStatusId, '5555555');
+});
+
+test('parseTweetResultByRestId uses an exact wrapped quoted-result identity as fallback', () => {
+  const row = makeTweetResult({
+    tweet: {
+      quoted_status_result: {
+        result: {
+          tweet: {
+            rest_id: '5555555',
+            legacy: { id_str: '5555555', full_text: 'Embedded quote.' },
+          },
+        },
+      },
+    },
+  });
+  const snapshot = parseTweetResultByRestId({
+    data: { tweetResult: { result: row } },
+  }, '1234567890');
+
+  assert.equal(snapshot?.quotedStatusId, '5555555');
+});
+
+test('parseTweetResultByRestId rejects contradictory or malformed quote identity', () => {
+  for (const row of [
+    makeTweetResult({
+      legacy: { quoted_status_id_str: '5555555' },
+      tweet: { quoted_status_result: { result: { rest_id: '6666666' } } },
+    }),
+    makeTweetResult({ legacy: { quoted_status_id_str: 5555555 } }),
+    makeTweetResult({
+      tweet: {
+        quoted_status_result: {
+          result: { rest_id: '6666666', legacy: { id_str: '5555555' } },
+        },
+      },
+    }),
+  ]) {
+    assert.equal(parseTweetResultByRestId({
+      data: { tweetResult: { result: row } },
+    }, '1234567890'), null);
+  }
+});
+
+test('parseTweetResultByRestId rejects malformed or contradictory focal identity aliases', () => {
+  for (const row of [
+    makeTweetResult({ tweet: { rest_id: '9999999999' } }),
+    makeTweetResult({ legacy: { id_str: 1234567890 } }),
+    makeTweetResult({ tweet: { rest_id: 1234567890 } }),
+  ]) {
+    assert.equal(parseTweetResultByRestId({
+      data: { tweetResult: { result: row } },
+    }, '1234567890'), null);
+  }
+});
+
+test('parseTweetResultByRestId preserves the focal root when quote identity is unavailable', () => {
+  const row = makeTweetResult({
+    tweet: { quoted_status_result: { result: { __typename: 'TweetTombstone' } } },
+  });
+  const snapshot = parseTweetResultByRestId({
+    data: { tweetResult: { result: row } },
+  }, '1234567890');
+
+  assert.equal(snapshot?.id, '1234567890');
+  assert.equal(snapshot?.quotedStatusId, undefined);
+  assert.equal(snapshot?.quotedStatusIdentityUnresolved, true);
+});
+
 test('parseTweetArticleByRestId: extracts X Article rich-text content', () => {
   const fixture = {
     data: {
@@ -455,6 +570,7 @@ test('parseTweetArticleByRestId: extracts X Article rich-text content', () => {
           legacy: {
             id_str: '2042685676949270724',
             full_text: 'x.com/i/article/2042...',
+            entities: { urls: [{ expanded_url: 'https://x.com/i/article/2042676487711584257' }] },
           },
           article_results: {
             result: {
@@ -473,6 +589,8 @@ test('parseTweetArticleByRestId: extracts X Article rich-text content', () => {
   const article = parseTweetArticleByRestId(fixture);
   assert.ok(article);
   assert.equal(article.title, 'How agents should use context');
+  assert.equal(article.sourceTweetId, '2042685676949270724');
+  assert.equal(article.sourceLocator, 'https://x.com/i/article/2042676487711584257');
   assert.match(article.text, /Context discipline/);
   assert.match(article.text, /useful body lives in the X Article payload/);
 });
@@ -486,6 +604,7 @@ test('parseTweetArticleByRestId: extracts current X Article content_state shape'
           legacy: {
             id_str: '2045577435484221722',
             full_text: 'x.com/i/article/2045...',
+            entities: { urls: [{ expanded_url: 'https://x.com/i/article/2045577000000000000' }] },
           },
           article: {
             article_results: {
@@ -511,6 +630,241 @@ test('parseTweetArticleByRestId: extracts current X Article content_state shape'
   assert.equal(article.title, 'Thoughts and Feelings around Claude Design');
   assert.match(article.text, /I tried Claude Design yesterday/);
   assert.match(article.text, /components, styles, variables, and props/);
+});
+
+test('parseTweetArticleByRestId rejects malformed, contradictory, or locator-crossing exact IDs', () => {
+  const articleBody = 'This recovered article body is deliberately long enough to pass the source body threshold.';
+  for (const candidate of [
+    { rest_id: 2042676487711584257, articleBody },
+    { rest_id: '2042676487711584257', article_id: '2042676487711584258', articleBody },
+    { rest_id: '2042676487711584257', articleBody },
+  ]) {
+    const articleLink = candidate.rest_id === '2042676487711584257' && candidate.article_id === undefined
+      ? 'https://x.com/i/article/2042676487711584258'
+      : 'https://x.com/i/article/2042676487711584257';
+    const fixture = {
+      data: {
+        tweetResult: {
+          result: {
+            rest_id: '100',
+            legacy: {
+              id_str: '100',
+              full_text: 'Focal article post.',
+              entities: { urls: [{ expanded_url: articleLink }] },
+            },
+            article_results: { result: candidate },
+          },
+        },
+      },
+    };
+    assert.equal(parseTweetArticleByRestId(fixture, '100'), null);
+  }
+});
+
+test('parseTweetArticleByRestId accepts agreeing exact article aliases bound to the focal locator', () => {
+  const articleId = '2042676487711584257';
+  const fixture = {
+    data: {
+      tweetResult: {
+        result: {
+          rest_id: '100',
+          legacy: {
+            id_str: '100',
+            full_text: 'Focal article post.',
+            entities: { urls: [{ expanded_url: `https://x.com/i/article/${articleId}` }] },
+          },
+          article_results: {
+            result: {
+              rest_id: articleId,
+              article_id: articleId,
+              articleBody: 'This recovered article body has matching exact aliases and a matching focal locator.',
+            },
+          },
+        },
+      },
+    },
+  };
+
+  assert.equal(parseTweetArticleByRestId(fixture, '100')?.sourceLocator, `https://x.com/i/article/${articleId}`);
+});
+
+test('TweetResult article evidence rejects conflicting focal envelopes independent of slot order', async () => {
+  const bodyA = 'This is the first complete focal article body and it is long enough to be source material.';
+  const bodyB = 'This is the second complete focal article body and it deliberately conflicts with the first.';
+  const candidates = [
+    { rest_id: '111', title: 'First', articleBody: bodyA },
+    { rest_id: '222', title: 'Second', articleBody: bodyB },
+  ];
+
+  for (const [first, second] of [candidates, [...candidates].reverse()]) {
+    const tweetResult = {
+      rest_id: '100',
+      legacy: {
+        id_str: '100',
+        full_text: 'Focal post with contradictory article envelopes.',
+        entities: {
+          urls: [
+            { expanded_url: 'https://x.com/i/article/111' },
+            { expanded_url: 'https://x.com/i/article/222' },
+          ],
+        },
+      },
+      article_results: { result: first },
+      article: { article_results: { result: second } },
+    };
+    const fetched = await fetchTweetEvidenceFixture(tweetResult);
+    assert.equal(fetched.status, 'ok');
+    assert.equal(fetched.articleStatus, 'invalid');
+    assert.equal(fetched.article, null);
+    assert.equal(parseTweetArticleByRestId({
+      data: { tweetResult: { result: tweetResult } },
+    }, '100'), null);
+  }
+});
+
+test('TweetResult article evidence resolves convergent focal envelopes deterministically', async () => {
+  const articleId = '111';
+  const body = 'Every complete focal article envelope contains this exact normalized source-owned body.';
+  const candidates = [
+    { rest_id: articleId, title: 'Agreed title', siteName: 'X Articles', articleBody: body },
+    { article_id: articleId, title: 'Different optional title', articleBody: body },
+  ];
+
+  for (const [first, second] of [candidates, [...candidates].reverse()]) {
+    const fetched = await fetchTweetEvidenceFixture({
+      rest_id: '100',
+      legacy: {
+        id_str: '100',
+        full_text: 'Focal post with convergent article envelopes.',
+        entities: { urls: [{ expanded_url: `https://x.com/i/article/${articleId}` }] },
+      },
+      article_results: { result: first },
+      article: {
+        article_results: { result: second },
+        result: null,
+      },
+    });
+    assert.equal(fetched.articleStatus, 'resolved');
+    assert.equal(fetched.article?.sourceLocator, `https://x.com/i/article/${articleId}`);
+    assert.equal(fetched.article?.text, body);
+    assert.equal(fetched.article?.title, '');
+    assert.equal(fetched.article?.siteName, 'X Articles');
+  }
+});
+
+test('TweetResult article evidence has explicit, exhaustive absence and ambiguity states', async () => {
+  const articleId = '111';
+  const articleLink = `https://x.com/i/article/${articleId}`;
+  const body = 'This complete focal article body is deliberately long enough for exact source admission.';
+  const valid = { rest_id: articleId, title: 'Resolved article', articleBody: body };
+  const preview = {
+    rest_id: articleId,
+    title: 'Resolved article',
+    preview_text: 'This is only a preview even though it is long enough to resemble recovered content.',
+  };
+  const cases: Array<{
+    name: string;
+    links?: string[];
+    fields?: Record<string, unknown>;
+    expected: 'absent' | 'resolved' | 'unresolved' | 'invalid';
+  }> = [
+    { name: 'no slots and no locator', expected: 'absent' },
+    { name: 'recognized null slot', fields: { article_results: { result: null } }, expected: 'absent' },
+    { name: 'locator without a body', links: [articleLink], expected: 'unresolved' },
+    { name: 'preview-only candidate', links: [articleLink], fields: { article_results: { result: preview } }, expected: 'unresolved' },
+    { name: 'exact candidate without focal locator', fields: { article_results: { result: valid } }, expected: 'resolved' },
+    { name: 'unknown non-null article shape', fields: { article: { unexpected: true } }, expected: 'unresolved' },
+    { name: 'valid plus null', links: [articleLink], fields: { article_results: { result: valid }, article: { result: null } }, expected: 'resolved' },
+    { name: 'valid plus same-identity preview', links: [articleLink], fields: { article_results: { result: valid }, article: { result: preview } }, expected: 'resolved' },
+    {
+      name: 'same identity with different full bodies',
+      links: [articleLink],
+      fields: {
+        article_results: { result: valid },
+        article: { result: { ...valid, articleBody: `${body} Conflicting edit.` } },
+      },
+      expected: 'invalid',
+    },
+    {
+      name: 'malformed numeric identity',
+      links: [articleLink],
+      fields: { article_results: { result: { ...valid, rest_id: 111 } } },
+      expected: 'invalid',
+    },
+  ];
+
+  for (const testCase of cases) {
+    const fetched = await fetchTweetEvidenceFixture({
+      rest_id: '100',
+      legacy: {
+        id_str: '100',
+        full_text: testCase.name,
+        entities: { urls: (testCase.links ?? []).map((expanded_url) => ({ expanded_url })) },
+      },
+      ...testCase.fields,
+    });
+    assert.equal(fetched.articleStatus, testCase.expected, testCase.name);
+    assert.equal(Boolean(fetched.article), testCase.expected === 'resolved', testCase.name);
+  }
+});
+
+test('parseTweetArticleByRestId: rejects preview-only X Article payloads', () => {
+  const fixture = {
+    data: {
+      tweetResult: {
+        result: {
+          rest_id: '2045577435484221722',
+          article: {
+            article_results: {
+              result: {
+                title: 'Preview is not the article',
+                preview_text: 'This preview is deliberately longer than fifty characters but is not a recovered article body.',
+                summary_text: 'This summary is also not source-complete long-form content.',
+              },
+            },
+          },
+          legacy: {
+            id_str: '2045577435484221722',
+            full_text: 'x.com/i/article/2045...',
+            entities: { urls: [{ expanded_url: 'https://x.com/i/article/2045577000000000000' }] },
+          },
+        },
+      },
+    },
+  };
+
+  assert.equal(parseTweetArticleByRestId(fixture), null);
+});
+
+test('parseTweetArticleByRestId never attaches a quoted tweet article to the focal tweet', () => {
+  const fixture = {
+    data: {
+      tweetResult: {
+        result: {
+          rest_id: '100',
+          legacy: { id_str: '100', full_text: 'Root quoting an article.', entities: { urls: [] } },
+          quoted_status_result: {
+            result: {
+              rest_id: '200',
+              legacy: {
+                id_str: '200',
+                full_text: 'Quoted article.',
+                entities: { urls: [{ expanded_url: 'https://x.com/i/article/300' }] },
+              },
+              article_results: {
+                result: {
+                  title: 'Quoted article',
+                  articleBody: 'This is a sufficiently long quoted article body that must never bind to the focal root.',
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  assert.equal(parseTweetArticleByRestId(fixture, '100'), null);
 });
 
 test('parseTweetResultByRestId: returns null on tombstone / unavailable tweets', () => {
@@ -551,6 +905,8 @@ test('syncGaps: enriches X Article bookmarks through TweetResult payload', async
             title: 'How agents should use context',
             text: 'The article body is the useful content. It should not be lost behind an X Article link.',
             siteName: 'X Articles',
+            sourceTweetId: tweetId,
+            sourceLocator: 'https://x.com/i/article/2042676487711584257',
           },
           status: 'ok',
           source: 'graphql',
@@ -611,6 +967,101 @@ test('syncGaps: reports X Article when fallback only returns tweet preview', asy
     assert.ok(refreshed);
     assert.equal(refreshed.articleText, null);
   }, [xArticle]);
+});
+
+test('syncGaps: refuses to persist an article bound to a quoted or unrelated tweet', async () => {
+  const xArticle: BookmarkRecord = {
+    id: '2042685676949270724',
+    tweetId: '2042685676949270724',
+    url: 'https://x.com/danveloper/status/2042685676949270724',
+    text: 'x.com/i/article/2042...',
+    syncedAt: NOW,
+    links: ['https://x.com/i/article/2042676487711584257'],
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    const result = await syncGaps({
+      tweetFetcher: async (tweetId) => ({
+        snapshot: { id: tweetId, text: xArticle.text, url: xArticle.url },
+        article: {
+          title: 'Quoted article',
+          text: 'This body belongs to a quoted tweet and must not be stored under the focal bookmark.',
+          sourceTweetId: '2042685676949270000',
+          sourceLocator: 'https://x.com/i/article/2042676487711584257',
+        },
+        status: 'ok',
+        source: 'graphql',
+      }),
+    });
+
+    assert.equal(result.articlesEnriched, 0);
+    assert.equal(result.failed, 1);
+    assert.match(result.failures[0].reason, /did not bind/);
+    assert.equal((await getBookmarkById(xArticle.id))?.articleText, null);
+  }, [xArticle]);
+});
+
+test('syncGaps repairs redirect-resolved article rows with the archive-owned source locator', async () => {
+  const shortUrl = 'https://t.co/source-link';
+  const finalUrl = 'https://example.com/final-article';
+  const linkOnly: BookmarkRecord = {
+    id: '2042685676949270800',
+    tweetId: '2042685676949270800',
+    url: 'https://x.com/operator/status/2042685676949270800',
+    text: `Read ${shortUrl}`,
+    syncedAt: NOW,
+    links: [shortUrl],
+  };
+  const originalFetch = globalThis.fetch;
+
+  try {
+    await withIsolatedGapFillDataDir(async () => {
+      await buildIndex();
+      await updateArticleContent([{
+        id: linkOnly.id,
+        sourceTweetId: linkOnly.tweetId,
+        sourceLocator: finalUrl,
+        articleTitle: 'Stranded redirect article',
+        articleText: 'This legacy body is stranded because its final fetch URL is not the archived source locator.',
+      }]);
+
+      let fetchCalls = 0;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        fetchCalls += 1;
+        const url = String(input);
+        if (url === shortUrl && init?.method === 'HEAD') {
+          return new Response(null, { status: 302, headers: { location: finalUrl } });
+        }
+        if (url === finalUrl && init?.method === 'HEAD') {
+          return new Response(null, { status: 200 });
+        }
+        assert.equal(url, finalUrl);
+        assert.equal(init?.method, 'GET');
+        return new Response(
+          '<html><title>Recovered</title><article>This redirected article body is long enough to be admitted and rebound to its archived source locator.</article></html>',
+          { status: 200, headers: { 'content-type': 'text/html' } },
+        );
+      }) as typeof fetch;
+
+      const repaired = await syncGaps({ tweetFetcher: async () => ({ snapshot: null, status: 'empty' }) });
+      assert.equal(repaired.articlesEnriched, 1);
+      assert.equal(fetchCalls, 3);
+      const hydrated = await getBookmarkById(linkOnly.id);
+      assert.equal(hydrated?.articleLocator, shortUrl);
+      assert.match(hydrated?.articleText ?? '', /redirected article body/);
+      const canonical = await loadCanonicalBookmarkSnapshot(linkOnly.tweetId);
+      assert.equal(canonical.record.articleLocator, shortUrl);
+      assert.match(canonical.record.articleText ?? '', /redirected article body/);
+
+      fetchCalls = 0;
+      const settled = await syncGaps({ tweetFetcher: async () => ({ snapshot: null, status: 'empty' }) });
+      assert.equal(settled.articlesEnriched, 0);
+      assert.equal(fetchCalls, 0);
+    }, [linkOnly]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 async function withIsolatedGapFillDataDir(
@@ -1072,6 +1523,44 @@ test('syncGaps: permanent quoted-tweet failure stamps quotedTweetFailedAt so rer
     assert.equal(secondCalls.n, 0, 'second run must not retry permanent failures');
     assert.equal(secondRun.total, 0);
   }, [deadQuoted]);
+});
+
+test('syncGaps rejects a quote response whose owned identity differs from the requested id', async () => {
+  const quoted: BookmarkRecord = {
+    id: '222',
+    tweetId: '222',
+    url: 'https://x.com/user/status/222',
+    text: 'Check out this tweet',
+    syncedAt: NOW,
+    tags: [],
+    ingestedVia: 'graphql',
+    quotedStatusId: '999999999',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    const result = await syncGaps({
+      tweetFetcher: async () => ({
+        snapshot: {
+          id: '111111111',
+          text: 'Wrong quoted entity.',
+          url: 'https://x.com/wrong/status/111111111',
+        },
+        status: 'ok',
+        source: 'syndication',
+      }),
+    });
+
+    assert.equal(result.quotedTweetsFilled, 0);
+    assert.equal(result.failed, 1);
+    assert.match(result.failures[0].reason, /did not bind to the requested tweet identity/);
+
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim());
+    assert.equal(stored.quotedTweet, undefined);
+    assert.equal(stored.quotedTweetFailedAt, undefined);
+    assert.equal((await getBookmarkById(quoted.id))?.quotedTweet, null);
+  }, [quoted]);
 });
 
 test('parseBookmarksResponse: preserves sortIndex for bookmark ordering without fabricating bookmarkedAt', () => {

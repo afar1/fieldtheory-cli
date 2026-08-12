@@ -3,9 +3,9 @@ import { Command, InvalidArgumentError, Option } from 'commander';
 import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
 import { runTwitterOAuthFlow } from './xauth.js';
-import { syncBookmarksGraphQL, syncGaps, syncBookmarkFolders } from './graphql-bookmarks.js';
+import { resolveGapFillCookies, syncBookmarksGraphQL, syncGaps, syncBookmarkFolders } from './graphql-bookmarks.js';
 import type { SyncProgress, GapFillProgress, FolderSyncProgress } from './graphql-bookmarks.js';
-import type { BookmarkFolder, QuotedTweetSnapshot } from './types.js';
+import type { BookmarkFolder, BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { DEFAULT_MEDIA_MAX_BYTES, fetchBookmarkMediaBatch } from './bookmark-media.js';
 import type { MediaFetchManifest, MediaFetchProgress } from './bookmark-media.js';
 import {
@@ -34,6 +34,10 @@ import { renderViz } from './bookmarks-viz.js';
 import { listBrowserIds } from './browsers.js';
 import { configureHttpProxyFromEnv } from './http-proxy.js';
 import { canonicalLibraryDir, dataDir, ensureDataDir, isFirstRun, migrateLegacyIdeasData, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir, bookmarkMediaDir, bookmarkMediaManifestPath } from './paths.js';
+import { materializeBookmark } from './bookmark-materialization.js';
+import { loadBoundMediaManifest, loadCanonicalBookmarkSnapshot } from './bookmark-snapshot.js';
+import { refreshExactXBookmark } from './x-materialize.js';
+import { XRequestExecutor } from './x-request-policy.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import { registerCompanionCommands } from './companion-cli.js';
@@ -269,7 +273,8 @@ async function runMediaFetchWithProgress(options: { limit?: number; maxBytes?: n
       console.log('\n  Interrupted. Saving media progress...\n');
     },
   });
-  const result = await runWithSpinner(spinner, () => fetchBookmarkMediaBatch({
+  const requestExecutor = new XRequestExecutor({ maxAttempts: 1 });
+  const result = await runWithSpinner(spinner, () => fetchBookmarkMediaBatch(requestExecutor, {
     limit: options.limit,
     maxBytes: options.maxBytes,
     skipProfileImages: options.skipProfileImages,
@@ -1307,6 +1312,88 @@ export function buildCli() {
       if (item.links.length) console.log(`links: ${item.links.join(', ')}`);
       if (item.categories) console.log(`categories: ${item.categories}`);
       if (item.domains) console.log(`domains: ${item.domains}`);
+    }));
+
+  // ── materialize ─────────────────────────────────────────────────────────
+
+  program
+    .command('materialize')
+    .description('Materialize one exact archived X bookmark and its source-owned components')
+    .argument('<id>', 'Exact numeric X bookmark id')
+    .option('--refresh', 'Refresh only this exact root and its bounded thread context', false)
+    .option('--fetch-media', 'Fetch only this exact root and enumerated component media', false)
+    .option('--media-max-bytes <n>', 'Per-asset byte limit for requested media', (v: string) => Number(v), DEFAULT_MEDIA_MAX_BYTES)
+    .option('--skip-profile-images', 'Skip author profile images during requested media fetch', false)
+    .option('--delay-ms <n>', 'Delay between exact X requests in ms', (v: string) => Number(v), 300)
+    .option('--browser <name>', 'Browser to read the existing X session from')
+    .option('--cookies <values...>', 'Pass ct0 and auth_token directly (skips browser extraction)')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory')
+    .option('--json', 'JSON output')
+    .action(safe(async (id: string, options) => {
+      if (!requireData()) return;
+      const exactId = String(id);
+      if (!/^\d{5,25}$/.test(exactId)) {
+        throw new Error('Materialization requires one exact numeric X bookmark id.');
+      }
+
+      const snapshot = await loadCanonicalBookmarkSnapshot(exactId);
+      let record: BookmarkRecord = snapshot.record;
+      let refreshObservation = null;
+      const requestedDelayMs = Number(options.delayMs);
+      const delayMs = Number.isFinite(requestedDelayMs) ? Math.max(0, requestedDelayMs) : 300;
+      const requestExecutor = options.refresh || options.fetchMedia
+        ? new XRequestExecutor({ delayMs })
+        : undefined;
+      if (options.refresh) {
+        const directCookies = parseCookieOption(options.cookies);
+        const cookies = resolveGapFillCookies({
+          browser: options.browser ? String(options.browser) : undefined,
+          chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+          chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+          firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+          csrfToken: directCookies.csrfToken,
+          cookieHeader: directCookies.cookieHeader,
+        });
+        if (!cookies.csrfToken) {
+          throw new Error('Exact X refresh requires an authenticated browser session or --cookies <ct0> [auth_token].');
+        }
+        const refreshed = await refreshExactXBookmark(record, {
+          csrfToken: cookies.csrfToken,
+          cookieHeader: cookies.cookieHeader,
+          delayMs,
+          requestExecutor,
+        });
+        record = refreshed.record;
+        refreshObservation = refreshed.observation;
+      }
+
+      let manifest = snapshot.manifest;
+      if (options.fetchMedia) {
+        const requestedMediaMaxBytes = Number(options.mediaMaxBytes);
+        const mediaMaxBytes = Number.isFinite(requestedMediaMaxBytes)
+          ? Math.max(0, requestedMediaMaxBytes)
+          : DEFAULT_MEDIA_MAX_BYTES;
+        await fetchBookmarkMediaBatch(requestExecutor!, {
+          records: [record],
+          limit: 1,
+          maxBytes: mediaMaxBytes,
+          skipProfileImages: Boolean(options.skipProfileImages),
+        });
+        manifest = await loadBoundMediaManifest(record.id);
+      }
+
+      const result = await materializeBookmark(record, manifest, refreshObservation);
+      if (options.json) {
+        printJson(result);
+        return;
+      }
+      console.log(`${result.source_id} · ${result.locator}`);
+      console.log(`${result.components.length} components · ${result.achieved_depth}`);
+      for (const row of result.components) {
+        console.log(`  ${row.disposition.padEnd(11)} ${row.relation} · ${row.source_locator}`);
+      }
     }));
 
   // ── stats ───────────────────────────────────────────────────────────────
