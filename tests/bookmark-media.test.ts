@@ -256,6 +256,61 @@ test('fetchBookmarkMediaBatch reuses verified shared bytes across runs while pre
   }
 });
 
+test('fetchBookmarkMediaBatch refetches same-size cached bytes whose filename digest no longer matches', async () => {
+  const sharedPhotoUrl = 'https://pbs.twimg.com/media/shared-corrupted-later.jpg';
+  const quotedTweet = {
+    id: '99',
+    url: 'https://x.com/quoted/status/99',
+    text: 'shared quote',
+    authorHandle: 'quoted',
+    mediaObjects: [{ type: 'photo', url: sharedPhotoUrl }],
+  };
+  const records = ['1', '2'].map((id) => ({
+    id,
+    tweetId: id,
+    url: `https://x.com/operator/status/${id}`,
+    text: `root ${id}`,
+    syncedAt: '2026-04-09T00:00:00.000Z',
+    quotedStatusId: quotedTweet.id,
+    quotedTweet,
+    links: [],
+  }));
+  const originalFetch = globalThis.fetch;
+  let getCalls = 0;
+  globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    if (init?.method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': '4', 'content-type': 'image/jpeg' },
+      });
+    }
+    getCalls += 1;
+    return new Response(Uint8Array.from([1, 2, 3, 4]), {
+      status: 200,
+      headers: { 'content-type': 'image/jpeg' },
+    });
+  }) as typeof fetch;
+
+  try {
+    await withMediaDataDir(records, async () => {
+      const first = await fetchBookmarkMediaBatch({ records: [records[0]], maxBytes: 1024, skipProfileImages: true });
+      const localPath = first.entries.find((entry) => entry.sourceUrl === sharedPhotoUrl)?.localPath;
+      assert.ok(localPath);
+      assert.equal(getCalls, 1);
+      await writeFile(localPath, Uint8Array.from([9, 9, 9, 9]));
+
+      const second = await fetchBookmarkMediaBatch({ records: [records[1]], maxBytes: 1024, skipProfileImages: true });
+      assert.equal(getCalls, 2);
+      const shared = second.entries.filter((entry) => entry.sourceUrl === sharedPhotoUrl);
+      assert.deepEqual(shared.map((entry) => entry.bookmarkId).sort(), ['1', '2']);
+      assert.equal(shared[0].localPath, shared[1].localPath);
+      assert.deepEqual([...await readFile(localPath)], [1, 2, 3, 4]);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('fetchBookmarkMediaBatch downloads shared profile images only once across bookmarks', async () => {
   const profileUrl = 'https://pbs.twimg.com/profile_images/123/avatar_normal.jpg';
   const fullProfileUrl = profileUrl.replace('_normal.', '_400x400.');

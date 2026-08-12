@@ -6,7 +6,7 @@ import {
   type TweetDetailTermination,
 } from './graphql-bookmarks.js';
 import { extractSameAuthorThreadBelow } from './tweet-snapshots.js';
-import { isXArticleLocator, sameSourceLocator } from './source-bindings.js';
+import { bindArticleEnrichment, isXArticleLocator, sameSourceLocator } from './source-bindings.js';
 import type { BookmarkRecord, ThreadTweetSnapshot } from './types.js';
 import { XRequestExecutor } from './x-request-policy.js';
 
@@ -41,42 +41,129 @@ export interface ExactXRefreshOptions {
   requestExecutor?: XRequestExecutor;
 }
 
-function hasXArticleIdentity(record: BookmarkRecord): boolean {
-  return Boolean(
-    record.articleTitle
-    || record.articleSite
-    || record.links?.some(isXArticleLocator),
-  );
+interface ArticleCurrentnessReduction {
+  fields: Pick<BookmarkRecord,
+    'articleTitle' | 'articleText' | 'articleSite' | 'articleSourceTweetId' | 'articleLocator'>;
+  status: ExactXRefreshObservation['article_status'];
 }
 
-function refreshedRoot(record: BookmarkRecord, result: TweetFetchResult): BookmarkRecord {
-  const snapshot = result.snapshot;
-  if (!snapshot) return record;
-  const links = snapshot.links ?? record.links ?? [];
-  const articleLinks = result.article
-    && !links.some((value) => sameSourceLocator(value, result.article!.sourceLocator))
-      ? [...links, result.article.sourceLocator]
-      : links;
+function reduceArticleCurrentness(
+  record: BookmarkRecord,
+  currentLinks: string[],
+  liveArticle: TweetFetchResult['article'],
+): ArticleCurrentnessReduction {
+  const liveLocator = liveArticle
+    ? bindArticleEnrichment(record.tweetId, currentLinks, {
+        articleText: liveArticle.text,
+        sourceTweetId: liveArticle.sourceTweetId,
+        sourceLocator: liveArticle.sourceLocator,
+      })
+    : undefined;
+  if (liveArticle && liveLocator) {
+    return {
+      fields: {
+        articleTitle: liveArticle.title,
+        articleText: liveArticle.text,
+        articleSite: liveArticle.siteName,
+        articleSourceTweetId: record.tweetId,
+        articleLocator: liveLocator,
+      },
+      status: 'ok',
+    };
+  }
+
+  const archivedLocator = bindArticleEnrichment(record.tweetId, record.links ?? [], {
+    articleText: record.articleText,
+    sourceTweetId: record.articleSourceTweetId,
+    sourceLocator: record.articleLocator,
+  });
+  const reaffirmedLocator = bindArticleEnrichment(record.tweetId, currentLinks, {
+    articleText: record.articleText,
+    sourceTweetId: record.articleSourceTweetId,
+    sourceLocator: record.articleLocator,
+  });
+  const currentArticleLinks = currentLinks.filter(isXArticleLocator);
+  const locatorContradicted = Boolean(
+    archivedLocator
+    && isXArticleLocator(archivedLocator)
+    && currentArticleLinks.length > 0
+    && !currentArticleLinks.some((value) => sameSourceLocator(value, archivedLocator)),
+  );
+  const retainedLocator = locatorContradicted
+    ? undefined
+    : reaffirmedLocator ?? archivedLocator;
+  if (retainedLocator) {
+    return {
+      fields: {
+        articleTitle: record.articleTitle ?? null,
+        articleText: record.articleText ?? null,
+        articleSite: record.articleSite ?? null,
+        articleSourceTweetId: record.tweetId,
+        articleLocator: retainedLocator,
+      },
+      status: 'unresolved',
+    };
+  }
+
+  const unresolved = Boolean(
+    liveArticle
+    || record.articleText
+    || record.articleTitle
+    || record.articleSite
+    || record.articleLocator
+    || currentLinks.some(isXArticleLocator),
+  );
   return {
-    ...record,
-    id: record.id,
-    tweetId: record.tweetId,
-    url: snapshot.url || record.url,
-    text: snapshot.text || record.text,
-    authorHandle: snapshot.authorHandle ?? record.authorHandle,
-    authorName: snapshot.authorName ?? record.authorName,
-    authorProfileImageUrl: snapshot.authorProfileImageUrl ?? record.authorProfileImageUrl,
-    postedAt: snapshot.postedAt ?? record.postedAt,
-    conversationId: snapshot.conversationId ?? record.conversationId,
-    inReplyToStatusId: snapshot.inReplyToStatusId ?? record.inReplyToStatusId,
-    media: snapshot.media ?? record.media,
-    mediaObjects: snapshot.mediaObjects ?? record.mediaObjects,
-    links: articleLinks,
-    articleTitle: result.article?.title ?? null,
-    articleText: result.article?.text ?? null,
-    articleSite: result.article?.siteName ?? null,
-    articleSourceTweetId: result.article?.sourceTweetId ?? null,
-    articleLocator: result.article?.sourceLocator ?? null,
+    fields: {
+      articleTitle: null,
+      articleText: null,
+      articleSite: null,
+      articleSourceTweetId: null,
+      articleLocator: null,
+    },
+    status: unresolved ? 'unresolved' : 'not_applicable',
+  };
+}
+
+function refreshedRoot(
+  record: BookmarkRecord,
+  result: TweetFetchResult,
+): { record: BookmarkRecord; articleStatus: ExactXRefreshObservation['article_status'] } {
+  const snapshot = result.snapshot;
+  if (!snapshot) return { record, articleStatus: 'unresolved' };
+  const links = snapshot.links ?? record.links ?? [];
+  const liveArticleLocator = result.article
+    && result.article.sourceTweetId === record.tweetId
+    && result.article.text.trim()
+      ? result.article.sourceLocator
+      : undefined;
+  const articleLinks = liveArticleLocator
+    && !links.some((value) => sameSourceLocator(value, liveArticleLocator))
+      ? [...links, liveArticleLocator]
+      : links;
+  const article = reduceArticleCurrentness(record, articleLinks, result.article);
+  return {
+    record: {
+      ...record,
+      id: record.id,
+      tweetId: record.tweetId,
+      url: snapshot.url || record.url,
+      text: snapshot.text || record.text,
+      authorHandle: snapshot.authorHandle ?? record.authorHandle,
+      authorName: snapshot.authorName ?? record.authorName,
+      authorProfileImageUrl: snapshot.authorProfileImageUrl ?? record.authorProfileImageUrl,
+      postedAt: snapshot.postedAt ?? record.postedAt,
+      conversationId: snapshot.conversationId ?? record.conversationId,
+      inReplyToStatusId: snapshot.inReplyToStatusId ?? record.inReplyToStatusId,
+      media: snapshot.media ?? record.media,
+      mediaObjects: snapshot.mediaObjects ?? record.mediaObjects,
+      links: article.fields.articleLocator
+        && !articleLinks.some((value) => sameSourceLocator(value, article.fields.articleLocator!))
+          ? [...articleLinks, article.fields.articleLocator]
+          : articleLinks,
+      ...article.fields,
+    },
+    articleStatus: article.status,
   };
 }
 
@@ -169,7 +256,8 @@ export async function refreshExactXBookmark(
     };
   }
 
-  const record = refreshedRoot(archived, root);
+  const refreshed = refreshedRoot(archived, root);
+  const record = refreshed.record;
   const parents = await traverseParents(record, options, executor, maxParents);
 
   const detail = await fetchTweetDetailViaGraphQL(
@@ -197,11 +285,7 @@ export async function refreshExactXBookmark(
     quoteStatus = quoted.status;
     if (quoted.status === 'ok' && quoted.snapshot) quotedTweet = quoted.snapshot;
   }
-  const articleStatus = root.article
-    ? 'ok'
-    : archived.articleText || hasXArticleIdentity(record)
-      ? 'unresolved'
-      : 'not_applicable';
+  const articleStatus = refreshed.articleStatus;
   const complete = refreshComplete({ parents, detail, quoteStatus, articleStatus });
 
   return {

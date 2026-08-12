@@ -947,6 +947,104 @@ test('ft materialize overlays article and quote enrichment retained in the bookm
   }
 });
 
+test('ft materialize --refresh retains indexed article content when the current focal response does not contradict it', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-materialize-refresh-index-'));
+  const origEnv = process.env.FT_DATA_DIR;
+  const originalFetch = globalThis.fetch;
+  process.env.FT_DATA_DIR = tmpDir;
+  const id = '2042685676949270724';
+  const articleLocator = 'https://x.com/i/article/2042676487711584257';
+  fs.writeFileSync(path.join(tmpDir, 'bookmarks.jsonl'), `${JSON.stringify({
+    id,
+    tweetId: id,
+    url: `https://x.com/operator/status/${id}`,
+    text: 'Archived root.',
+    authorHandle: 'operator',
+    syncedAt: '2026-08-11T00:00:00.000Z',
+    links: [articleLocator],
+  })}\n`);
+
+  const focal = {
+    rest_id: id,
+    legacy: {
+      id_str: id,
+      full_text: 'Current root.',
+      created_at: 'Tue Aug 11 12:00:00 +0000 2026',
+      conversation_id_str: id,
+      entities: { urls: [] },
+    },
+    core: {
+      user_results: {
+        result: {
+          rest_id: '1',
+          core: { screen_name: 'operator', name: 'Operator' },
+          legacy: {},
+        },
+      },
+    },
+  };
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    const body = url.includes('/TweetResultByRestId?')
+      ? { data: { tweetResult: { result: focal } } }
+      : {
+          data: {
+            threaded_conversation_with_injections_v2: {
+              instructions: [{
+                type: 'TimelineAddEntries',
+                entries: [{
+                  entryId: `tweet-${id}`,
+                  content: { itemContent: { tweet_results: { result: focal } } },
+                }],
+              }],
+            },
+          },
+        };
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  try {
+    await buildIndex();
+    await updateArticleContent([{
+      id,
+      sourceTweetId: id,
+      sourceLocator: articleLocator,
+      articleTitle: 'Indexed article',
+      articleText: 'Legitimate bound article content retained through refresh.',
+      articleSite: 'X Articles',
+    }]);
+
+    const output = await captureStdout(async () => {
+      await buildCli().parseAsync([
+        'node',
+        'ft',
+        'materialize',
+        id,
+        '--refresh',
+        '--cookies',
+        'ct0',
+        '--delay-ms',
+        '1',
+        '--json',
+      ]);
+    });
+    const result = JSON.parse(output);
+    const article = result.components.find((row: any) => row.relation === 'embedded_x_article');
+    const currentness = result.components.find((row: any) => row.relation === 'source_currentness');
+    assert.equal(article?.content, 'Legitimate bound article content retained through refresh.');
+    assert.equal(article?.disposition, 'used');
+    assert.equal(currentness?.disposition, 'unresolved');
+    assert.equal(JSON.parse(currentness?.content ?? '{}').article_status, 'unresolved');
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.FT_DATA_DIR = origEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('ft materialize never lets a stale index replace newer archive identity or content', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-materialize-stale-index-'));
   const origEnv = process.env.FT_DATA_DIR;

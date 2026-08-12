@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { stat, writeFile } from 'node:fs/promises';
 import { ensureDir, pathExists, readJson, readJsonLines, writeJson } from './fs.js';
 import { bookmarkMediaDir, bookmarkMediaManifestPath, twitterBookmarksCachePath } from './paths.js';
@@ -269,17 +270,41 @@ async function loadReusableDownloadedResults(previous: MediaFetchManifest | null
 }> {
   const associationKeys = new Set<string>();
   const bySourceUrl = new Map<string, CachedMediaResult>();
+  const verifiedFiles = new Map<string, { bytes: number; digest: string } | null>();
   for (const entry of previous?.entries ?? []) {
     if (entry.status !== 'downloaded' || !entry.localPath) continue;
     try {
-      const file = await stat(entry.localPath);
-      if (!file.isFile() || (entry.bytes !== undefined && file.size !== entry.bytes)) continue;
+      let verified = verifiedFiles.get(entry.localPath);
+      if (verified === undefined) {
+        const file = await stat(entry.localPath);
+        if (!file.isFile()) {
+          verifiedFiles.set(entry.localPath, null);
+          continue;
+        }
+        const hash = createHash('sha256');
+        for await (const chunk of createReadStream(entry.localPath)) hash.update(chunk);
+        verified = { bytes: file.size, digest: hash.digest('hex').slice(0, 16) };
+        verifiedFiles.set(entry.localPath, verified);
+      }
+      if (!verified || (entry.bytes !== undefined && verified.bytes !== entry.bytes)) continue;
+
+      const filename = path.basename(entry.localPath);
+      const extension = path.extname(filename);
+      const stem = extension ? filename.slice(0, -extension.length) : filename;
+      const digestFromFilename = entry.sourceUrl.includes('/profile_images/')
+        ? stem
+        : stem.startsWith(`${entry.tweetId}-`)
+          ? stem.slice(entry.tweetId.length + 1)
+          : '';
+      if (!/^[a-f0-9]{16}$/i.test(digestFromFilename)
+        || digestFromFilename.toLowerCase() !== verified.digest) continue;
+
       associationKeys.add(mediaEntryKeyFromEntry(entry));
       if (!bySourceUrl.has(entry.sourceUrl)) {
         bySourceUrl.set(entry.sourceUrl, {
           localPath: entry.localPath,
           contentType: entry.contentType,
-          bytes: file.size,
+          bytes: verified.bytes,
           status: 'downloaded',
           fetchedAt: entry.fetchedAt,
         });

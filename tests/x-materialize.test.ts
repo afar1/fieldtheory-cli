@@ -442,6 +442,108 @@ test('refreshExactXBookmark does not promote stale archived article text under a
   }
 });
 
+test('refreshExactXBookmark retains source-bound enrichment when the current focal locator still matches', async () => {
+  const articleLocator = 'https://x.com/i/article/2042676487711584257';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      const row = tweet('100', 'Current root with the same article identity.');
+      row.legacy.entities.urls = [{ expanded_url: articleLocator }];
+      return new Response(JSON.stringify({ data: { tweetResult: { result: row } } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify(detailResponse([
+      tweet('100', 'Current root with the same article identity.'),
+    ])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const source = archived();
+  source.links = [articleLocator];
+  source.articleTitle = 'Bound indexed article';
+  source.articleText = 'Legitimate source-bound SQLite enrichment.';
+  source.articleSite = 'X Articles';
+  source.articleSourceTweetId = source.tweetId;
+  source.articleLocator = articleLocator;
+  try {
+    const result = await refreshExactXBookmark(source, {
+      csrfToken: 'ct0',
+      delayMs: 0,
+      now: '2026-08-11T00:00:00.000Z',
+    });
+    assert.equal(result.observation.status, 'partial');
+    assert.equal(result.observation.article_status, 'unresolved');
+    assert.equal(result.record.articleText, 'Legitimate source-bound SQLite enrichment.');
+    assert.equal(result.record.articleSourceTweetId, source.tweetId);
+    assert.equal(result.record.articleLocator, articleLocator);
+    assert.equal(result.record.threadExpandedAt, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('refreshExactXBookmark clears contradicted or wrong-root enrichment', async () => {
+  const oldLocator = 'https://x.com/i/article/2042676487711584257';
+  const currentLocator = 'https://x.com/i/article/2042676487711584258';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      const row = tweet('100', 'Current root with a replacement article identity.');
+      row.legacy.entities.urls = [{ expanded_url: currentLocator }];
+      return new Response(JSON.stringify({ data: { tweetResult: { result: row } } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify(detailResponse([
+      tweet('100', 'Current root with a replacement article identity.'),
+    ])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const source = archived();
+  source.links = [oldLocator];
+  source.articleText = 'Bound content for the old locator.';
+  source.articleSourceTweetId = source.tweetId;
+  source.articleLocator = oldLocator;
+  try {
+    const result = await refreshExactXBookmark(source, {
+      csrfToken: 'ct0',
+      delayMs: 0,
+      now: '2026-08-11T00:00:00.000Z',
+    });
+    assert.equal(result.observation.status, 'partial');
+    assert.equal(result.observation.article_status, 'unresolved');
+    assert.equal(result.record.articleText, null);
+    assert.equal(result.record.articleSourceTweetId, null);
+    assert.equal(result.record.articleLocator, null);
+    assert.deepEqual(result.record.links, [currentLocator]);
+
+    const wrongRoot = archived();
+    wrongRoot.links = [currentLocator];
+    wrongRoot.articleText = 'Content supplied by a different tweet.';
+    wrongRoot.articleSourceTweetId = '999';
+    wrongRoot.articleLocator = currentLocator;
+    const rejected = await refreshExactXBookmark(wrongRoot, {
+      csrfToken: 'ct0',
+      delayMs: 0,
+      now: '2026-08-11T00:00:00.000Z',
+    });
+    assert.equal(rejected.observation.article_status, 'unresolved');
+    assert.equal(rejected.record.articleText, null);
+    assert.equal(rejected.record.articleSourceTweetId, null);
+    assert.equal(rejected.record.articleLocator, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('refreshExactXBookmark remains partial when the current root identifies an unrecovered X Article', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: string | URL | Request) => {
