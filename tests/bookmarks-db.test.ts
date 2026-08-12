@@ -82,6 +82,67 @@ test('buildIndex refreshes existing rows without dropping classifications', asyn
   });
 });
 
+test('buildIndex writes named fields correctly after a direct pre-folder schema migration', async () => {
+  const articleLocator = 'https://x.com/i/article/1234567890123456789';
+  const fixture = {
+    ...FIXTURES[0],
+    links: [articleLocator],
+    folderIds: ['folder-1'],
+    folderNames: ['Research'],
+    articleTitle: 'Bound article',
+    articleText: 'A source-bound article body retained through a legacy schema migration.',
+    articleSite: 'X Articles',
+    articleSourceTweetId: '1',
+    articleLocator,
+  };
+
+  await withIsolatedDataDir(async () => {
+    const dbPath = twitterBookmarksIndexPath();
+    const legacyDb = await openDb(dbPath);
+    try {
+      legacyDb.run(`CREATE TABLE bookmarks (
+        id TEXT PRIMARY KEY, tweet_id TEXT NOT NULL, url TEXT NOT NULL, text TEXT NOT NULL,
+        author_handle TEXT, author_name TEXT, author_profile_image_url TEXT, posted_at TEXT,
+        bookmarked_at TEXT, synced_at TEXT NOT NULL, conversation_id TEXT,
+        in_reply_to_status_id TEXT, quoted_status_id TEXT, language TEXT,
+        like_count INTEGER, repost_count INTEGER, reply_count INTEGER, quote_count INTEGER,
+        bookmark_count INTEGER, view_count INTEGER, media_count INTEGER DEFAULT 0,
+        link_count INTEGER DEFAULT 0, links_json TEXT, tags_json TEXT, ingested_via TEXT,
+        categories TEXT, primary_category TEXT, github_urls TEXT, domains TEXT,
+        primary_domain TEXT, quoted_tweet_json TEXT, article_title TEXT, article_text TEXT,
+        article_site TEXT, enriched_at TEXT
+      )`);
+      saveDb(legacyDb, dbPath);
+    } finally {
+      legacyDb.close();
+    }
+
+    await buildIndex();
+
+    const migratedDb = await openDb(dbPath);
+    try {
+      const columns = migratedDb.exec('PRAGMA table_info(bookmarks)')[0].values
+        .map((row) => String(row[1]));
+      assert.deepEqual(columns.slice(-4), [
+        'article_source_tweet_id',
+        'article_locator',
+        'folder_ids',
+        'folder_names',
+      ]);
+      const row = migratedDb.exec(
+        `SELECT folder_ids, folder_names, article_source_tweet_id, article_locator
+         FROM bookmarks WHERE id = '1'`,
+      )[0].values[0];
+      assert.deepEqual(JSON.parse(String(row[0])), ['folder-1']);
+      assert.deepEqual(JSON.parse(String(row[1])), ['Research']);
+      assert.equal(row[2], '1');
+      assert.equal(row[3], articleLocator);
+    } finally {
+      migratedDb.close();
+    }
+  }, [fixture]);
+});
+
 test('getBookmarkById and listBookmarks hydrate quoted tweets', async () => {
   const fixtures = [{
     ...FIXTURES[0],

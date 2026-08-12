@@ -1172,6 +1172,44 @@ test('syncGaps: permanent quoted-tweet failure stamps quotedTweetFailedAt so rer
   }, [deadQuoted]);
 });
 
+test('syncGaps rejects a quote response whose owned identity differs from the requested id', async () => {
+  const quoted: BookmarkRecord = {
+    id: '222',
+    tweetId: '222',
+    url: 'https://x.com/user/status/222',
+    text: 'Check out this tweet',
+    syncedAt: NOW,
+    tags: [],
+    ingestedVia: 'graphql',
+    quotedStatusId: '999999999',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    const result = await syncGaps({
+      tweetFetcher: async () => ({
+        snapshot: {
+          id: '111111111',
+          text: 'Wrong quoted entity.',
+          url: 'https://x.com/wrong/status/111111111',
+        },
+        status: 'ok',
+        source: 'syndication',
+      }),
+    });
+
+    assert.equal(result.quotedTweetsFilled, 0);
+    assert.equal(result.failed, 1);
+    assert.match(result.failures[0].reason, /did not bind to the requested tweet identity/);
+
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim());
+    assert.equal(stored.quotedTweet, undefined);
+    assert.equal(stored.quotedTweetFailedAt, undefined);
+    assert.equal((await getBookmarkById(quoted.id))?.quotedTweet, null);
+  }, [quoted]);
+});
+
 test('parseBookmarksResponse: preserves sortIndex for bookmark ordering without fabricating bookmarkedAt', () => {
   const tr = makeTweetResult();
   const resp = {

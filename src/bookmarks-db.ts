@@ -395,6 +395,48 @@ function serializeJsonArray(values: string[] | undefined | null): string | null 
   return JSON.stringify(values);
 }
 
+const BOOKMARK_INSERT_COLUMNS = [
+  'id',
+  'tweet_id',
+  'url',
+  'text',
+  'author_handle',
+  'author_name',
+  'author_profile_image_url',
+  'posted_at',
+  'bookmarked_at',
+  'synced_at',
+  'conversation_id',
+  'in_reply_to_status_id',
+  'quoted_status_id',
+  'language',
+  'like_count',
+  'repost_count',
+  'reply_count',
+  'quote_count',
+  'bookmark_count',
+  'view_count',
+  'media_count',
+  'link_count',
+  'links_json',
+  'tags_json',
+  'ingested_via',
+  'categories',
+  'primary_category',
+  'github_urls',
+  'domains',
+  'primary_domain',
+  'quoted_tweet_json',
+  'article_title',
+  'article_text',
+  'article_site',
+  'enriched_at',
+  'folder_ids',
+  'folder_names',
+  'article_source_tweet_id',
+  'article_locator',
+] as const;
+
 function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBookmarkFields): void {
   // Extract GitHub URLs (kept inline — no LLM needed for URL parsing)
   const text = r.text ?? '';
@@ -425,7 +467,8 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
   const usePreservedArticle = !useRawArticle && Boolean(preservedArticleLocator);
 
   db.run(
-    `INSERT OR REPLACE INTO bookmarks VALUES (${Array(39).fill('?').join(',')})`,
+    `INSERT OR REPLACE INTO bookmarks (${BOOKMARK_INSERT_COLUMNS.join(',')})
+     VALUES (${BOOKMARK_INSERT_COLUMNS.map(() => '?').join(',')})`,
     [
       r.id,
       r.tweetId,

@@ -235,10 +235,14 @@ function collectThreadEntries(entries: any[], out: ThreadTweetSnapshot[]): Colle
     }
 
     const direct = entry?.content?.itemContent?.tweet_results?.result;
+    const hasDirectTweetEnvelope = entry?.content?.itemContent?.tweet_results !== undefined;
     const directParsed = parseResultInto(direct, out);
     result.sawTweetResult = result.sawTweetResult || directParsed.sawTweetResult;
     result.sawUnavailableTweet = result.sawUnavailableTweet || directParsed.sawUnavailableTweet;
     result.sawUnparseableTweet = result.sawUnparseableTweet || directParsed.sawUnparseableTweet;
+    if (hasDirectTweetEnvelope && direct === undefined) {
+      result.sawUnparseableTweet = true;
+    }
 
     const moduleItems = entry?.content?.items;
     if (Array.isArray(moduleItems)) {
@@ -261,6 +265,9 @@ function collectThreadEntries(entries: any[], out: ThreadTweetSnapshot[]): Colle
         if (rootId) snapshot.conversationRootId = rootId;
         out.push(snapshot);
       }
+    }
+    if (!hasDirectTweetEnvelope && !Array.isArray(moduleItems)) {
+      result.sawUnparseableTweet = true;
     }
   }
   return result;

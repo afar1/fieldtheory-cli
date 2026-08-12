@@ -293,6 +293,51 @@ test('refreshExactXBookmark requires the focal tweet before completing traversal
   }
 });
 
+test('refreshExactXBookmark fails closed on an unknown entry beside the focal tweet', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      return new Response(JSON.stringify({ data: { tweetResult: { result: tweet('100', 'Current root.') } } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({
+      data: {
+        threaded_conversation_with_injections_v2: {
+          instructions: [{
+            type: 'TimelineAddEntries',
+            entries: [
+              {
+                entryId: 'tweet-100',
+                content: { itemContent: { tweet_results: { result: tweet('100', 'Current root.') } } },
+              },
+              {
+                entryId: 'future-thread-envelope',
+                content: { futureThreadItems: [{ opaque: true }] },
+              },
+            ],
+          }],
+        },
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    const result = await refreshExactXBookmark(archived(), {
+      csrfToken: 'ct0',
+      delayMs: 0,
+      now: '2026-08-11T00:00:00.000Z',
+    });
+    assert.equal(result.observation.status, 'partial');
+    assert.equal(result.observation.continuation_termination, 'parser_gap');
+    assert.equal(result.observation.continuation_enumeration_complete, false);
+    assert.equal(result.record.threadExpandedAt, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('refreshExactXBookmark converts a malformed TweetDetail body into a partial observation', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: string | URL | Request) => {
@@ -515,6 +560,24 @@ test('TweetDetail fails closed on an unsupported or valueless cursor entry', () 
     assert.equal(parsed.nextCursor, undefined);
     assert.equal(parsed.sawUnparseableTweet, true);
   }
+});
+
+test('TweetDetail fails closed on a tweet envelope with no response-owned result', () => {
+  const parsed = parseTweetDetailResponse({
+    data: {
+      threaded_conversation_with_injections_v2: {
+        instructions: [{
+          type: 'TimelineAddEntries',
+          entries: [{
+            entryId: 'tweet-malformed',
+            content: { itemContent: { tweet_results: {} } },
+          }],
+        }],
+      },
+    },
+  });
+  assert.equal(parsed.sawUnparseableTweet, true);
+  assert.deepEqual(parsed.parserGaps, ['unparseable_entry']);
 });
 
 test('refreshExactXBookmark rejects identity-less parent and quote responses', async () => {

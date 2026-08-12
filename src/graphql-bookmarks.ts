@@ -1881,13 +1881,19 @@ async function fetchTweetViaSyndication(tweetId: string): Promise<TweetFetchResu
     if (response.ok) {
       const data = await response.json() as any;
       if (!data?.text) return { snapshot: null, status: 'empty', source: 'syndication' };
+      const responseTweetId = data.id_str === undefined || data.id_str === null
+        ? null
+        : String(data.id_str);
+      if (responseTweetId !== tweetId) {
+        return { snapshot: null, status: 'error', source: 'syndication' };
+      }
       const handle = data.user?.screen_name;
       const mediaEntities: any[] = data.mediaDetails ?? [];
       return {
         status: 'ok',
         source: 'syndication',
         snapshot: {
-          id: String(data.id_str ?? tweetId),
+          id: responseTweetId,
           text: data.text,
           authorHandle: handle,
           authorName: data.user?.name,
@@ -1900,7 +1906,7 @@ async function fetchTweetViaSyndication(tweetId: string): Promise<TweetFetchResu
             width: m.original_info?.width,
             height: m.original_info?.height,
           })),
-          url: `https://x.com/${handle ?? '_'}/status/${data.id_str ?? tweetId}`,
+          url: `https://x.com/${handle ?? '_'}/status/${responseTweetId}`,
         },
       };
     }
@@ -2130,11 +2136,23 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
     let resultSource: TweetFetchSource | undefined;
     try {
       const result = await fetcher(tweetId);
-      snapshot = result.snapshot;
-      article = result.article;
+      const identityMismatch = Boolean(
+        (result.snapshot && result.snapshot.id !== tweetId)
+        || (result.article && result.article.sourceTweetId !== tweetId),
+      );
+      snapshot = identityMismatch ? null : result.snapshot;
+      article = identityMismatch ? null : result.article;
       resultStatus = result.status;
       resultSource = result.source;
-      if (!snapshot && !article) {
+      if (identityMismatch) {
+        resultStatus = 'error';
+        failed++;
+        failures.push({
+          tweetId,
+          reason: 'fetched content did not bind to the requested tweet identity',
+          url: `https://x.com/_/status/${tweetId}`,
+        });
+      } else if (!snapshot && !article) {
         failed++;
         failures.push({
           tweetId,
