@@ -6,7 +6,7 @@ import {
   twitterBookmarksCachePath,
   twitterBookmarksIndexPath,
 } from './paths.js';
-import { bindArticleLocator } from './source-bindings.js';
+import { bindArticleEnrichment } from './source-bindings.js';
 import type { BookmarkRecord } from './types.js';
 
 export interface CanonicalBookmarkSnapshot {
@@ -19,10 +19,11 @@ function boundArchivedRecord(archived: BookmarkRecord): BookmarkRecord {
     && archived.quotedTweet?.id === archived.quotedStatusId
       ? archived.quotedTweet
       : undefined;
-  const articleLocator = archived.articleText
-    && (archived.articleSourceTweetId ?? archived.tweetId) === archived.tweetId
-      ? bindArticleLocator(archived.links ?? [], archived.articleLocator)
-      : undefined;
+  const articleLocator = bindArticleEnrichment(archived.tweetId, archived.links ?? [], {
+    articleText: archived.articleText,
+    sourceTweetId: archived.articleSourceTweetId ?? archived.tweetId,
+    sourceLocator: archived.articleLocator,
+  });
 
   return {
     ...archived,
@@ -50,10 +51,12 @@ export function hydrateCanonicalBookmark(
       : undefined;
 
   const indexedArticleLocator = !record.articleText
-    && indexed.articleText
-    && indexed.articleSourceTweetId === archived.tweetId
-      ? bindArticleLocator(archived.links ?? [], indexed.articleLocator)
-      : undefined;
+    ? bindArticleEnrichment(archived.tweetId, archived.links ?? [], {
+        articleText: indexed.articleText,
+        sourceTweetId: indexed.articleSourceTweetId,
+        sourceLocator: indexed.articleLocator,
+      })
+    : undefined;
 
   return {
     ...record,

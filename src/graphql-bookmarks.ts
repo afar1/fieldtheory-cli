@@ -9,7 +9,7 @@ import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText, upd
 import type { ArticleUpdate } from './bookmarks-db.js';
 import { fetchArticle, resolveTcoLink } from './bookmark-enrich.js';
 import type { ArticleContent } from './bookmark-enrich.js';
-import { bindArticleLocator, xArticleIdentity } from './source-bindings.js';
+import { bindArticleEnrichment, bindArticleLocator, xArticleIdentity } from './source-bindings.js';
 import { XRequestExecutor } from './x-request-policy.js';
 import {
   compareThreadTweetsChronologically,
@@ -1793,7 +1793,6 @@ export async function fetchTweetDetailViaGraphQL(
 
   for (let page = 0; page < maxPages && pendingCursors.length > 0; page++) {
     const cursor = pendingCursors.shift();
-    if (cursor) processedCursors.add(cursor);
     const response = await executor.requestJson(buildTweetDetailUrl(tweetId, cursor), {
       headers: buildHeaders(csrfToken, cookieHeader),
     });
@@ -1805,7 +1804,7 @@ export async function fetchTweetDetailViaGraphQL(
         tweetId,
         response.status,
         tweets,
-        pendingCursors,
+        cursor ? [cursor, ...pendingCursors] : pendingCursors,
         processedCursors,
         parserGaps,
         response.httpStatus,
@@ -1818,6 +1817,7 @@ export async function fetchTweetDetailViaGraphQL(
     sawUnavailableTweet ||= parsed.sawUnavailableTweet;
     for (const gap of parsed.parserGaps) parserGaps.add(gap);
     tweets.push(...parsed.tweets);
+    if (cursor) processedCursors.add(cursor);
     for (const nextCursor of parsed.continuationCursors) {
       if (processedCursors.has(nextCursor)) {
         parserGaps.add('repeated_cursor');
@@ -2034,20 +2034,31 @@ function isXArticleUrl(value: string): boolean {
   }
 }
 
-async function readEnrichedBookmarkIds(): Promise<Set<string>> {
+async function readEnrichedBookmarkIds(records: BookmarkRecord[]): Promise<Set<string>> {
   const enrichedIds = new Set<string>();
+  const recordsById = new Map(records.map((record) => [record.id, record]));
   try {
     const { openDb } = await import('./db.js');
     const { twitterBookmarksIndexPath } = await import('./paths.js');
     const db = await openDb(twitterBookmarksIndexPath());
     try {
       const rows = db.exec(
-        `SELECT id FROM bookmarks
+        `SELECT id, tweet_id, article_source_tweet_id, article_locator, article_text FROM bookmarks
          WHERE enriched_at IS NOT NULL
            AND article_source_tweet_id = tweet_id
            AND article_locator IS NOT NULL`,
       );
-      for (const row of rows[0]?.values ?? []) enrichedIds.add(row[0] as string);
+      for (const row of rows[0]?.values ?? []) {
+        const id = String(row[0]);
+        const record = recordsById.get(id);
+        if (!record || String(row[1]) !== record.tweetId) continue;
+        const locator = bindArticleEnrichment(record.tweetId, record.links ?? [], {
+          articleText: row[4] == null ? null : String(row[4]),
+          sourceTweetId: row[2] == null ? null : String(row[2]),
+          sourceLocator: row[3] == null ? null : String(row[3]),
+        });
+        if (locator) enrichedIds.add(id);
+      }
     } finally { db.close(); }
   } catch { /* DB may not exist yet */ }
   return enrichedIds;
@@ -2073,7 +2084,7 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
       }
       return fetchTweetViaSyndication(tweetId);
     });
-  const enrichedIds = await readEnrichedBookmarkIds();
+  const enrichedIds = await readEnrichedBookmarkIds(records);
 
   // Gap 1: missing quoted tweets. Skip records where a previous gap-fill run
   // already tried and failed — otherwise dead tweets get re-fetched forever.
@@ -2286,19 +2297,24 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
   for (let i = 0; i < articleTotal; i++) {
     const record = needsEnrichment[i];
     // Find the first non-twitter link
+    let sourceLocator: string | null = null;
     let targetUrl: string | null = null;
     for (const link of record.links ?? []) {
       const resolved = link.includes('t.co/') ? await resolveTcoLink(link) : link;
-      if (resolved) { targetUrl = resolved; break; }
+      if (resolved) {
+        sourceLocator = link;
+        targetUrl = resolved;
+        break;
+      }
     }
 
-    if (targetUrl) {
+    if (sourceLocator && targetUrl) {
       const article = await fetchArticle(targetUrl);
       if (article && article.text.length >= 50) {
         articleDbUpdates.push({
           id: record.id,
           sourceTweetId: record.tweetId,
-          sourceLocator: targetUrl,
+          sourceLocator,
           articleTitle: article.title,
           articleText: article.text,
           articleSite: article.siteName,

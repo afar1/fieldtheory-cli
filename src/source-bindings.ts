@@ -64,3 +64,16 @@ export function bindArticleLocator(
   if (identities.size !== 1) return undefined;
   return preferredLocator(articleLinks);
 }
+
+export function bindArticleEnrichment(
+  rootTweetId: string,
+  sourceLinks: string[],
+  enrichment: {
+    articleText?: string | null;
+    sourceTweetId?: string | null;
+    sourceLocator?: string | null;
+  },
+): string | undefined {
+  if (!enrichment.articleText?.trim() || enrichment.sourceTweetId !== rootTweetId) return undefined;
+  return bindArticleLocator(sourceLinks, enrichment.sourceLocator);
+}

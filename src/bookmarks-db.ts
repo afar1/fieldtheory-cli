@@ -6,7 +6,7 @@ import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js
 import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
-import { bindArticleLocator, canonicalHttpLocator } from './source-bindings.js';
+import { bindArticleEnrichment, canonicalHttpLocator } from './source-bindings.js';
 
 const SCHEMA_VERSION = 7;
 
@@ -454,15 +454,18 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
     ? JSON.stringify(r.quotedTweet)
     : null;
 
-  const rawArticleLocator = r.articleText
-    && (r.articleSourceTweetId ?? r.tweetId) === r.tweetId
-      ? bindArticleLocator(r.links ?? [], r.articleLocator)
-      : undefined;
+  const rawArticleLocator = bindArticleEnrichment(r.tweetId, r.links ?? [], {
+    articleText: r.articleText,
+    sourceTweetId: r.articleSourceTweetId ?? r.tweetId,
+    sourceLocator: r.articleLocator,
+  });
   const preservedArticleLocator = preservedRootMatches
-    && preserved?.articleText
-    && preserved.articleSourceTweetId === r.tweetId
-      ? bindArticleLocator(r.links ?? [], preserved.articleLocator)
-      : undefined;
+    ? bindArticleEnrichment(r.tweetId, r.links ?? [], {
+        articleText: preserved?.articleText,
+        sourceTweetId: preserved?.articleSourceTweetId,
+        sourceLocator: preserved?.articleLocator,
+      })
+    : undefined;
   const useRawArticle = Boolean(r.articleText && rawArticleLocator);
   const usePreservedArticle = !useRawArticle && Boolean(preservedArticleLocator);
 

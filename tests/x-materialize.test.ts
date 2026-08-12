@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { fetchTweetDetailViaGraphQL } from '../src/graphql-bookmarks.js';
 import { refreshExactXBookmark } from '../src/x-materialize.js';
 import { parseTweetDetailResponse } from '../src/tweet-snapshots.js';
 import { XRequestExecutor } from '../src/x-request-policy.js';
@@ -563,21 +564,86 @@ test('TweetDetail fails closed on an unsupported or valueless cursor entry', () 
 });
 
 test('TweetDetail fails closed on a tweet envelope with no response-owned result', () => {
+  for (const tweetResults of [{}, { result: null }]) {
+    const parsed = parseTweetDetailResponse({
+      data: {
+        threaded_conversation_with_injections_v2: {
+          instructions: [{
+            type: 'TimelineAddEntries',
+            entries: [{
+              entryId: 'tweet-malformed',
+              content: { itemContent: { tweet_results: tweetResults } },
+            }],
+          }],
+        },
+      },
+    });
+    assert.equal(parsed.sawUnparseableTweet, true);
+    assert.deepEqual(parsed.parserGaps, ['unparseable_entry']);
+  }
+});
+
+test('TweetDetail fails closed on an unconsumed module item beside a valid focal tweet', () => {
   const parsed = parseTweetDetailResponse({
     data: {
       threaded_conversation_with_injections_v2: {
         instructions: [{
           type: 'TimelineAddEntries',
-          entries: [{
-            entryId: 'tweet-malformed',
-            content: { itemContent: { tweet_results: {} } },
-          }],
+          entries: [
+            {
+              entryId: 'tweet-100',
+              content: { itemContent: { tweet_results: { result: tweet('100', 'Current root.') } } },
+            },
+            {
+              entryId: 'conversation-module-1',
+              content: {
+                items: [{
+                  entryId: 'module-item-unknown',
+                  item: { itemContent: { futureThreadEnvelope: { opaque: true } } },
+                }],
+              },
+            },
+          ],
         }],
       },
     },
   });
-  assert.equal(parsed.sawUnparseableTweet, true);
+  assert.equal(parsed.tweets.some((row) => row.id === '100'), true);
   assert.deepEqual(parsed.parserGaps, ['unparseable_entry']);
+});
+
+test('TweetDetail fails closed on an unknown instruction without entries', () => {
+  const parsed = parseTweetDetailResponse({
+    data: {
+      threaded_conversation_with_injections_v2: {
+        instructions: [{ type: 'TimelineFutureInstruction', opaque: true }],
+      },
+    },
+  });
+  assert.deepEqual(parsed.parserGaps, ['unknown_instruction']);
+});
+
+test('TweetDetail keeps a terminally failed cursor pending instead of processed', async () => {
+  let request = 0;
+  const executor = new XRequestExecutor({
+    delayMs: 0,
+    maxAttempts: 1,
+    fetchImpl: async () => {
+      request += 1;
+      if (request === 1) {
+        return new Response(JSON.stringify(detailResponse([tweet('100', 'Current root.')], 'PAGE-2')), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(null, { status: 500 });
+    },
+  });
+  const result = await fetchTweetDetailViaGraphQL('100', 'ct0', undefined, { executor });
+  assert.equal(result.enumerationComplete, false);
+  assert.equal(result.enumerationTermination, 'error');
+  assert.deepEqual(result.pendingCursors, ['PAGE-2']);
+  assert.deepEqual(result.processedCursors, []);
 });
 
 test('refreshExactXBookmark rejects identity-less parent and quote responses', async () => {

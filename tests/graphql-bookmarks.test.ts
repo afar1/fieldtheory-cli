@@ -21,7 +21,8 @@ import {
   syncBookmarksGraphQL,
   syncGaps,
 } from '../src/graphql-bookmarks.js';
-import { buildIndex, getBookmarkById } from '../src/bookmarks-db.js';
+import { buildIndex, getBookmarkById, updateArticleContent } from '../src/bookmarks-db.js';
+import { loadCanonicalBookmarkSnapshot } from '../src/bookmark-snapshot.js';
 import { resolveFolder, formatFolderMirrorStats } from '../src/cli.js';
 import type { BookmarkFolder, BookmarkRecord } from '../src/types.js';
 
@@ -709,6 +710,68 @@ test('syncGaps: refuses to persist an article bound to a quoted or unrelated twe
     assert.match(result.failures[0].reason, /did not bind/);
     assert.equal((await getBookmarkById(xArticle.id))?.articleText, null);
   }, [xArticle]);
+});
+
+test('syncGaps repairs redirect-resolved article rows with the archive-owned source locator', async () => {
+  const shortUrl = 'https://t.co/source-link';
+  const finalUrl = 'https://example.com/final-article';
+  const linkOnly: BookmarkRecord = {
+    id: '2042685676949270800',
+    tweetId: '2042685676949270800',
+    url: 'https://x.com/operator/status/2042685676949270800',
+    text: `Read ${shortUrl}`,
+    syncedAt: NOW,
+    links: [shortUrl],
+  };
+  const originalFetch = globalThis.fetch;
+
+  try {
+    await withIsolatedGapFillDataDir(async () => {
+      await buildIndex();
+      await updateArticleContent([{
+        id: linkOnly.id,
+        sourceTweetId: linkOnly.tweetId,
+        sourceLocator: finalUrl,
+        articleTitle: 'Stranded redirect article',
+        articleText: 'This legacy body is stranded because its final fetch URL is not the archived source locator.',
+      }]);
+
+      let fetchCalls = 0;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        fetchCalls += 1;
+        const url = String(input);
+        if (url === shortUrl && init?.method === 'HEAD') {
+          return new Response(null, { status: 302, headers: { location: finalUrl } });
+        }
+        if (url === finalUrl && init?.method === 'HEAD') {
+          return new Response(null, { status: 200 });
+        }
+        assert.equal(url, finalUrl);
+        assert.equal(init?.method, 'GET');
+        return new Response(
+          '<html><title>Recovered</title><article>This redirected article body is long enough to be admitted and rebound to its archived source locator.</article></html>',
+          { status: 200, headers: { 'content-type': 'text/html' } },
+        );
+      }) as typeof fetch;
+
+      const repaired = await syncGaps({ tweetFetcher: async () => ({ snapshot: null, status: 'empty' }) });
+      assert.equal(repaired.articlesEnriched, 1);
+      assert.equal(fetchCalls, 3);
+      const hydrated = await getBookmarkById(linkOnly.id);
+      assert.equal(hydrated?.articleLocator, shortUrl);
+      assert.match(hydrated?.articleText ?? '', /redirected article body/);
+      const canonical = await loadCanonicalBookmarkSnapshot(linkOnly.tweetId);
+      assert.equal(canonical.record.articleLocator, shortUrl);
+      assert.match(canonical.record.articleText ?? '', /redirected article body/);
+
+      fetchCalls = 0;
+      const settled = await syncGaps({ tweetFetcher: async () => ({ snapshot: null, status: 'empty' }) });
+      assert.equal(settled.articlesEnriched, 0);
+      assert.equal(fetchCalls, 0);
+    }, [linkOnly]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 async function withIsolatedGapFillDataDir(

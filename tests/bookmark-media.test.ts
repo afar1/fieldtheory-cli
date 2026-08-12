@@ -5,6 +5,7 @@ import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fetchBookmarkMediaBatch } from '../src/bookmark-media.js';
+import { materializeBookmark } from '../src/bookmark-materialization.js';
 
 async function withMediaDataDir(records: any[], fn: () => Promise<void>): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), 'ft-media-test-'));
@@ -144,6 +145,111 @@ test('fetchBookmarkMediaBatch downloads quoted tweet media targets', async () =>
         { tweetId: '99', sourceUrl: quotedProfileUrl.replace('_normal.', '_400x400.') },
         { tweetId: '99', sourceUrl: quotedVideoUrl },
       ]);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchBookmarkMediaBatch creates root-specific associations for one shared quoted asset in one run', async () => {
+  const sharedPhotoUrl = 'https://pbs.twimg.com/media/shared-quoted.jpg';
+  const quotedTweet = {
+    id: '99',
+    url: 'https://x.com/quoted/status/99',
+    text: 'shared quote',
+    authorHandle: 'quoted',
+    mediaObjects: [{ type: 'photo', url: sharedPhotoUrl }],
+  };
+  const records = ['1', '2'].map((id) => ({
+    id,
+    tweetId: id,
+    url: `https://x.com/operator/status/${id}`,
+    text: `root ${id}`,
+    syncedAt: '2026-04-09T00:00:00.000Z',
+    quotedStatusId: quotedTweet.id,
+    quotedTweet,
+    links: [],
+  }));
+  const originalFetch = globalThis.fetch;
+  let getCalls = 0;
+  globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    if (init?.method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': '4', 'content-type': 'image/jpeg' },
+      });
+    }
+    getCalls += 1;
+    return new Response(Uint8Array.from([1, 2, 3, 4]), {
+      status: 200,
+      headers: { 'content-type': 'image/jpeg' },
+    });
+  }) as typeof fetch;
+
+  try {
+    await withMediaDataDir(records, async () => {
+      const manifest = await fetchBookmarkMediaBatch({ maxBytes: 1024, skipProfileImages: true });
+      const shared = manifest.entries.filter((entry) => entry.sourceUrl === sharedPhotoUrl);
+      assert.equal(getCalls, 1);
+      assert.deepEqual(shared.map((entry) => entry.bookmarkId).sort(), ['1', '2']);
+      assert.equal(shared[0].localPath, shared[1].localPath);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchBookmarkMediaBatch reuses verified shared bytes across runs while preserving root custody', async () => {
+  const sharedPhotoUrl = 'https://pbs.twimg.com/media/shared-quoted-later.jpg';
+  const quotedTweet = {
+    id: '99',
+    url: 'https://x.com/quoted/status/99',
+    text: 'shared quote',
+    authorHandle: 'quoted',
+    mediaObjects: [{ type: 'photo', url: sharedPhotoUrl }],
+  };
+  const records = ['1', '2'].map((id) => ({
+    id,
+    tweetId: id,
+    url: `https://x.com/operator/status/${id}`,
+    text: `root ${id}`,
+    syncedAt: '2026-04-09T00:00:00.000Z',
+    quotedStatusId: quotedTweet.id,
+    quotedTweet,
+    links: [],
+  }));
+  const originalFetch = globalThis.fetch;
+  let getCalls = 0;
+  globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    if (init?.method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': '4', 'content-type': 'image/jpeg' },
+      });
+    }
+    getCalls += 1;
+    return new Response(Uint8Array.from([1, 2, 3, 4]), {
+      status: 200,
+      headers: { 'content-type': 'image/jpeg' },
+    });
+  }) as typeof fetch;
+
+  try {
+    await withMediaDataDir(records, async () => {
+      await fetchBookmarkMediaBatch({ records: [records[0]], maxBytes: 1024, skipProfileImages: true });
+      assert.equal(getCalls, 1);
+      globalThis.fetch = (async () => {
+        throw new Error('verified cached bytes should avoid another request');
+      }) as typeof fetch;
+      const manifest = await fetchBookmarkMediaBatch({ records: [records[1]], maxBytes: 1024, skipProfileImages: true });
+      const shared = manifest.entries.filter((entry) => entry.sourceUrl === sharedPhotoUrl);
+      assert.deepEqual(shared.map((entry) => entry.bookmarkId).sort(), ['1', '2']);
+      assert.equal(shared[0].localPath, shared[1].localPath);
+
+      const materialized = await materializeBookmark(records[1], manifest);
+      const component = materialized.components.find((row) => row.source_locator === sharedPhotoUrl);
+      assert.ok(component?.source_asset);
+      assert.equal(component.source_asset.bytes, 4);
     });
   } finally {
     globalThis.fetch = originalFetch;

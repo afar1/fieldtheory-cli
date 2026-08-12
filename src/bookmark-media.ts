@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { writeFile } from 'node:fs/promises';
+import { stat, writeFile } from 'node:fs/promises';
 import { ensureDir, pathExists, readJson, readJsonLines, writeJson } from './fs.js';
 import { bookmarkMediaDir, bookmarkMediaManifestPath, twitterBookmarksCachePath } from './paths.js';
 import type { BookmarkRecord } from './types.js';
@@ -75,12 +75,26 @@ interface CachedMediaResult {
 const HOUR_MS = 60 * 60_000;
 const DAY_MS = 24 * HOUR_MS;
 
-function mediaEntryKey(tweetId: string, sourceUrl: string, isProfileImage: boolean): string {
+function mediaAssetKey(tweetId: string, sourceUrl: string, isProfileImage: boolean): string {
   return isProfileImage ? `profile::${sourceUrl}` : `${tweetId}::${sourceUrl}`;
 }
 
+function mediaAssociationKey(
+  bookmarkId: string,
+  tweetId: string,
+  sourceUrl: string,
+  isProfileImage: boolean,
+): string {
+  return isProfileImage ? mediaAssetKey(tweetId, sourceUrl, true) : `${bookmarkId}::${tweetId}::${sourceUrl}`;
+}
+
 function mediaEntryKeyFromEntry(entry: MediaFetchEntry): string {
-  return mediaEntryKey(entry.tweetId, entry.sourceUrl, entry.sourceUrl.includes('/profile_images/'));
+  return mediaAssociationKey(
+    entry.bookmarkId,
+    entry.tweetId,
+    entry.sourceUrl,
+    entry.sourceUrl.includes('/profile_images/'),
+  );
 }
 
 function sanitizeExtFromContentType(contentType?: string, sourceUrl?: string): string {
@@ -122,7 +136,7 @@ function pushTarget(
   isProfileImage: boolean,
 ): void {
   if (!sourceUrl) return;
-  const key = mediaEntryKey(base.tweetId, sourceUrl, isProfileImage);
+  const key = mediaAssetKey(base.tweetId, sourceUrl, isProfileImage);
   if (seenKeys.has(key)) return;
   seenKeys.add(key);
   targets.push({
@@ -249,20 +263,64 @@ function isCoveredEntry(entry: MediaFetchEntry, maxBytes: number, retryFailed: b
   return typeof entry.bytes === 'number' && !Number.isNaN(entry.bytes) && entry.bytes > maxBytes;
 }
 
-function buildCoveredAssetKeys(previous: MediaFetchManifest | null, maxBytes: number, retryFailed: boolean, nowMs: number): Set<string> {
+async function loadReusableDownloadedResults(previous: MediaFetchManifest | null): Promise<{
+  associationKeys: Set<string>;
+  bySourceUrl: Map<string, CachedMediaResult>;
+}> {
+  const associationKeys = new Set<string>();
+  const bySourceUrl = new Map<string, CachedMediaResult>();
+  for (const entry of previous?.entries ?? []) {
+    if (entry.status !== 'downloaded' || !entry.localPath) continue;
+    try {
+      const file = await stat(entry.localPath);
+      if (!file.isFile() || (entry.bytes !== undefined && file.size !== entry.bytes)) continue;
+      associationKeys.add(mediaEntryKeyFromEntry(entry));
+      if (!bySourceUrl.has(entry.sourceUrl)) {
+        bySourceUrl.set(entry.sourceUrl, {
+          localPath: entry.localPath,
+          contentType: entry.contentType,
+          bytes: file.size,
+          status: 'downloaded',
+          fetchedAt: entry.fetchedAt,
+        });
+      }
+    } catch {
+      // Missing or changed files are not reusable and must be fetched again.
+    }
+  }
+  return { associationKeys, bySourceUrl };
+}
+
+function buildCoveredAssetKeys(
+  previous: MediaFetchManifest | null,
+  maxBytes: number,
+  retryFailed: boolean,
+  nowMs: number,
+  verifiedDownloadedAssociations: Set<string>,
+): Set<string> {
   return new Set(
     (previous?.entries ?? [])
       .filter((entry) => !entry.sourceUrl.includes('/profile_images/'))
-      .filter((entry) => isCoveredEntry(entry, maxBytes, retryFailed, nowMs))
-      .map((entry) => `${entry.tweetId}::${entry.sourceUrl}`),
+      .filter((entry) => entry.status === 'downloaded'
+        ? verifiedDownloadedAssociations.has(mediaEntryKeyFromEntry(entry))
+        : isCoveredEntry(entry, maxBytes, retryFailed, nowMs))
+      .map(mediaEntryKeyFromEntry),
   );
 }
 
-function buildCoveredProfileImageUrls(previous: MediaFetchManifest | null, maxBytes: number, retryFailed: boolean, nowMs: number): Set<string> {
+function buildCoveredProfileImageUrls(
+  previous: MediaFetchManifest | null,
+  maxBytes: number,
+  retryFailed: boolean,
+  nowMs: number,
+  verifiedDownloadedAssociations: Set<string>,
+): Set<string> {
   return new Set(
     (previous?.entries ?? [])
       .filter((entry) => entry.sourceUrl.includes('/profile_images/'))
-      .filter((entry) => isCoveredEntry(entry, maxBytes, retryFailed, nowMs))
+      .filter((entry) => entry.status === 'downloaded'
+        ? verifiedDownloadedAssociations.has(mediaEntryKeyFromEntry(entry))
+        : isCoveredEntry(entry, maxBytes, retryFailed, nowMs))
       .map((entry) => entry.sourceUrl),
   );
 }
@@ -273,9 +331,9 @@ function hasPendingMediaTarget(
   coveredProfileImageUrls: Set<string>,
   skipProfileImages: boolean,
 ): boolean {
-  return resolveMediaTargets(bookmark, coveredProfileImageUrls, skipProfileImages).some(({ tweetId, sourceUrl, isProfileImage }) => {
+  return resolveMediaTargets(bookmark, coveredProfileImageUrls, skipProfileImages).some(({ bookmarkId, tweetId, sourceUrl, isProfileImage }) => {
     if (isProfileImage) return true;
-    return !coveredAssetKeys.has(`${tweetId}::${sourceUrl}`);
+    return !coveredAssetKeys.has(mediaAssociationKey(bookmarkId, tweetId, sourceUrl, false));
   });
 }
 
@@ -294,15 +352,28 @@ export async function fetchBookmarkMediaBatch(
   await ensureDir(mediaDir);
 
   const previous = await loadManifest();
-  const coveredAssetKeys = buildCoveredAssetKeys(previous, maxBytes, retryFailed, nowMs);
-  const coveredProfileImageUrls = buildCoveredProfileImageUrls(previous, maxBytes, retryFailed, nowMs);
+  const reusable = await loadReusableDownloadedResults(previous);
+  const coveredAssetKeys = buildCoveredAssetKeys(
+    previous,
+    maxBytes,
+    retryFailed,
+    nowMs,
+    reusable.associationKeys,
+  );
+  const coveredProfileImageUrls = buildCoveredProfileImageUrls(
+    previous,
+    maxBytes,
+    retryFailed,
+    nowMs,
+    reusable.associationKeys,
+  );
   const bookmarks = options.records ?? await readJsonLines<BookmarkRecord>(twitterBookmarksCachePath());
   const candidates = bookmarks
     .filter(hasMediaCandidate)
     .filter((bookmark) => hasPendingMediaTarget(bookmark, coveredAssetKeys, coveredProfileImageUrls, skipProfileImages))
     .slice(0, limit);
   const entriesByKey = new Map((previous?.entries ?? []).map((entry) => [mediaEntryKeyFromEntry(entry), entry]));
-  const cachedResultsBySourceUrl = new Map<string, CachedMediaResult>();
+  const cachedResultsBySourceUrl = reusable.bySourceUrl;
 
   let downloaded = 0;
   let skippedTooLarge = 0;
@@ -367,7 +438,7 @@ export async function fetchBookmarkMediaBatch(
     for (const target of mediaTargets) {
       if (options.signal?.aborted) break;
       const { bookmarkId, tweetId, tweetUrl, authorHandle, authorName, sourceUrl, isProfileImage } = target;
-      const key = mediaEntryKey(tweetId, sourceUrl, isProfileImage);
+      const key = mediaAssociationKey(bookmarkId, tweetId, sourceUrl, isProfileImage);
       if (!isProfileImage && coveredAssetKeys.has(key)) continue;
       const cachedResult = cachedResultsBySourceUrl.get(sourceUrl);
       if (cachedResult) {

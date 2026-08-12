@@ -240,7 +240,7 @@ function collectThreadEntries(entries: any[], out: ThreadTweetSnapshot[]): Colle
     result.sawTweetResult = result.sawTweetResult || directParsed.sawTweetResult;
     result.sawUnavailableTweet = result.sawUnavailableTweet || directParsed.sawUnavailableTweet;
     result.sawUnparseableTweet = result.sawUnparseableTweet || directParsed.sawUnparseableTweet;
-    if (hasDirectTweetEnvelope && direct === undefined) {
+    if (hasDirectTweetEnvelope && direct == null) {
       result.sawUnparseableTweet = true;
     }
 
@@ -250,6 +250,7 @@ function collectThreadEntries(entries: any[], out: ThreadTweetSnapshot[]): Colle
       for (let index = 0; index < moduleItems.length; index++) {
         const item = moduleItems[index];
         const itemResult = item?.item?.itemContent?.tweet_results?.result;
+        const hasItemTweetEnvelope = item?.item?.itemContent?.tweet_results !== undefined;
         const parsed = parseResultInto(itemResult, moduleSnapshots, undefined, {
           conversationEntryId: entry.entryId,
           conversationDisplayType: entry?.content?.displayType,
@@ -259,6 +260,9 @@ function collectThreadEntries(entries: any[], out: ThreadTweetSnapshot[]): Colle
         result.sawTweetResult = result.sawTweetResult || parsed.sawTweetResult;
         result.sawUnavailableTweet = result.sawUnavailableTweet || parsed.sawUnavailableTweet;
         result.sawUnparseableTweet = result.sawUnparseableTweet || parsed.sawUnparseableTweet;
+        if (!hasItemTweetEnvelope || itemResult == null) {
+          result.sawUnparseableTweet = true;
+        }
       }
       const rootId = moduleSnapshots[0]?.id;
       for (const snapshot of moduleSnapshots) {
@@ -297,7 +301,11 @@ export function parseTweetDetailResponse(json: any): TweetDetailParseResult {
       mergeCollectThreadResult(collectResult, collectThreadEntries(instruction.entries, tweets));
     } else if (instruction?.type === 'TimelineReplaceEntry' && instruction?.entry) {
       mergeCollectThreadResult(collectResult, collectThreadEntries([instruction.entry], tweets));
-    } else if (Array.isArray(instruction?.entries) || instruction?.entry) {
+    } else if (instruction?.type === 'TimelineTerminateTimeline'
+      && instruction?.entries === undefined
+      && instruction?.entry === undefined) {
+      // Known content-free termination marker. Queue state remains authoritative.
+    } else {
       collectResult.sawUnparseableTweet = true;
       parserGaps.add('unknown_instruction');
     }
