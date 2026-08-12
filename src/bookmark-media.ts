@@ -5,6 +5,7 @@ import { stat, writeFile } from 'node:fs/promises';
 import { ensureDir, pathExists, readJson, readJsonLines, writeJson } from './fs.js';
 import { bookmarkMediaDir, bookmarkMediaManifestPath, twitterBookmarksCachePath } from './paths.js';
 import type { BookmarkRecord } from './types.js';
+import { XRequestExecutor } from './x-request-policy.js';
 
 export const DEFAULT_MEDIA_MAX_BYTES = 200 * 1024 * 1024;
 
@@ -363,6 +364,7 @@ function hasPendingMediaTarget(
 }
 
 export async function fetchBookmarkMediaBatch(
+  requestExecutor: XRequestExecutor,
   options: { limit?: number; maxBytes?: number; skipProfileImages?: boolean; retryFailed?: boolean; records?: BookmarkRecord[]; signal?: AbortSignal; onProgress?: (progress: MediaFetchProgress) => void } = {}
 ): Promise<MediaFetchManifest> {
   const limit = typeof options.limit === 'number' && !Number.isNaN(options.limit)
@@ -474,9 +476,16 @@ export async function fetchBookmarkMediaBatch(
       const fetchedAt = new Date().toISOString();
 
       try {
-        const head = await fetch(sourceUrl, { method: 'HEAD' });
-        const contentLengthHeader = head.headers.get('content-length');
-        const contentType = head.headers.get('content-type') ?? undefined;
+        const head = await requestExecutor.requestHeaders(sourceUrl, {
+          method: 'HEAD',
+          signal: options.signal,
+        });
+        if (head.failureKind === 'aborted') break;
+        if (head.failureKind === 'network') {
+          throw new Error(head.errorMessage ?? head.failureKind);
+        }
+        const contentLengthHeader = head.status === 'ok' ? head.headers?.contentLength : undefined;
+        const contentType = head.status === 'ok' ? head.headers?.contentType : undefined;
         const declaredBytes = contentLengthHeader ? Number(contentLengthHeader) : undefined;
 
         if (typeof declaredBytes === 'number' && !Number.isNaN(declaredBytes) && declaredBytes > maxBytes) {
@@ -509,8 +518,12 @@ export async function fetchBookmarkMediaBatch(
           continue;
         }
 
-        const response = await fetch(sourceUrl);
-        if (!response.ok) {
+        const response = await requestExecutor.requestBytes(sourceUrl, { signal: options.signal });
+        if (response.failureKind === 'aborted') break;
+        if (response.status !== 'ok' || !response.bytes) {
+          const reason = response.httpStatus
+            ? `HTTP ${response.httpStatus}`
+            : response.errorMessage ?? response.failureKind ?? response.status;
           const entry = {
             bookmarkId,
             tweetId,
@@ -519,7 +532,7 @@ export async function fetchBookmarkMediaBatch(
             authorName,
             sourceUrl,
             status: 'failed',
-            reason: `HTTP ${response.status}`,
+            reason,
             fetchedAt,
           } satisfies MediaFetchEntry;
           upsertEntry(entry);
@@ -534,7 +547,7 @@ export async function fetchBookmarkMediaBatch(
           continue;
         }
 
-        const buffer = Buffer.from(await response.arrayBuffer());
+        const buffer = response.bytes;
         if (buffer.byteLength > maxBytes) {
           const entry = {
             bookmarkId,
@@ -543,7 +556,7 @@ export async function fetchBookmarkMediaBatch(
             authorHandle,
             authorName,
             sourceUrl,
-            contentType: response.headers.get('content-type') ?? contentType ?? undefined,
+            contentType: response.contentType ?? contentType,
             bytes: buffer.byteLength,
             status: 'skipped_too_large',
             reason: `downloaded size ${buffer.byteLength} exceeds max ${maxBytes}`,
@@ -566,7 +579,7 @@ export async function fetchBookmarkMediaBatch(
         }
 
         const digest = createHash('sha256').update(buffer).digest('hex').slice(0, 16);
-        const ext = sanitizeExtFromContentType(response.headers.get('content-type') ?? contentType ?? undefined, sourceUrl);
+        const ext = sanitizeExtFromContentType(response.contentType ?? contentType, sourceUrl);
         const filename = isProfileImage
           ? `${digest}${ext}`
           : `${tweetId}-${digest}${ext}`;
@@ -583,7 +596,7 @@ export async function fetchBookmarkMediaBatch(
           authorName,
           sourceUrl,
           localPath,
-          contentType: response.headers.get('content-type') ?? contentType ?? undefined,
+          contentType: response.contentType ?? contentType,
           bytes: buffer.byteLength,
           status: 'downloaded',
           fetchedAt,

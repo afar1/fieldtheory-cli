@@ -37,6 +37,7 @@ import { canonicalLibraryDir, dataDir, ensureDataDir, isFirstRun, migrateLegacyI
 import { materializeBookmark } from './bookmark-materialization.js';
 import { loadBoundMediaManifest, loadCanonicalBookmarkSnapshot } from './bookmark-snapshot.js';
 import { refreshExactXBookmark } from './x-materialize.js';
+import { XRequestExecutor } from './x-request-policy.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import { registerCompanionCommands } from './companion-cli.js';
@@ -272,7 +273,8 @@ async function runMediaFetchWithProgress(options: { limit?: number; maxBytes?: n
       console.log('\n  Interrupted. Saving media progress...\n');
     },
   });
-  const result = await runWithSpinner(spinner, () => fetchBookmarkMediaBatch({
+  const requestExecutor = new XRequestExecutor({ maxAttempts: 1 });
+  const result = await runWithSpinner(spinner, () => fetchBookmarkMediaBatch(requestExecutor, {
     limit: options.limit,
     maxBytes: options.maxBytes,
     skipProfileImages: options.skipProfileImages,
@@ -1339,6 +1341,11 @@ export function buildCli() {
       const snapshot = await loadCanonicalBookmarkSnapshot(exactId);
       let record: BookmarkRecord = snapshot.record;
       let refreshObservation = null;
+      const requestedDelayMs = Number(options.delayMs);
+      const delayMs = Number.isFinite(requestedDelayMs) ? Math.max(0, requestedDelayMs) : 300;
+      const requestExecutor = options.refresh || options.fetchMedia
+        ? new XRequestExecutor({ delayMs })
+        : undefined;
       if (options.refresh) {
         const directCookies = parseCookieOption(options.cookies);
         const cookies = resolveGapFillCookies({
@@ -1355,7 +1362,8 @@ export function buildCli() {
         const refreshed = await refreshExactXBookmark(record, {
           csrfToken: cookies.csrfToken,
           cookieHeader: cookies.cookieHeader,
-          delayMs: Number(options.delayMs) || 300,
+          delayMs,
+          requestExecutor,
         });
         record = refreshed.record;
         refreshObservation = refreshed.observation;
@@ -1363,7 +1371,7 @@ export function buildCli() {
 
       let manifest = snapshot.manifest;
       if (options.fetchMedia) {
-        await fetchBookmarkMediaBatch({
+        await fetchBookmarkMediaBatch(requestExecutor!, {
           records: [record],
           limit: 1,
           maxBytes: Number(options.mediaMaxBytes) || DEFAULT_MEDIA_MAX_BYTES,

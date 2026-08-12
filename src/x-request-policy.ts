@@ -7,12 +7,31 @@ export type XRequestStatus =
   | 'server_error'
   | 'error';
 
-export interface XJsonResponse {
+export type XRequestFailureKind = 'network' | 'decode' | 'graphql' | 'aborted';
+
+interface XRequestResult {
   status: XRequestStatus;
-  json?: unknown;
-  graphqlErrors?: unknown;
   httpStatus?: number;
   attempts: number;
+  failureKind?: XRequestFailureKind;
+  errorMessage?: string;
+}
+
+export interface XJsonResponse extends XRequestResult {
+  json?: unknown;
+  graphqlErrors?: unknown;
+}
+
+export interface XHeaderResponse extends XRequestResult {
+  headers?: {
+    contentLength?: string;
+    contentType?: string;
+  };
+}
+
+export interface XBytesResponse extends XRequestResult {
+  bytes?: Buffer;
+  contentType?: string;
 }
 
 export interface XRequestExecutorOptions {
@@ -67,20 +86,38 @@ export class XRequestExecutor {
 
   private async beforeAttempt(retryBackoffMs: number): Promise<void> {
     if (this.actualAttempts > 0) {
-      await this.sleep(Math.max(this.delayMs, retryBackoffMs));
+      const waitMs = Math.max(this.delayMs, retryBackoffMs);
+      if (waitMs > 0) await this.sleep(waitMs);
     }
     this.actualAttempts += 1;
   }
 
-  async requestJson(input: string | URL | Request, init?: RequestInit): Promise<XJsonResponse> {
+  private async requestDecoded<T>(
+    input: string | URL | Request,
+    init: RequestInit | undefined,
+    decode: (response: Response) => Promise<T>,
+  ): Promise<XRequestResult & { value?: T }> {
+    if (init?.signal?.aborted) {
+      return { status: 'error', attempts: 0, failureKind: 'aborted' };
+    }
     let retryBackoff = 0;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       await this.beforeAttempt(retryBackoff);
       let response: Response;
       try {
         response = await this.fetchImpl(input, init);
-      } catch {
-        if (attempt === this.maxAttempts) return { status: 'error', attempts: attempt };
+      } catch (error) {
+        if (init?.signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
+          return { status: 'error', attempts: attempt, failureKind: 'aborted' };
+        }
+        if (attempt === this.maxAttempts) {
+          return {
+            status: 'error',
+            attempts: attempt,
+            failureKind: 'network',
+            errorMessage: error instanceof Error ? error.message : String(error),
+          };
+        }
         retryBackoff = this.retryBackoffMs('network', attempt);
         continue;
       }
@@ -89,12 +126,17 @@ export class XRequestExecutor {
         try {
           return {
             status: 'ok',
-            json: await response.json(),
+            value: await decode(response),
             httpStatus: response.status,
             attempts: attempt,
           };
         } catch {
-          return { status: 'error', httpStatus: response.status, attempts: attempt };
+          return {
+            status: 'error',
+            httpStatus: response.status,
+            attempts: attempt,
+            failureKind: 'decode',
+          };
         }
       }
 
@@ -123,6 +165,12 @@ export class XRequestExecutor {
     return { status: 'error', attempts: this.maxAttempts };
   }
 
+  async requestJson(input: string | URL | Request, init?: RequestInit): Promise<XJsonResponse> {
+    const response = await this.requestDecoded(input, init, (value) => value.json());
+    const { value, ...result } = response;
+    return { ...result, ...(value !== undefined ? { json: value } : {}) };
+  }
+
   async requestGraphqlJson(input: string | URL | Request, init?: RequestInit): Promise<XJsonResponse> {
     const response = await this.requestJson(input, init);
     if (response.status !== 'ok') return response;
@@ -135,6 +183,28 @@ export class XRequestExecutor {
       ...response,
       status: 'graphql_error',
       graphqlErrors: errors,
+      failureKind: 'graphql',
+    };
+  }
+
+  async requestHeaders(input: string | URL | Request, init?: RequestInit): Promise<XHeaderResponse> {
+    const response = await this.requestDecoded(input, init, async (value) => ({
+      contentLength: value.headers.get('content-length') ?? undefined,
+      contentType: value.headers.get('content-type') ?? undefined,
+    }));
+    const { value, ...result } = response;
+    return { ...result, ...(value ? { headers: value } : {}) };
+  }
+
+  async requestBytes(input: string | URL | Request, init?: RequestInit): Promise<XBytesResponse> {
+    const response = await this.requestDecoded(input, init, async (value) => ({
+      bytes: Buffer.from(await value.arrayBuffer()),
+      contentType: value.headers.get('content-type') ?? undefined,
+    }));
+    const { value, ...result } = response;
+    return {
+      ...result,
+      ...(value ? { bytes: value.bytes, contentType: value.contentType } : {}),
     };
   }
 }

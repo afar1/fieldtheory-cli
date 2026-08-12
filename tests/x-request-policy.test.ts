@@ -84,3 +84,99 @@ test('XRequestExecutor accepts an explicitly empty GraphQL errors list', async (
   const result = await executor.requestGraphqlJson('https://x.com/i/api/graphql/test');
   assert.equal(result.status, 'ok');
 });
+
+test('one XRequestExecutor schedules JSON, HEAD, binary, and binary retry attempts', async () => {
+  const calls: Array<{ url: string; method: string }> = [];
+  const sleeps: number[] = [];
+  let binaryGets = 0;
+  const executor = new XRequestExecutor({
+    delayMs: 11,
+    maxAttempts: 2,
+    fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      calls.push({ url, method });
+      if (url.endsWith('/json')) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (method === 'HEAD') {
+        return new Response(null, {
+          status: 200,
+          headers: { 'content-length': '4', 'content-type': 'image/jpeg' },
+        });
+      }
+      binaryGets += 1;
+      if (binaryGets === 1) {
+        return new Response('temporary', { status: 503 });
+      }
+      return new Response(Uint8Array.from([1, 2, 3, 4]), {
+        status: 200,
+        headers: { 'content-type': 'image/jpeg' },
+      });
+    }) as typeof fetch,
+    sleep: async (milliseconds) => { sleeps.push(milliseconds); },
+    retryBackoffMs: () => 29,
+  });
+
+  assert.equal((await executor.requestJson('https://example.com/json')).status, 'ok');
+  const headers = await executor.requestHeaders('https://example.com/bytes', { method: 'HEAD' });
+  assert.deepEqual(headers.headers, { contentLength: '4', contentType: 'image/jpeg' });
+  const bytes = await executor.requestBytes('https://example.com/bytes');
+  assert.deepEqual(bytes.bytes, Buffer.from([1, 2, 3, 4]));
+  assert.equal(bytes.attempts, 2);
+  assert.equal(executor.attemptCount, 4);
+  assert.deepEqual(calls.map((call) => call.method), ['GET', 'HEAD', 'GET', 'GET']);
+  assert.deepEqual(sleeps, [11, 11, 29]);
+});
+
+test('an explicit zero delay introduces no artificial waits across request adapters', async () => {
+  const sleeps: number[] = [];
+  const executor = new XRequestExecutor({
+    delayMs: 0,
+    maxAttempts: 1,
+    fetchImpl: (async (_input: string | URL | Request, init?: RequestInit) => init?.method === 'HEAD'
+      ? new Response(null, { status: 200 })
+      : new Response(Uint8Array.from([1]), { status: 200 })) as typeof fetch,
+    sleep: async (milliseconds) => { sleeps.push(milliseconds); },
+  });
+
+  assert.equal((await executor.requestHeaders('https://example.com/media', { method: 'HEAD' })).status, 'ok');
+  assert.equal((await executor.requestBytes('https://example.com/media')).status, 'ok');
+  assert.deepEqual(sleeps, []);
+});
+
+test('an aborted request is terminal without issuing or retrying an HTTP attempt', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let calls = 0;
+  const executor = new XRequestExecutor({
+    fetchImpl: (async () => {
+      calls += 1;
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch,
+  });
+
+  const result = await executor.requestBytes('https://example.com/media', { signal: controller.signal });
+  assert.equal(result.status, 'error');
+  assert.equal(result.failureKind, 'aborted');
+  assert.equal(result.attempts, 0);
+  assert.equal(calls, 0);
+  assert.equal(executor.attemptCount, 0);
+});
+
+test('terminal response state is local to one request and does not poison the shared executor', async () => {
+  let calls = 0;
+  const executor = new XRequestExecutor({
+    maxAttempts: 1,
+    fetchImpl: (async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response('missing', { status: 404 })
+        : new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch,
+  });
+
+  assert.equal((await executor.requestHeaders('https://example.com/missing')).status, 'not_found');
+  assert.equal((await executor.requestJson('https://example.com/next')).status, 'ok');
+  assert.equal(executor.attemptCount, 2);
+});

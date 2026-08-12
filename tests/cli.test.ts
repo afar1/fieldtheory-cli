@@ -27,6 +27,18 @@ async function captureStdout(fn: () => Promise<void>): Promise<string> {
   return chunks.join('');
 }
 
+async function captureConsoleLog(fn: () => Promise<void>): Promise<string> {
+  const chunks: string[] = [];
+  const originalLog = console.log;
+  console.log = (...values: unknown[]) => { chunks.push(values.map(String).join(' ')); };
+  try {
+    await fn();
+  } finally {
+    console.log = originalLog;
+  }
+  return chunks.join('\n');
+}
+
 async function captureStderr(fn: () => Promise<void>): Promise<string> {
   const chunks: string[] = [];
   const origWrite = process.stderr.write;
@@ -1038,6 +1050,133 @@ test('ft materialize --refresh retains indexed article content when the current 
     assert.equal(article?.disposition, 'used');
     assert.equal(currentness?.disposition, 'unresolved');
     assert.equal(JSON.parse(currentness?.content ?? '{}').article_status, 'unresolved');
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.FT_DATA_DIR = origEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ft materialize shares one configured request schedule across refresh and media attempts', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-materialize-request-policy-'));
+  const origEnv = process.env.FT_DATA_DIR;
+  const originalFetch = globalThis.fetch;
+  process.env.FT_DATA_DIR = tmpDir;
+  const id = '2042685676949270724';
+  const mediaUrl = 'https://pbs.twimg.com/media/exact-policy.jpg';
+  fs.writeFileSync(path.join(tmpDir, 'bookmarks.jsonl'), `${JSON.stringify({
+    id,
+    tweetId: id,
+    url: `https://x.com/operator/status/${id}`,
+    text: 'Archived root.',
+    authorHandle: 'operator',
+    syncedAt: '2026-08-11T00:00:00.000Z',
+    mediaObjects: [{ type: 'photo', url: mediaUrl }],
+    links: [],
+  })}\n`);
+
+  const focal = {
+    rest_id: id,
+    legacy: {
+      id_str: id,
+      full_text: 'Current root.',
+      created_at: 'Tue Aug 11 12:00:00 +0000 2026',
+      conversation_id_str: id,
+      entities: { urls: [] },
+      extended_entities: { media: [{ type: 'photo', media_url_https: mediaUrl }] },
+    },
+    core: {
+      user_results: {
+        result: {
+          rest_id: '1',
+          core: { screen_name: 'operator', name: 'Operator' },
+          legacy: {},
+        },
+      },
+    },
+  };
+  const attemptTimes: number[] = [];
+  const methods: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    attemptTimes.push(Date.now());
+    methods.push(init?.method ?? 'GET');
+    const url = String(input);
+    if (url === mediaUrl && init?.method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': '4', 'content-type': 'image/jpeg' },
+      });
+    }
+    if (url === mediaUrl) {
+      return new Response(Uint8Array.from([1, 2, 3, 4]), {
+        status: 200,
+        headers: { 'content-type': 'image/jpeg' },
+      });
+    }
+    const body = url.includes('/TweetResultByRestId?')
+      ? { data: { tweetResult: { result: focal } } }
+      : {
+          data: {
+            threaded_conversation_with_injections_v2: {
+              instructions: [{
+                type: 'TimelineAddEntries',
+                entries: [{
+                  entryId: `tweet-${id}`,
+                  content: { itemContent: { tweet_results: { result: focal } } },
+                }],
+              }],
+            },
+          },
+        };
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  try {
+    const output = await captureConsoleLog(async () => {
+      await buildCli().parseAsync([
+        'node',
+        'ft',
+        'materialize',
+        id,
+        '--refresh',
+        '--fetch-media',
+        '--skip-profile-images',
+        '--cookies',
+        'ct0',
+        '--delay-ms',
+        '20',
+        '--json',
+      ]);
+    });
+    const result = JSON.parse(output);
+    assert.equal(result.components.some((row: any) => row.relation === 'post_attached_media' && row.disposition === 'used'), true);
+    assert.deepEqual(methods, ['GET', 'GET', 'HEAD', 'GET']);
+    assert.equal(attemptTimes.length, 4);
+    for (let index = 1; index < attemptTimes.length; index++) {
+      assert.ok(attemptTimes[index] - attemptTimes[index - 1] >= 15);
+    }
+
+    const zeroDelayStart = attemptTimes.length;
+    await captureConsoleLog(async () => {
+      await buildCli().parseAsync([
+        'node',
+        'ft',
+        'materialize',
+        id,
+        '--refresh',
+        '--cookies',
+        'ct0',
+        '--delay-ms',
+        '0',
+        '--json',
+      ]);
+    });
+    const zeroDelayAttempts = attemptTimes.slice(zeroDelayStart);
+    assert.equal(zeroDelayAttempts.length, 2);
+    assert.ok(zeroDelayAttempts[1] - zeroDelayAttempts[0] < 200);
   } finally {
     globalThis.fetch = originalFetch;
     process.env.FT_DATA_DIR = origEnv;
