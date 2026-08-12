@@ -110,3 +110,38 @@ test('canonical hydration rejects unbound component content already present in t
   assert.equal(result.articleText, null);
   assert.equal(result.articleLocator, null);
 });
+
+test('canonical hydration requires explicit archived article provenance and locator binding', () => {
+  for (const source of [
+    archived({
+      articleText: 'Body without a source tweet.',
+      articleSourceTweetId: null,
+      articleLocator: ARTICLE,
+    }),
+    archived({
+      articleText: 'Body without a source locator.',
+      articleSourceTweetId: ROOT,
+      articleLocator: null,
+    }),
+    archived({
+      links: [ARTICLE, 'https://x.com/i/article/1000000000000000000'],
+      articleText: 'Body with ambiguous locator identity.',
+      articleSourceTweetId: ROOT,
+      articleLocator: null,
+    }),
+  ]) {
+    const result = hydrateCanonicalBookmark(source, null);
+    assert.equal(result.articleText, null);
+    assert.equal(result.articleSourceTweetId, null);
+    assert.equal(result.articleLocator, null);
+  }
+
+  const valid = hydrateCanonicalBookmark(archived({
+    articleText: 'Explicitly source-bound archived article body.',
+    articleSourceTweetId: ROOT,
+    articleLocator: ARTICLE,
+  }), null);
+  assert.equal(valid.articleText, 'Explicitly source-bound archived article body.');
+  assert.equal(valid.articleSourceTweetId, ROOT);
+  assert.equal(valid.articleLocator, ARTICLE);
+});

@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { stat, writeFile } from 'node:fs/promises';
+import { realpath, stat, writeFile } from 'node:fs/promises';
 import { ensureDir, pathExists, readJson, readJsonLines, writeJson } from './fs.js';
 import { bookmarkMediaDir, bookmarkMediaManifestPath, twitterBookmarksCachePath } from './paths.js';
 import type { BookmarkRecord } from './types.js';
@@ -45,6 +45,13 @@ export interface MediaFetchProgress {
   currentSourceUrl?: string;
 }
 
+export interface VerifiedDownloadedMediaAsset {
+  bytes: number;
+  sha256: string;
+}
+
+export type MediaVerificationCache = Map<string, VerifiedDownloadedMediaAsset | null>;
+
 interface MediaFetchTarget {
   bookmarkId: string;
   tweetId: string;
@@ -76,6 +83,56 @@ interface CachedMediaResult {
 
 const HOUR_MS = 60 * 60_000;
 const DAY_MS = 24 * HOUR_MS;
+
+function strictlyInside(parentPath: string, childPath: string): boolean {
+  const relative = path.relative(parentPath, childPath);
+  return relative !== ''
+    && relative !== '..'
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative);
+}
+
+export async function verifyDownloadedMediaEntry(
+  entry: MediaFetchEntry,
+  cache?: MediaVerificationCache,
+): Promise<VerifiedDownloadedMediaAsset | null> {
+  if (entry.status !== 'downloaded' || !entry.localPath) return null;
+
+  let verified = cache?.get(entry.localPath);
+  if (verified === undefined) {
+    try {
+      const [mediaRoot, filePath] = await Promise.all([
+        realpath(bookmarkMediaDir()),
+        realpath(entry.localPath),
+      ]);
+      if (!strictlyInside(mediaRoot, filePath)) {
+        verified = null;
+      } else {
+        const file = await stat(filePath);
+        if (!file.isFile()) {
+          verified = null;
+        } else {
+          const hash = createHash('sha256');
+          for await (const chunk of createReadStream(filePath)) hash.update(chunk);
+          const sha256 = hash.digest('hex');
+          const filename = path.basename(filePath);
+          const extension = path.extname(filename);
+          const stem = extension ? filename.slice(0, -extension.length) : filename;
+          const digestFromFilename = stem.match(/(?:^|-)([a-f0-9]{16})$/i)?.[1];
+          verified = digestFromFilename?.toLowerCase() === sha256.slice(0, 16)
+            ? { bytes: file.size, sha256 }
+            : null;
+        }
+      }
+    } catch {
+      verified = null;
+    }
+    cache?.set(entry.localPath, verified);
+  }
+
+  if (!verified || (entry.bytes !== undefined && entry.bytes !== verified.bytes)) return null;
+  return verified;
+}
 
 function mediaAssetKey(tweetId: string, sourceUrl: string, isProfileImage: boolean): string {
   return isProfileImage ? `profile::${sourceUrl}` : `${tweetId}::${sourceUrl}`;
@@ -271,35 +328,10 @@ async function loadReusableDownloadedResults(previous: MediaFetchManifest | null
 }> {
   const associationKeys = new Set<string>();
   const bySourceUrl = new Map<string, CachedMediaResult>();
-  const verifiedFiles = new Map<string, { bytes: number; digest: string } | null>();
+  const verifiedFiles: MediaVerificationCache = new Map();
   for (const entry of previous?.entries ?? []) {
-    if (entry.status !== 'downloaded' || !entry.localPath) continue;
-    try {
-      let verified = verifiedFiles.get(entry.localPath);
-      if (verified === undefined) {
-        const file = await stat(entry.localPath);
-        if (!file.isFile()) {
-          verifiedFiles.set(entry.localPath, null);
-          continue;
-        }
-        const hash = createHash('sha256');
-        for await (const chunk of createReadStream(entry.localPath)) hash.update(chunk);
-        verified = { bytes: file.size, digest: hash.digest('hex').slice(0, 16) };
-        verifiedFiles.set(entry.localPath, verified);
-      }
-      if (!verified || (entry.bytes !== undefined && verified.bytes !== entry.bytes)) continue;
-
-      const filename = path.basename(entry.localPath);
-      const extension = path.extname(filename);
-      const stem = extension ? filename.slice(0, -extension.length) : filename;
-      const digestFromFilename = entry.sourceUrl.includes('/profile_images/')
-        ? stem
-        : stem.startsWith(`${entry.tweetId}-`)
-          ? stem.slice(entry.tweetId.length + 1)
-          : '';
-      if (!/^[a-f0-9]{16}$/i.test(digestFromFilename)
-        || digestFromFilename.toLowerCase() !== verified.digest) continue;
-
+    const verified = await verifyDownloadedMediaEntry(entry, verifiedFiles);
+    if (verified) {
       associationKeys.add(mediaEntryKeyFromEntry(entry));
       if (!bySourceUrl.has(entry.sourceUrl)) {
         bySourceUrl.set(entry.sourceUrl, {
@@ -310,8 +342,6 @@ async function loadReusableDownloadedResults(previous: MediaFetchManifest | null
           fetchedAt: entry.fetchedAt,
         });
       }
-    } catch {
-      // Missing or changed files are not reusable and must be fetched again.
     }
   }
   return { associationKeys, bySourceUrl };

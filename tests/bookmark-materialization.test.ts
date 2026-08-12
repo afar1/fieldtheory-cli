@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -55,7 +55,11 @@ function record(overrides: Partial<BookmarkRecord> = {}): BookmarkRecord {
 
 test('materializeBookmark emits exact components without leaking source-local paths', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'ft-materialize-'));
-  const assetPath = path.join(dir, 'image.jpg');
+  const savedDataDir = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = dir;
+  const mediaDir = path.join(dir, 'media');
+  await mkdir(mediaDir);
+  const assetPath = path.join(mediaDir, '2080296884187652381-9f64a747e1b97f13.jpg');
   await writeFile(assetPath, Buffer.from([1, 2, 3, 4]));
   try {
     const source = record({
@@ -129,6 +133,8 @@ test('materializeBookmark emits exact components without leaking source-local pa
     );
     assert.ok(!JSON.stringify(result).includes(assetPath));
   } finally {
+    if (savedDataDir === undefined) delete process.env.FT_DATA_DIR;
+    else process.env.FT_DATA_DIR = savedDataDir;
     await rm(dir, { recursive: true, force: true });
   }
 });
@@ -211,10 +217,28 @@ test('materializeBookmark leaves every X Article locator unresolved when body id
   assert.equal(result.achieved_depth, 'source-owned root and enumerated components with explicit unresolved depth');
 });
 
+test('materializeBookmark does not infer a missing article locator from a sole root link', async () => {
+  const articleUrl = 'https://x.com/i/article/2042676487711584257';
+  const result = await materializeBookmark(record({
+    links: [articleUrl],
+    articleLocator: null,
+  }));
+
+  const article = result.components.find((row) => row.relation === 'embedded_x_article');
+  assert.equal(article?.source_locator, articleUrl);
+  assert.equal(article?.disposition, 'unresolved');
+  assert.equal(article?.content, null);
+  assert.equal(JSON.stringify(result).includes('Complete X Article body.'), false);
+});
+
 test('materializeBookmark binds poster and video variant to separate exact assets', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'ft-materialize-video-'));
-  const posterPath = path.join(dir, 'poster.jpg');
-  const videoPath = path.join(dir, 'video.mp4');
+  const savedDataDir = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = dir;
+  const mediaDir = path.join(dir, 'media');
+  await mkdir(mediaDir);
+  const posterPath = path.join(mediaDir, '2080296884187652381-9f64a747e1b97f13.jpg');
+  const videoPath = path.join(mediaDir, '2080296884187652381-55e5509f80529982.mp4');
   await writeFile(posterPath, Buffer.from([1, 2, 3, 4]));
   await writeFile(videoPath, Buffer.from([5, 6, 7, 8]));
   try {
@@ -289,6 +313,106 @@ test('materializeBookmark binds poster and video variant to separate exact asset
     assert.match(assets[1].content ?? '', /\"asset_role\":\"video_variant\"/);
     assert.match(assets[1].content ?? '', /\"bitrate\":832000/);
   } finally {
+    if (savedDataDir === undefined) delete process.env.FT_DATA_DIR;
+    else process.env.FT_DATA_DIR = savedDataDir;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('materializeBookmark rejects corrupted, non-addressed, or out-of-custody manifest bytes', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ft-materialize-invalid-assets-'));
+  const savedDataDir = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = dir;
+  const mediaDir = path.join(dir, 'media');
+  await mkdir(mediaDir);
+  const sourceUrl = 'https://pbs.twimg.com/media/root.jpg';
+  const source = record({ mediaObjects: [{ type: 'photo', url: sourceUrl }] });
+  const manifestFor = (localPath: string): MediaFetchManifest => ({
+    schemaVersion: 1,
+    generatedAt: '2026-08-10T12:02:00.000Z',
+    limit: 1,
+    maxBytes: 1024,
+    processed: 1,
+    downloaded: 1,
+    skippedTooLarge: 0,
+    failed: 0,
+    entries: [{
+      bookmarkId: source.id,
+      tweetId: source.tweetId,
+      tweetUrl: source.url,
+      sourceUrl,
+      localPath,
+      contentType: 'image/jpeg',
+      bytes: 4,
+      status: 'downloaded',
+      fetchedAt: '2026-08-10T12:02:00.000Z',
+    }],
+  });
+
+  try {
+    const corrupted = path.join(mediaDir, `${source.tweetId}-9f64a747e1b97f13.jpg`);
+    await writeFile(corrupted, Buffer.from([9, 9, 9, 9]));
+    const nonAddressed = path.join(mediaDir, 'plain-name.jpg');
+    await writeFile(nonAddressed, Buffer.from([1, 2, 3, 4]));
+    const outside = path.join(dir, `${source.tweetId}-9f64a747e1b97f13.jpg`);
+    await writeFile(outside, Buffer.from([1, 2, 3, 4]));
+
+    for (const localPath of [corrupted, nonAddressed, outside]) {
+      const result = await materializeBookmark(source, manifestFor(localPath));
+      assert.equal(
+        result.components.find((row) => row.relation === 'post_attached_media')?.source_asset,
+        null,
+      );
+    }
+  } finally {
+    if (savedDataDir === undefined) delete process.env.FT_DATA_DIR;
+    else process.env.FT_DATA_DIR = savedDataDir;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('materializeBookmark admits verified shared bytes whose filename belongs to another tweet', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ft-materialize-shared-asset-'));
+  const savedDataDir = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = dir;
+  const mediaDir = path.join(dir, 'media');
+  await mkdir(mediaDir);
+  const bytes = Buffer.from([1, 2, 3, 4]);
+  const localPath = path.join(mediaDir, '1111111111111111111-9f64a747e1b97f13.jpg');
+  await writeFile(localPath, bytes);
+  const sourceUrl = 'https://pbs.twimg.com/media/shared.jpg';
+  const source = record({ mediaObjects: [{ type: 'photo', url: sourceUrl }] });
+  const manifest: MediaFetchManifest = {
+    schemaVersion: 1,
+    generatedAt: '2026-08-10T12:02:00.000Z',
+    limit: 1,
+    maxBytes: 1024,
+    processed: 1,
+    downloaded: 1,
+    skippedTooLarge: 0,
+    failed: 0,
+    entries: [{
+      bookmarkId: source.id,
+      tweetId: source.tweetId,
+      tweetUrl: source.url,
+      sourceUrl,
+      localPath,
+      contentType: 'image/jpeg',
+      bytes: 4,
+      status: 'downloaded',
+      fetchedAt: '2026-08-10T12:02:00.000Z',
+    }],
+  };
+
+  try {
+    const result = await materializeBookmark(source, manifest);
+    assert.equal(
+      result.components.find((row) => row.relation === 'post_attached_media')?.source_asset?.sha256,
+      '9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a',
+    );
+  } finally {
+    if (savedDataDir === undefined) delete process.env.FT_DATA_DIR;
+    else process.env.FT_DATA_DIR = savedDataDir;
     await rm(dir, { recursive: true, force: true });
   }
 });

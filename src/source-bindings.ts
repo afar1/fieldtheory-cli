@@ -74,6 +74,8 @@ export function bindArticleEnrichment(
     sourceLocator?: string | null;
   },
 ): string | undefined {
-  if (!enrichment.articleText?.trim() || enrichment.sourceTweetId !== rootTweetId) return undefined;
+  if (!enrichment.articleText?.trim()
+    || enrichment.sourceTweetId !== rootTweetId
+    || !enrichment.sourceLocator) return undefined;
   return bindArticleLocator(sourceLinks, enrichment.sourceLocator);
 }

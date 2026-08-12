@@ -1,9 +1,18 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import type { MediaFetchEntry, MediaFetchManifest } from './bookmark-media.js';
+import {
+  verifyDownloadedMediaEntry,
+  type MediaFetchEntry,
+  type MediaFetchManifest,
+  type MediaVerificationCache,
+} from './bookmark-media.js';
 import type { BookmarkMediaObject, BookmarkRecord, QuotedTweetSnapshot, ThreadTweetSnapshot } from './types.js';
 import type { ExactXRefreshObservation } from './x-materialize.js';
-import { bindArticleLocator, isXArticleLocator, sameSourceLocator } from './source-bindings.js';
+import {
+  bindArticleEnrichment,
+  bindArticleLocator,
+  isXArticleLocator,
+  sameSourceLocator,
+} from './source-bindings.js';
 
 export type MaterializationDisposition =
   | 'used'
@@ -156,19 +165,17 @@ function mediaEntriesFor(
   ));
 }
 
-async function exactAsset(entry: MediaFetchEntry | undefined): Promise<SourceComponent['source_asset']> {
-  if (!entry || entry.status !== 'downloaded' || !entry.localPath) return null;
-  try {
-    const bytes = await readFile(entry.localPath);
-    if (entry.bytes !== undefined && entry.bytes !== bytes.byteLength) return null;
-    return {
-      sha256: sha256(bytes),
-      bytes: bytes.byteLength,
-      content_type: entry.contentType ?? null,
-    };
-  } catch {
-    return null;
-  }
+async function exactAsset(
+  entry: MediaFetchEntry | undefined,
+  verificationCache: MediaVerificationCache,
+): Promise<SourceComponent['source_asset']> {
+  if (!entry) return null;
+  const verified = await verifyDownloadedMediaEntry(entry, verificationCache);
+  return verified ? {
+    sha256: verified.sha256,
+    bytes: verified.bytes,
+    content_type: entry.contentType ?? null,
+  } : null;
 }
 
 async function appendMediaComponents(
@@ -178,6 +185,7 @@ async function appendMediaComponents(
   relationPrefix: string,
   hop: number,
   manifest: MediaFetchManifest | null,
+  verificationCache: MediaVerificationCache,
 ): Promise<void> {
   const entries = mediaEntriesFor(source, manifest);
   const objects = source.mediaObjects ?? [];
@@ -209,7 +217,7 @@ async function appendMediaComponents(
     for (const [assetIndex, candidate] of assets.entries()) {
       const locator = candidate.url!;
       const matchingEntry = entries.find((entry) => entry.sourceUrl === locator);
-      const asset = await exactAsset(matchingEntry);
+      const asset = await exactAsset(matchingEntry, verificationCache);
       target.push(component(
         rootId,
         `${relationPrefix}-media-${objectIndex + 1}-asset-${assetIndex + 1}`,
@@ -251,7 +259,7 @@ async function appendMediaComponents(
 
   for (const [index, locator] of fallbackUrls.entries()) {
     const matchingEntry = entries.find((entry) => entry.sourceUrl === locator);
-    const asset = await exactAsset(matchingEntry);
+    const asset = await exactAsset(matchingEntry, verificationCache);
     target.push(component(
       rootId,
       `${relationPrefix}-fallback-media-${index + 1}`,
@@ -313,6 +321,7 @@ async function appendTweetComponents(
   relation: string,
   hop: number,
   manifest: MediaFetchManifest | null,
+  verificationCache: MediaVerificationCache,
 ): Promise<void> {
   target.push(component(
     rootId,
@@ -325,7 +334,7 @@ async function appendTweetComponents(
     { hop },
   ));
   appendOutboundComponents(target, rootId, source, label, hop + 1);
-  await appendMediaComponents(target, rootId, source, label, hop, manifest);
+  await appendMediaComponents(target, rootId, source, label, hop, manifest, verificationCache);
 }
 
 function quotedSource(value: QuotedTweetSnapshot): SourceTweet {
@@ -363,11 +372,13 @@ export async function materializeBookmark(
 ): Promise<BookmarkMaterialization> {
   const rootId = `x-${sha256(item.tweetId).slice(0, 20)}`;
   const components: SourceComponent[] = [];
+  const verificationCache: MediaVerificationCache = new Map();
   const rootLinks = uniquePublicLinks(item.links ?? []);
-  const recoveredArticleLink = item.articleText
-    && item.articleSourceTweetId === item.tweetId
-      ? bindArticleLocator(rootLinks, item.articleLocator)
-      : undefined;
+  const recoveredArticleLink = bindArticleEnrichment(item.tweetId, rootLinks, {
+    articleText: item.articleText,
+    sourceTweetId: item.articleSourceTweetId,
+    sourceLocator: item.articleLocator,
+  });
   const boundManifest = manifest
     ? { ...manifest, entries: manifest.entries.filter((entry) => entry.bookmarkId === item.id) }
     : null;
@@ -399,7 +410,7 @@ export async function materializeBookmark(
     'used',
     'exact stored root identity recovered',
   ));
-  await appendTweetComponents(components, rootId, rootSource, 'post', 'root_post', 1, boundManifest);
+  await appendTweetComponents(components, rootId, rootSource, 'post', 'root_post', 1, boundManifest, verificationCache);
 
   for (const [index, row] of (item.threadContext ?? []).entries()) {
     await appendTweetComponents(
@@ -410,6 +421,7 @@ export async function materializeBookmark(
       'thread_parent_context',
       1,
       boundManifest,
+      verificationCache,
     );
   }
   for (const [index, row] of (item.threadBelow ?? []).entries()) {
@@ -421,6 +433,7 @@ export async function materializeBookmark(
       'thread_same_author_continuation',
       1,
       boundManifest,
+      verificationCache,
     );
   }
   if (!item.threadExpandedAt) {
@@ -463,6 +476,7 @@ export async function materializeBookmark(
         'quoted_post',
         1,
         boundManifest,
+        verificationCache,
       );
     } else {
       components.push(component(

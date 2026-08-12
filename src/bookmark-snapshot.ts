@@ -21,7 +21,7 @@ function boundArchivedRecord(archived: BookmarkRecord): BookmarkRecord {
       : undefined;
   const articleLocator = bindArticleEnrichment(archived.tweetId, archived.links ?? [], {
     articleText: archived.articleText,
-    sourceTweetId: archived.articleSourceTweetId ?? archived.tweetId,
+    sourceTweetId: archived.articleSourceTweetId,
     sourceLocator: archived.articleLocator,
   });
 

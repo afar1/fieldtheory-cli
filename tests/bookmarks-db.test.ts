@@ -143,6 +143,47 @@ test('buildIndex writes named fields correctly after a direct pre-folder schema 
   }, [fixture]);
 });
 
+test('buildIndex admits raw article content only with explicit root and locator provenance', async () => {
+  const firstArticle = 'https://x.com/i/article/1234567890123456789';
+  const secondArticle = 'https://x.com/i/article/2234567890123456789';
+  const fixtures = [
+    {
+      ...FIXTURES[0],
+      id: '10', tweetId: '10', links: [firstArticle],
+      articleText: 'Missing source tweet.', articleSourceTweetId: null, articleLocator: firstArticle,
+    },
+    {
+      ...FIXTURES[0],
+      id: '11', tweetId: '11', links: [firstArticle],
+      articleText: 'Missing source locator.', articleSourceTweetId: '11', articleLocator: null,
+    },
+    {
+      ...FIXTURES[0],
+      id: '12', tweetId: '12', links: [firstArticle, secondArticle],
+      articleText: 'Ambiguous source locator.', articleSourceTweetId: '12', articleLocator: null,
+    },
+    {
+      ...FIXTURES[0],
+      id: '13', tweetId: '13', links: [firstArticle],
+      articleText: 'Explicitly bound raw article.', articleSourceTweetId: '13', articleLocator: firstArticle,
+    },
+  ];
+
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    for (const id of ['10', '11', '12']) {
+      const invalid = await getBookmarkById(id);
+      assert.equal(invalid?.articleText, null);
+      assert.equal(invalid?.articleSourceTweetId, null);
+      assert.equal(invalid?.articleLocator, null);
+    }
+    const valid = await getBookmarkById('13');
+    assert.equal(valid?.articleText, 'Explicitly bound raw article.');
+    assert.equal(valid?.articleSourceTweetId, '13');
+    assert.equal(valid?.articleLocator, firstArticle);
+  }, fixtures);
+});
+
 test('getBookmarkById and listBookmarks hydrate quoted tweets', async () => {
   const fixtures = [{
     ...FIXTURES[0],

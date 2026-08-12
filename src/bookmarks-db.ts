@@ -456,7 +456,7 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
 
   const rawArticleLocator = bindArticleEnrichment(r.tweetId, r.links ?? [], {
     articleText: r.articleText,
-    sourceTweetId: r.articleSourceTweetId ?? r.tweetId,
+    sourceTweetId: r.articleSourceTweetId,
     sourceLocator: r.articleLocator,
   });
   const preservedArticleLocator = preservedRootMatches
