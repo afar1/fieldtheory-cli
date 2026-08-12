@@ -86,11 +86,12 @@ export async function loadBoundMediaManifest(bookmarkId: string): Promise<MediaF
   return bindManifest(bookmarkId, manifest);
 }
 
-export async function loadCanonicalBookmarkSnapshot(exactId: string): Promise<CanonicalBookmarkSnapshot> {
+/** Load by the response-owned X tweet ID accepted by `ft materialize <id>`. */
+export async function loadCanonicalBookmarkSnapshot(exactTweetId: string): Promise<CanonicalBookmarkSnapshot> {
   const archived = (await readJsonLines<BookmarkRecord>(twitterBookmarksCachePath()))
-    .find((row) => row.tweetId === exactId || row.id === exactId);
-  if (!archived || archived.tweetId !== exactId) {
-    throw new Error(`Archived X bookmark not found: ${exactId}`);
+    .find((row) => row.tweetId === exactTweetId);
+  if (!archived) {
+    throw new Error(`Archived X bookmark not found: ${exactTweetId}`);
   }
 
   const indexed = await pathExists(twitterBookmarksIndexPath())

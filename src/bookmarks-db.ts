@@ -1255,6 +1255,8 @@ export async function updateQuotedTweets(
       'UPDATE bookmarks SET quoted_tweet_json = ? WHERE id = ? AND quoted_status_id = ?',
     );
     for (const record of records) {
+      // A mismatched quote identity intentionally updates zero rows: derived
+      // content must never replace the root-owned quote binding.
       stmt.run([JSON.stringify(record.quotedTweet), record.id, record.quotedTweet.id]);
     }
     stmt.free();
@@ -1314,6 +1316,8 @@ export async function updateArticleContent(
       if (!record.sourceTweetId || !canonicalHttpLocator(record.sourceLocator)) {
         throw new Error(`Refusing unbound article enrichment for bookmark ${record.id}`);
       }
+      // The tweet_id predicate intentionally rejects wrong-root enrichment by
+      // updating zero rows instead of attaching content across identities.
       stmt.run([
         record.articleTitle,
         record.articleText,

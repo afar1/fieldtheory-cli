@@ -78,8 +78,20 @@ function componentId(rootId: string, label: string): string {
   return `${rootId}-${label}-${sha256(label).slice(0, 8)}`.slice(0, 96);
 }
 
+function canonicalJsonValue(value: unknown): unknown {
+  // Materialization payloads are plain JSON values; recursively order object keys
+  // without attempting to serialize runtime objects such as Date, Map, or Set.
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => [key, canonicalJsonValue((value as Record<string, unknown>)[key])]),
+  );
+}
+
 function canonicalJson(value: unknown): string {
-  return JSON.stringify(value, Object.keys(value as Record<string, unknown>).sort());
+  return JSON.stringify(canonicalJsonValue(value));
 }
 
 function component(
@@ -333,6 +345,8 @@ async function appendTweetComponents(
     source.text.trim() ? 'source post text recovered' : 'source post text unavailable',
     { hop },
   ));
+  // Source-owned media stays at its tweet's hop; following an outbound locator
+  // crosses into a destination source and therefore increments traversal depth.
   appendOutboundComponents(target, rootId, source, label, hop + 1);
   await appendMediaComponents(target, rootId, source, label, hop, manifest, verificationCache);
 }

@@ -18,6 +18,7 @@ import {
   parseTweetDetailResponse,
   reduceExactDecimalIdentity,
   tweetUrlEntities,
+  uniqueStrings,
 } from './tweet-snapshots.js';
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
@@ -1484,10 +1485,13 @@ const TWEET_DETAIL_FEATURES = {
 };
 
 export type TweetFetchSource = 'graphql' | 'syndication';
+export type TweetArticleEvidenceStatus = 'absent' | 'resolved' | 'unresolved' | 'invalid';
 
 export interface TweetFetchResult {
   snapshot: QuotedTweetSnapshot | null;
   article?: TweetArticleContent | null;
+  /** Whether the focal response contained no article, one bound article, or unusable article evidence. */
+  articleStatus?: TweetArticleEvidenceStatus;
   status: 'ok' | 'empty' | 'graphql_error' | 'not_found' | 'forbidden' | 'rate_limited' | 'server_error' | 'error';
   httpStatus?: number;
   /**
@@ -1515,12 +1519,20 @@ export function parseTweetResultByRestId(json: any, tweetId: string): QuotedTwee
 
   const urlEntities = tweetUrlEntities(tweet, legacy);
   const noteText = tweet?.note_tweet?.note_tweet_results?.result?.text;
-  const text = expandVisibleUrlEntities(noteText ?? legacy.full_text ?? legacy.text ?? '', urlEntities);
-  if (!text) return null;
+  const responseText = noteText ?? legacy.full_text ?? legacy.text;
+  if (typeof responseText !== 'string') return null;
+  const text = expandVisibleUrlEntities(responseText, urlEntities);
+  const rawMediaEntities = legacy?.extended_entities?.media ?? legacy?.entities?.media;
+  const mediaEntities: any[] = Array.isArray(rawMediaEntities)
+    ? rawMediaEntities.filter((media: any) => media && typeof media === 'object')
+    : [];
+  const media = mediaEntities
+    .map((item: any) => item.media_url_https ?? item.media_url)
+    .filter((url: any): url is string => typeof url === 'string' && url.length > 0);
+  if (!text && media.length === 0) return null;
 
   const userResult = tweet?.core?.user_results?.result;
   const handle = userResult?.core?.screen_name ?? userResult?.legacy?.screen_name;
-  const mediaEntities: any[] = legacy?.extended_entities?.media ?? legacy?.entities?.media ?? [];
   const focalIdentity = reduceExactDecimalIdentity(legacy.id_str, tweet?.rest_id);
   if (focalIdentity.status !== 'ok' || focalIdentity.id !== tweetId) return null;
   const resolvedId = focalIdentity.id;
@@ -1546,7 +1558,7 @@ export function parseTweetResultByRestId(json: any, tweetId: string): QuotedTwee
     authorProfileImageUrl:
       userResult?.avatar?.image_url ?? userResult?.legacy?.profile_image_url_https,
     postedAt: legacy.created_at ?? null,
-    media: mediaEntities.map((m: any) => m.media_url_https ?? m.media_url).filter(Boolean),
+    media,
     mediaObjects: mediaEntities.map((m: any) => ({
       type: m.type,
       url: m.media_url_https ?? m.media_url,
@@ -1623,46 +1635,184 @@ function articleFromCandidate(candidate: any): ArticleContent | null {
   return { title, text, siteName };
 }
 
-function focalArticleCandidates(tweet: any): any[] {
-  return [
-    tweet?.article_results?.result,
-    tweet?.article?.article_results?.result,
-    tweet?.article?.result,
-  ].filter((value) => value && typeof value === 'object');
+type FocalArticleSlot =
+  | { status: 'absent' | 'unresolved' | 'invalid' }
+  | { status: 'candidate'; candidate: Record<string, unknown> };
+
+interface FocalArticleObservation {
+  status: 'resolved' | 'unresolved' | 'invalid';
+  identity?: string;
+  article?: ArticleContent;
+  sourceLocator?: string;
 }
 
-function articleCandidateLocator(candidate: any, sourceLinks: string[]): string | undefined {
+interface TweetArticleEvidence {
+  status: TweetArticleEvidenceStatus;
+  article: TweetArticleContent | null;
+}
+
+function hasOwn(value: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function resultSlot(container: unknown): FocalArticleSlot {
+  if (container === undefined || container === null) return { status: 'absent' };
+  if (typeof container !== 'object') return { status: 'invalid' };
+  if (!hasOwn(container, 'result')) return { status: 'unresolved' };
+  const candidate = (container as { result?: unknown }).result;
+  if (candidate === undefined || candidate === null) return { status: 'absent' };
+  if (typeof candidate !== 'object') return { status: 'invalid' };
+  return { status: 'candidate', candidate: candidate as Record<string, unknown> };
+}
+
+/** Enumerate only direct focal article envelopes; never descend into quotes or other entities. */
+function focalArticleSlots(tweet: any): FocalArticleSlot[] {
+  const slots: FocalArticleSlot[] = [];
+  if (hasOwn(tweet, 'article_results')) slots.push(resultSlot(tweet.article_results));
+
+  if (hasOwn(tweet, 'article')) {
+    const article = tweet.article;
+    if (article === undefined || article === null) {
+      slots.push({ status: 'absent' });
+    } else if (typeof article !== 'object') {
+      slots.push({ status: 'invalid' });
+    } else {
+      let recognized = false;
+      if (hasOwn(article, 'article_results')) {
+        slots.push(resultSlot(article.article_results));
+        recognized = true;
+      }
+      if (hasOwn(article, 'result')) {
+        const candidate = article.result;
+        slots.push(candidate === undefined || candidate === null
+          ? { status: 'absent' }
+          : typeof candidate === 'object'
+            ? { status: 'candidate', candidate: candidate as Record<string, unknown> }
+            : { status: 'invalid' });
+        recognized = true;
+      }
+      if (!recognized) slots.push({ status: 'unresolved' });
+    }
+  }
+  return slots;
+}
+
+function articleCandidateLocator(candidate: any, sourceLinks: string[]): {
+  status: 'ok' | 'unresolved' | 'invalid';
+  identity?: string;
+  locator?: string;
+} {
   const identity = reduceExactDecimalIdentity(candidate?.rest_id, candidate?.article_id, candidate?.id);
-  if (identity.status === 'invalid') return undefined;
+  if (identity.status === 'invalid') return { status: 'invalid' };
+  const focalArticleLinks = sourceLinks.filter(isXArticleLocator);
   if (identity.status === 'ok') {
     const requested = `https://x.com/i/article/${identity.id}`;
-    const focalArticleLinks = sourceLinks.filter(isXArticleLocator);
-    return focalArticleLinks.length > 0
+    const locator = focalArticleLinks.length > 0
       ? bindArticleLocator(focalArticleLinks, requested)
       : requested;
+    return locator
+      ? { status: 'ok', identity: identity.id, locator }
+      : { status: 'unresolved', identity: identity.id };
   }
-  return bindArticleLocator(sourceLinks);
+  const locator = bindArticleLocator(focalArticleLinks);
+  const locatorIdentity = locator ? xArticleIdentity(locator) : null;
+  return locator && locatorIdentity
+    ? { status: 'ok', identity: locatorIdentity, locator }
+    : { status: 'unresolved' };
+}
+
+function observeFocalArticleCandidate(
+  candidate: Record<string, unknown>,
+  sourceLinks: string[],
+): FocalArticleObservation {
+  const locator = articleCandidateLocator(candidate, sourceLinks);
+  if (locator.status === 'invalid') return { status: 'invalid' };
+  const article = articleFromCandidate(candidate);
+  if (!article || locator.status !== 'ok' || !locator.identity || !locator.locator) {
+    return { status: 'unresolved', identity: locator.identity };
+  }
+  return {
+    status: 'resolved',
+    identity: locator.identity,
+    article,
+    sourceLocator: locator.locator,
+  };
+}
+
+function agreedOptional(values: Array<string | undefined>): string | undefined {
+  const nonempty = uniqueStrings(values.filter((value): value is string => Boolean(value?.trim())));
+  return nonempty.length === 1 ? nonempty[0] : undefined;
+}
+
+function reduceFocalArticleEvidence(tweet: any, sourceTweetId: string): TweetArticleEvidence {
+  const sourceLinks = extractExpandedLinks(tweetUrlEntities(tweet, tweet?.legacy));
+  const slots = focalArticleSlots(tweet);
+  if (slots.some((slot) => slot.status === 'invalid')) {
+    return { status: 'invalid', article: null };
+  }
+
+  const observations: FocalArticleObservation[] = slots.flatMap((slot) => {
+    if (slot.status === 'candidate') return [observeFocalArticleCandidate(slot.candidate, sourceLinks)];
+    if (slot.status === 'unresolved') return [{ status: 'unresolved' as const }];
+    return [];
+  });
+  if (observations.some((observation) => observation.status === 'invalid')) {
+    return { status: 'invalid', article: null };
+  }
+  if (observations.length === 0) {
+    return sourceLinks.some(isXArticleLocator)
+      ? { status: 'unresolved', article: null }
+      : { status: 'absent', article: null };
+  }
+
+  const identities = uniqueStrings(
+    observations
+      .map((observation) => observation.identity)
+      .filter((value): value is string => Boolean(value)),
+  );
+  if (identities.length > 1) return { status: 'invalid', article: null };
+  if (observations.some((observation) => !observation.identity)) {
+    return { status: 'unresolved', article: null };
+  }
+
+  const resolved = observations.filter((observation) => observation.status === 'resolved');
+  if (resolved.length === 0 || identities.length !== 1) {
+    return { status: 'unresolved', article: null };
+  }
+  const bodies = uniqueStrings(
+    resolved.map((observation) => observation.article!.text),
+  );
+  if (bodies.length !== 1) return { status: 'invalid', article: null };
+
+  const sourceLocator = resolved[0].sourceLocator;
+  if (!sourceLocator || resolved.some((observation) => observation.sourceLocator !== sourceLocator)) {
+    return { status: 'invalid', article: null };
+  }
+  return {
+    status: 'resolved',
+    article: {
+      sourceTweetId,
+      sourceLocator,
+      title: agreedOptional(resolved.map((observation) => observation.article!.title)) ?? '',
+      text: bodies[0],
+      siteName: agreedOptional(resolved.map((observation) => observation.article!.siteName)),
+    },
+  };
+}
+
+function parseTweetArticleEvidenceByRestId(json: any, requestedTweetId?: string): TweetArticleEvidence {
+  const result = json?.data?.tweetResult?.result;
+  if (!result) return { status: 'invalid', article: null };
+  const tweet = result.tweet ?? result;
+  const focalIdentity = reduceExactDecimalIdentity(tweet?.legacy?.id_str, tweet?.rest_id);
+  if (focalIdentity.status !== 'ok' || (requestedTweetId && focalIdentity.id !== requestedTweetId)) {
+    return { status: 'invalid', article: null };
+  }
+  return reduceFocalArticleEvidence(tweet, focalIdentity.id);
 }
 
 export function parseTweetArticleByRestId(json: any, requestedTweetId?: string): TweetArticleContent | null {
-  const result = json?.data?.tweetResult?.result;
-  if (!result) return null;
-  const tweet = result.tweet ?? result;
-  const focalIdentity = reduceExactDecimalIdentity(tweet?.legacy?.id_str, tweet?.rest_id);
-  if (focalIdentity.status !== 'ok') return null;
-  const sourceTweetId = focalIdentity.id;
-  if (requestedTweetId && sourceTweetId !== requestedTweetId) return null;
-  const sourceLinks = extractExpandedLinks(tweetUrlEntities(tweet, tweet?.legacy));
-
-  for (const candidate of focalArticleCandidates(tweet)) {
-    const article = articleFromCandidate(candidate);
-    const sourceLocator = articleCandidateLocator(candidate, sourceLinks);
-    if (article && sourceLocator && xArticleIdentity(sourceLocator)) {
-      return { ...article, sourceTweetId, sourceLocator };
-    }
-  }
-
-  return null;
+  return parseTweetArticleEvidenceByRestId(json, requestedTweetId).article;
 }
 
 function buildTweetResultByRestIdUrl(tweetId: string): string {
@@ -1729,11 +1879,23 @@ export async function fetchTweetByIdViaGraphQL(
     return { snapshot: null, status: 'not_found', source: 'graphql' };
   }
   const snapshot = parseTweetResultByRestId(json, tweetId);
-  const article = parseTweetArticleByRestId(json, tweetId);
+  const articleEvidence = parseTweetArticleEvidenceByRestId(json, tweetId);
   if (!snapshot || snapshot.id !== tweetId) {
-    return { snapshot: null, article: null, status: 'error', source: 'graphql' };
+    return {
+      snapshot: null,
+      article: null,
+      articleStatus: 'invalid',
+      status: 'error',
+      source: 'graphql',
+    };
   }
-  return { snapshot, article, status: 'ok', source: 'graphql' };
+  return {
+    snapshot,
+    article: articleEvidence.article,
+    articleStatus: articleEvidence.status,
+    status: 'ok',
+    source: 'graphql',
+  };
 }
 
 export type TweetDetailTermination =

@@ -71,6 +71,7 @@ export class XRequestExecutor {
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly retryBackoffMs: NonNullable<XRequestExecutorOptions['retryBackoffMs']>;
   private actualAttempts = 0;
+  private attemptAdmission = Promise.resolve();
 
   constructor(options: XRequestExecutorOptions = {}) {
     this.delayMs = Math.max(0, options.delayMs ?? 0);
@@ -85,11 +86,17 @@ export class XRequestExecutor {
   }
 
   private async beforeAttempt(retryBackoffMs: number): Promise<void> {
-    if (this.actualAttempts > 0) {
-      const waitMs = Math.max(this.delayMs, retryBackoffMs);
-      if (waitMs > 0) await this.sleep(waitMs);
-    }
-    this.actualAttempts += 1;
+    const admitted = this.attemptAdmission.then(async () => {
+      if (this.actualAttempts > 0) {
+        const waitMs = Math.max(this.delayMs, retryBackoffMs);
+        if (waitMs > 0) await this.sleep(waitMs);
+      }
+      this.actualAttempts += 1;
+    });
+    // Propagate a scheduler failure to this caller, but recover the shared queue
+    // so a later logical request can still be admitted and delayed normally.
+    this.attemptAdmission = admitted.catch(() => undefined);
+    await admitted;
   }
 
   private async requestDecoded<T>(
@@ -162,7 +169,7 @@ export class XRequestExecutor {
       }
       return { status: 'error', httpStatus: response.status, attempts: attempt };
     }
-    return { status: 'error', attempts: this.maxAttempts };
+    throw new Error('X request executor exhausted without a terminal attempt result');
   }
 
   async requestJson(input: string | URL | Request, init?: RequestInit): Promise<XJsonResponse> {

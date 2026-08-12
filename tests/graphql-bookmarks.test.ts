@@ -18,6 +18,7 @@ import {
   applyFolderMirror,
   clearFolderEverywhere,
   formatSyncResult,
+  fetchTweetByIdViaGraphQL,
   syncBookmarksGraphQL,
   syncGaps,
 } from '../src/graphql-bookmarks.js';
@@ -29,6 +30,21 @@ import type { BookmarkFolder, BookmarkRecord } from '../src/types.js';
 const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
 function loadFixture(name: string): any {
   return JSON.parse(readFileSync(path.join(FIXTURES_DIR, name), 'utf8'));
+}
+
+async function fetchTweetEvidenceFixture(tweetResult: any) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    data: { tweetResult: { result: tweetResult } },
+  }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })) as typeof fetch;
+  try {
+    return await fetchTweetByIdViaGraphQL('100', 'ct0', undefined, { delayMs: 0 });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 }
 
 const NOW = '2026-03-28T00:00:00.000Z';
@@ -447,6 +463,29 @@ test('parseTweetResultByRestId: extracts note_tweet body from live TweetResultBy
   assert.ok(snapshot.text.startsWith('LLM Knowledge Bases'));
 });
 
+test('parseTweetResultByRestId preserves a response-owned media-only tweet with empty text', () => {
+  const row = makeTweetResult({ legacy: { full_text: '' } });
+  const snapshot = parseTweetResultByRestId({
+    data: { tweetResult: { result: row } },
+  }, '1234567890');
+
+  assert.equal(snapshot?.id, '1234567890');
+  assert.equal(snapshot?.text, '');
+  assert.deepEqual(snapshot?.media, ['https://pbs.twimg.com/media/example.jpg']);
+});
+
+test('parseTweetResultByRestId rejects an empty focal envelope with no response-owned content', () => {
+  for (const media of [[], {}, [null], [{}]]) {
+    const row = makeTweetResult({
+      legacy: { full_text: '', extended_entities: { media } },
+    });
+
+    assert.equal(parseTweetResultByRestId({
+      data: { tweetResult: { result: row } },
+    }, '1234567890'), null);
+  }
+});
+
 test('parseTweetResultByRestId preserves the focal tweet live quote identity', () => {
   const row = makeTweetResult({ legacy: { quoted_status_id_str: '5555555' } });
   const snapshot = parseTweetResultByRestId({
@@ -649,6 +688,126 @@ test('parseTweetArticleByRestId accepts agreeing exact article aliases bound to 
   assert.equal(parseTweetArticleByRestId(fixture, '100')?.sourceLocator, `https://x.com/i/article/${articleId}`);
 });
 
+test('TweetResult article evidence rejects conflicting focal envelopes independent of slot order', async () => {
+  const bodyA = 'This is the first complete focal article body and it is long enough to be source material.';
+  const bodyB = 'This is the second complete focal article body and it deliberately conflicts with the first.';
+  const candidates = [
+    { rest_id: '111', title: 'First', articleBody: bodyA },
+    { rest_id: '222', title: 'Second', articleBody: bodyB },
+  ];
+
+  for (const [first, second] of [candidates, [...candidates].reverse()]) {
+    const tweetResult = {
+      rest_id: '100',
+      legacy: {
+        id_str: '100',
+        full_text: 'Focal post with contradictory article envelopes.',
+        entities: {
+          urls: [
+            { expanded_url: 'https://x.com/i/article/111' },
+            { expanded_url: 'https://x.com/i/article/222' },
+          ],
+        },
+      },
+      article_results: { result: first },
+      article: { article_results: { result: second } },
+    };
+    const fetched = await fetchTweetEvidenceFixture(tweetResult);
+    assert.equal(fetched.status, 'ok');
+    assert.equal(fetched.articleStatus, 'invalid');
+    assert.equal(fetched.article, null);
+    assert.equal(parseTweetArticleByRestId({
+      data: { tweetResult: { result: tweetResult } },
+    }, '100'), null);
+  }
+});
+
+test('TweetResult article evidence resolves convergent focal envelopes deterministically', async () => {
+  const articleId = '111';
+  const body = 'Every complete focal article envelope contains this exact normalized source-owned body.';
+  const candidates = [
+    { rest_id: articleId, title: 'Agreed title', siteName: 'X Articles', articleBody: body },
+    { article_id: articleId, title: 'Different optional title', articleBody: body },
+  ];
+
+  for (const [first, second] of [candidates, [...candidates].reverse()]) {
+    const fetched = await fetchTweetEvidenceFixture({
+      rest_id: '100',
+      legacy: {
+        id_str: '100',
+        full_text: 'Focal post with convergent article envelopes.',
+        entities: { urls: [{ expanded_url: `https://x.com/i/article/${articleId}` }] },
+      },
+      article_results: { result: first },
+      article: {
+        article_results: { result: second },
+        result: null,
+      },
+    });
+    assert.equal(fetched.articleStatus, 'resolved');
+    assert.equal(fetched.article?.sourceLocator, `https://x.com/i/article/${articleId}`);
+    assert.equal(fetched.article?.text, body);
+    assert.equal(fetched.article?.title, '');
+    assert.equal(fetched.article?.siteName, 'X Articles');
+  }
+});
+
+test('TweetResult article evidence has explicit, exhaustive absence and ambiguity states', async () => {
+  const articleId = '111';
+  const articleLink = `https://x.com/i/article/${articleId}`;
+  const body = 'This complete focal article body is deliberately long enough for exact source admission.';
+  const valid = { rest_id: articleId, title: 'Resolved article', articleBody: body };
+  const preview = {
+    rest_id: articleId,
+    title: 'Resolved article',
+    preview_text: 'This is only a preview even though it is long enough to resemble recovered content.',
+  };
+  const cases: Array<{
+    name: string;
+    links?: string[];
+    fields?: Record<string, unknown>;
+    expected: 'absent' | 'resolved' | 'unresolved' | 'invalid';
+  }> = [
+    { name: 'no slots and no locator', expected: 'absent' },
+    { name: 'recognized null slot', fields: { article_results: { result: null } }, expected: 'absent' },
+    { name: 'locator without a body', links: [articleLink], expected: 'unresolved' },
+    { name: 'preview-only candidate', links: [articleLink], fields: { article_results: { result: preview } }, expected: 'unresolved' },
+    { name: 'exact candidate without focal locator', fields: { article_results: { result: valid } }, expected: 'resolved' },
+    { name: 'unknown non-null article shape', fields: { article: { unexpected: true } }, expected: 'unresolved' },
+    { name: 'valid plus null', links: [articleLink], fields: { article_results: { result: valid }, article: { result: null } }, expected: 'resolved' },
+    { name: 'valid plus same-identity preview', links: [articleLink], fields: { article_results: { result: valid }, article: { result: preview } }, expected: 'resolved' },
+    {
+      name: 'same identity with different full bodies',
+      links: [articleLink],
+      fields: {
+        article_results: { result: valid },
+        article: { result: { ...valid, articleBody: `${body} Conflicting edit.` } },
+      },
+      expected: 'invalid',
+    },
+    {
+      name: 'malformed numeric identity',
+      links: [articleLink],
+      fields: { article_results: { result: { ...valid, rest_id: 111 } } },
+      expected: 'invalid',
+    },
+  ];
+
+  for (const testCase of cases) {
+    const fetched = await fetchTweetEvidenceFixture({
+      rest_id: '100',
+      legacy: {
+        id_str: '100',
+        full_text: testCase.name,
+        entities: { urls: (testCase.links ?? []).map((expanded_url) => ({ expanded_url })) },
+      },
+      ...testCase.fields,
+    });
+    assert.equal(fetched.articleStatus, testCase.expected, testCase.name);
+    assert.equal(Boolean(fetched.article), testCase.expected === 'resolved', testCase.name);
+  }
+});
+
 test('parseTweetArticleByRestId: rejects preview-only X Article payloads', () => {
   const fixture = {
     data: {
@@ -658,7 +817,7 @@ test('parseTweetArticleByRestId: rejects preview-only X Article payloads', () =>
           article: {
             article_results: {
               result: {
-              title: 'Preview is not the article',
+                title: 'Preview is not the article',
                 preview_text: 'This preview is deliberately longer than fifty characters but is not a recovered article body.',
                 summary_text: 'This summary is also not source-complete long-form content.',
               },

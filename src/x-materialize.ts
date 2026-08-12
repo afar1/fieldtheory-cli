@@ -56,8 +56,10 @@ function reduceArticleCurrentness(
   record: BookmarkRecord,
   currentLinks: string[],
   liveArticle: TweetFetchResult['article'],
+  liveArticleStatus: TweetFetchResult['articleStatus'],
 ): ArticleCurrentnessReduction {
-  const liveLocator = liveArticle
+  const articleEvidenceStatus = liveArticleStatus ?? (liveArticle ? 'resolved' : 'absent');
+  const liveLocator = articleEvidenceStatus === 'resolved' && liveArticle
     ? bindXArticleEnrichment(record.tweetId, currentLinks, {
         articleText: liveArticle.text,
         sourceTweetId: liveArticle.sourceTweetId,
@@ -98,7 +100,9 @@ function reduceArticleCurrentness(
         articleSourceTweetId: retainOrdinaryEnrichment ? record.tweetId : null,
         articleLocator: retainOrdinaryEnrichment ? reaffirmedLocator ?? null : null,
       },
-      status: liveArticle || currentArticleLinks.length > 0 ? 'unresolved' : 'not_applicable',
+      status: articleEvidenceStatus !== 'absent' || currentArticleLinks.length > 0
+        ? 'unresolved'
+        : 'not_applicable',
     };
   }
   const locatorContradicted = Boolean(
@@ -124,7 +128,7 @@ function reduceArticleCurrentness(
   }
 
   const unresolved = Boolean(
-    liveArticle
+    articleEvidenceStatus !== 'absent'
     || record.articleText
     || record.articleTitle
     || record.articleSite
@@ -150,8 +154,8 @@ function refreshedRoot(
   const snapshot = result.snapshot;
   if (!snapshot) return { record, articleStatus: 'unresolved' };
   const links = snapshot.links ?? record.links ?? [];
-  const liveArticleLocator = result.article
-    && result.article.sourceTweetId === record.tweetId
+  const liveArticleLocator = result.articleStatus === 'resolved'
+    && result.article?.sourceTweetId === record.tweetId
     && result.article.text.trim()
       ? result.article.sourceLocator
       : undefined;
@@ -159,7 +163,7 @@ function refreshedRoot(
     && !links.some((value) => sameSourceLocator(value, liveArticleLocator))
       ? [...links, liveArticleLocator]
       : links;
-  const article = reduceArticleCurrentness(record, articleLinks, result.article);
+  const article = reduceArticleCurrentness(record, articleLinks, result.article, result.articleStatus);
   const liveQuotedStatusId = snapshot.quotedStatusId;
   const quotedStatusId = liveQuotedStatusId ?? record.quotedStatusId;
   const quotedTweet = quotedStatusId && record.quotedTweet?.id === quotedStatusId

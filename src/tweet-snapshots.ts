@@ -103,14 +103,23 @@ function parseThreadTweetResult(
 
   const urlEntities = tweetUrlEntities(tweet, legacy);
   const noteText = tweet?.note_tweet?.note_tweet_results?.result?.text;
-  const text = expandVisibleUrlEntities(noteText ?? legacy.full_text ?? legacy.text ?? '', urlEntities);
+  const responseText = noteText ?? legacy.full_text ?? legacy.text;
+  if (typeof responseText !== 'string') return null;
+  const text = expandVisibleUrlEntities(responseText, urlEntities);
+  const rawMediaEntities = legacy?.extended_entities?.media ?? legacy?.entities?.media;
+  const mediaEntities: any[] = Array.isArray(rawMediaEntities)
+    ? rawMediaEntities.filter((media: any) => media && typeof media === 'object')
+    : [];
+  const media = mediaEntities
+    .map((item: any) => item.media_url_https ?? item.media_url)
+    .filter((url: any): url is string => typeof url === 'string' && url.length > 0);
+  if (!text && media.length === 0) return null;
   const identity = reduceExactDecimalIdentity(legacy.id_str, tweet?.rest_id);
-  if (identity.status !== 'ok' || (expectedId && identity.id !== expectedId) || !text) return null;
+  if (identity.status !== 'ok' || (expectedId && identity.id !== expectedId)) return null;
   const resolvedId = identity.id;
 
   const userResult = tweet?.core?.user_results?.result;
   const handle = userResult?.core?.screen_name ?? userResult?.legacy?.screen_name;
-  const mediaEntities: any[] = legacy?.extended_entities?.media ?? legacy?.entities?.media ?? [];
 
   return {
     id: resolvedId,
@@ -120,7 +129,7 @@ function parseThreadTweetResult(
     authorProfileImageUrl:
       userResult?.avatar?.image_url ?? userResult?.legacy?.profile_image_url_https,
     postedAt: legacy.created_at ?? null,
-    media: mediaEntities.map((m: any) => m.media_url_https ?? m.media_url).filter(Boolean),
+    media,
     mediaObjects: mediaEntities.map((m: any) => ({
       type: m.type,
       url: m.media_url_https ?? m.media_url,

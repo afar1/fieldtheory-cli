@@ -942,6 +942,102 @@ test('refreshExactXBookmark remains partial when the current root identifies an 
   }
 });
 
+test('refreshExactXBookmark cannot certify ambiguous article envelopes without focal locators', async () => {
+  const originalFetch = globalThis.fetch;
+  let rootResult: any;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      return new Response(JSON.stringify({ data: { tweetResult: { result: rootResult } } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify(detailResponse([tweet('100', 'Current focal root.')])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  const body = 'This is a complete article body that must never be admitted without focal locator custody.';
+  const cases = [
+    {
+      name: 'conflicting exact candidates',
+      fields: {
+        article_results: { result: { rest_id: '111', articleBody: body } },
+        article: { result: { rest_id: '222', articleBody: `${body} Different.` } },
+      },
+    },
+    {
+      name: 'unknown non-null focal article shape',
+      fields: { article: { unsupported_article_payload: { id: '111' } } },
+    },
+  ];
+
+  try {
+    for (const testCase of cases) {
+      rootResult = {
+        ...tweet('100', `Current root: ${testCase.name}.`),
+        ...testCase.fields,
+      };
+      const result = await refreshExactXBookmark(archived(), {
+        csrfToken: 'ct0',
+        delayMs: 0,
+        now: '2026-08-12T00:00:00.000Z',
+      });
+      assert.equal(result.observation.status, 'partial', testCase.name);
+      assert.equal(result.observation.article_status, 'unresolved', testCase.name);
+      assert.equal(result.record.articleText, null, testCase.name);
+      assert.equal(result.record.threadExpandedAt, undefined, testCase.name);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('refreshExactXBookmark admits one response-owned exact article identity without a focal link', async () => {
+  const originalFetch = globalThis.fetch;
+  const body = 'This response-owned exact article body has one unambiguous decimal-string article identity.';
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      return new Response(JSON.stringify({
+        data: {
+          tweetResult: {
+            result: {
+              ...tweet('100', 'Current root with response-owned article identity.'),
+              article_results: { result: { rest_id: '111', articleBody: body } },
+            },
+          },
+        },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify(detailResponse([tweet('100', 'Current focal root.')])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  try {
+    const result = await refreshExactXBookmark(archived(), {
+      csrfToken: 'ct0',
+      delayMs: 0,
+      now: '2026-08-12T00:00:00.000Z',
+    });
+    assert.equal(result.observation.status, 'complete');
+    assert.equal(result.observation.article_status, 'ok');
+    assert.equal(result.record.articleText, body);
+    assert.equal(result.record.articleLocator, 'https://x.com/i/article/111');
+    assert.deepEqual(result.record.links, ['https://x.com/i/article/111']);
+    assert.equal(result.record.threadExpandedAt, '2026-08-12T00:00:00.000Z');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('TweetDetail recognizes every supported continuation cursor location', () => {
   const entries = [
     { entryId: 'cursor-bottom-a', content: { value: 'BOTTOM' } },
@@ -1047,6 +1143,34 @@ test('TweetDetail fails closed on a tweet envelope with no response-owned result
   }
 });
 
+test('TweetDetail retains a response-owned media-only focal tweet with empty text', () => {
+  const mediaOnly: any = tweet('100', '');
+  mediaOnly.legacy.extended_entities = {
+    media: [{
+      type: 'photo',
+      media_url_https: 'https://pbs.twimg.com/media/example.jpg',
+    }],
+  };
+
+  const parsed = parseTweetDetailResponse(detailResponse([mediaOnly]));
+  assert.equal(parsed.sawUnparseableTweet, false);
+  assert.equal(parsed.tweets.length, 1);
+  assert.equal(parsed.tweets[0].id, '100');
+  assert.equal(parsed.tweets[0].text, '');
+  assert.deepEqual(parsed.tweets[0].media, ['https://pbs.twimg.com/media/example.jpg']);
+});
+
+test('TweetDetail rejects an empty focal envelope with no response-owned content', () => {
+  for (const media of [undefined, {}, [null], [{}]]) {
+    const contentless: any = tweet('100', '');
+    if (media !== undefined) contentless.legacy.extended_entities = { media };
+    const parsed = parseTweetDetailResponse(detailResponse([contentless]));
+    assert.equal(parsed.tweets.length, 0);
+    assert.equal(parsed.sawUnparseableTweet, true);
+    assert.deepEqual(parsed.parserGaps, ['unparseable_entry']);
+  }
+});
+
 test('TweetDetail fails closed on malformed or contradictory tweet identity aliases', () => {
   for (const row of [
     { ...tweet('100', 'Current root.'), rest_id: '999' },
@@ -1087,6 +1211,35 @@ test('TweetDetail fails closed on an unconsumed module item beside a valid focal
   });
   assert.equal(parsed.tweets.some((row) => row.id === '100'), true);
   assert.deepEqual(parsed.parserGaps, ['unparseable_entry']);
+});
+
+test('TweetDetail records a module tombstone as unavailable with the correct typed gap', () => {
+  const parsed = parseTweetDetailResponse({
+    data: {
+      threaded_conversation_with_injections_v2: {
+        instructions: [{
+          type: 'TimelineAddEntries',
+          entries: [{
+            entryId: 'conversation-module-1',
+            content: {
+              items: [{
+                entryId: 'module-item-unavailable',
+                item: {
+                  itemContent: {
+                    tweet_results: { result: { __typename: 'TweetTombstone' } },
+                  },
+                },
+              }],
+            },
+          }],
+        }],
+      },
+    },
+  });
+
+  assert.equal(parsed.sawUnavailableTweet, true);
+  assert.equal(parsed.sawUnparseableTweet, false);
+  assert.deepEqual(parsed.parserGaps, ['unavailable_tweet']);
 });
 
 test('TweetDetail fails closed on an unknown instruction without entries', () => {

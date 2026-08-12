@@ -322,75 +322,131 @@ function isCoveredEntry(entry: MediaFetchEntry, maxBytes: number, retryFailed: b
   return typeof entry.bytes === 'number' && !Number.isNaN(entry.bytes) && entry.bytes > maxBytes;
 }
 
-async function loadReusableDownloadedResults(previous: MediaFetchManifest | null): Promise<{
-  associationKeys: Set<string>;
+async function selectMediaCandidates(
+  bookmarks: BookmarkRecord[],
+  previous: MediaFetchManifest | null,
+  limit: number,
+  maxBytes: number,
+  retryFailed: boolean,
+  nowMs: number,
+  skipProfileImages: boolean,
+): Promise<{
+  candidates: BookmarkRecord[];
+  coveredAssetKeys: Set<string>;
+  coveredProfileImageUrls: Set<string>;
   bySourceUrl: Map<string, CachedMediaResult>;
 }> {
-  const associationKeys = new Set<string>();
+  const coveredAssetKeys = buildNonDownloadedCoveredAssetKeys(previous, maxBytes, retryFailed, nowMs);
+  const coveredProfileImageUrls = buildNonDownloadedCoveredProfileImageUrls(previous, maxBytes, retryFailed, nowMs);
   const bySourceUrl = new Map<string, CachedMediaResult>();
   const verifiedFiles: MediaVerificationCache = new Map();
+  const downloadedByAssociation = new Map<string, MediaFetchEntry>();
+  const downloadedBySourceUrl = new Map<string, MediaFetchEntry[]>();
   for (const entry of previous?.entries ?? []) {
-    const verified = await verifyDownloadedMediaEntry(entry, verifiedFiles);
-    if (verified) {
-      associationKeys.add(mediaEntryKeyFromEntry(entry));
-      if (!bySourceUrl.has(entry.sourceUrl)) {
-        bySourceUrl.set(entry.sourceUrl, {
-          localPath: entry.localPath,
-          contentType: entry.contentType,
-          bytes: verified.bytes,
-          status: 'downloaded',
-          fetchedAt: entry.fetchedAt,
-        });
-      }
-    }
+    if (entry.status !== 'downloaded') continue;
+    downloadedByAssociation.set(mediaEntryKeyFromEntry(entry), entry);
+    const sourceEntries = downloadedBySourceUrl.get(entry.sourceUrl) ?? [];
+    sourceEntries.push(entry);
+    downloadedBySourceUrl.set(entry.sourceUrl, sourceEntries);
   }
-  return { associationKeys, bySourceUrl };
+
+  const admitReusable = async (entry: MediaFetchEntry): Promise<boolean> => {
+    const verified = await verifyDownloadedMediaEntry(entry, verifiedFiles);
+    if (!verified) return false;
+    if (!bySourceUrl.has(entry.sourceUrl)) {
+      bySourceUrl.set(entry.sourceUrl, {
+        localPath: entry.localPath,
+        contentType: entry.contentType,
+        bytes: verified.bytes,
+        status: 'downloaded',
+        fetchedAt: entry.fetchedAt,
+      });
+    }
+    return true;
+  };
+
+  const admitSource = async (sourceUrl: string): Promise<boolean> => {
+    if (bySourceUrl.has(sourceUrl)) return true;
+    for (const entry of downloadedBySourceUrl.get(sourceUrl) ?? []) {
+      if (await admitReusable(entry)) return true;
+    }
+    return false;
+  };
+
+  const candidates: BookmarkRecord[] = [];
+  if (limit === 0) {
+    return {
+      candidates,
+      coveredAssetKeys,
+      coveredProfileImageUrls,
+      bySourceUrl,
+    };
+  }
+  for (const bookmark of bookmarks) {
+    if (!hasMediaCandidate(bookmark)) continue;
+    let pending = false;
+    const targets = resolveMediaTargets(bookmark, coveredProfileImageUrls, skipProfileImages);
+    for (const { bookmarkId, tweetId, sourceUrl, isProfileImage } of targets) {
+      if (isProfileImage) {
+        if (await admitSource(sourceUrl)) {
+          coveredProfileImageUrls.add(sourceUrl);
+        } else {
+          pending = true;
+        }
+        continue;
+      }
+
+      const key = mediaAssociationKey(bookmarkId, tweetId, sourceUrl, false);
+      if (coveredAssetKeys.has(key)) continue;
+      const association = downloadedByAssociation.get(key);
+      if (association && await admitReusable(association)) {
+        coveredAssetKeys.add(key);
+        continue;
+      }
+      // Reusable bytes avoid HTTP, but this root/tweet association remains pending
+      // until applyCachedResult writes its own custody entry into the manifest.
+      await admitSource(sourceUrl);
+      pending = true;
+    }
+    if (pending) candidates.push(bookmark);
+    if (candidates.length >= limit) break;
+  }
+  return {
+    candidates,
+    coveredAssetKeys,
+    coveredProfileImageUrls,
+    bySourceUrl,
+  };
 }
 
-function buildCoveredAssetKeys(
+function buildNonDownloadedCoveredAssetKeys(
   previous: MediaFetchManifest | null,
   maxBytes: number,
   retryFailed: boolean,
   nowMs: number,
-  verifiedDownloadedAssociations: Set<string>,
 ): Set<string> {
   return new Set(
     (previous?.entries ?? [])
       .filter((entry) => !entry.sourceUrl.includes('/profile_images/'))
-      .filter((entry) => entry.status === 'downloaded'
-        ? verifiedDownloadedAssociations.has(mediaEntryKeyFromEntry(entry))
-        : isCoveredEntry(entry, maxBytes, retryFailed, nowMs))
+      .filter((entry) => entry.status !== 'downloaded')
+      .filter((entry) => isCoveredEntry(entry, maxBytes, retryFailed, nowMs))
       .map(mediaEntryKeyFromEntry),
   );
 }
 
-function buildCoveredProfileImageUrls(
+function buildNonDownloadedCoveredProfileImageUrls(
   previous: MediaFetchManifest | null,
   maxBytes: number,
   retryFailed: boolean,
   nowMs: number,
-  verifiedDownloadedAssociations: Set<string>,
 ): Set<string> {
   return new Set(
     (previous?.entries ?? [])
       .filter((entry) => entry.sourceUrl.includes('/profile_images/'))
-      .filter((entry) => entry.status === 'downloaded'
-        ? verifiedDownloadedAssociations.has(mediaEntryKeyFromEntry(entry))
-        : isCoveredEntry(entry, maxBytes, retryFailed, nowMs))
+      .filter((entry) => entry.status !== 'downloaded')
+      .filter((entry) => isCoveredEntry(entry, maxBytes, retryFailed, nowMs))
       .map((entry) => entry.sourceUrl),
   );
-}
-
-function hasPendingMediaTarget(
-  bookmark: BookmarkRecord,
-  coveredAssetKeys: Set<string>,
-  coveredProfileImageUrls: Set<string>,
-  skipProfileImages: boolean,
-): boolean {
-  return resolveMediaTargets(bookmark, coveredProfileImageUrls, skipProfileImages).some(({ bookmarkId, tweetId, sourceUrl, isProfileImage }) => {
-    if (isProfileImage) return true;
-    return !coveredAssetKeys.has(mediaAssociationKey(bookmarkId, tweetId, sourceUrl, false));
-  });
 }
 
 export async function fetchBookmarkMediaBatch(
@@ -409,28 +465,23 @@ export async function fetchBookmarkMediaBatch(
   await ensureDir(mediaDir);
 
   const previous = await loadManifest();
-  const reusable = await loadReusableDownloadedResults(previous);
-  const coveredAssetKeys = buildCoveredAssetKeys(
-    previous,
-    maxBytes,
-    retryFailed,
-    nowMs,
-    reusable.associationKeys,
-  );
-  const coveredProfileImageUrls = buildCoveredProfileImageUrls(
-    previous,
-    maxBytes,
-    retryFailed,
-    nowMs,
-    reusable.associationKeys,
-  );
   const bookmarks = options.records ?? await readJsonLines<BookmarkRecord>(twitterBookmarksCachePath());
-  const candidates = bookmarks
-    .filter(hasMediaCandidate)
-    .filter((bookmark) => hasPendingMediaTarget(bookmark, coveredAssetKeys, coveredProfileImageUrls, skipProfileImages))
-    .slice(0, limit);
+  const selected = await selectMediaCandidates(
+    bookmarks,
+    previous,
+    limit,
+    maxBytes,
+    retryFailed,
+    nowMs,
+    skipProfileImages,
+  );
+  const {
+    candidates,
+    coveredAssetKeys,
+    coveredProfileImageUrls,
+    bySourceUrl: cachedResultsBySourceUrl,
+  } = selected;
   const entriesByKey = new Map((previous?.entries ?? []).map((entry) => [mediaEntryKeyFromEntry(entry), entry]));
-  const cachedResultsBySourceUrl = reusable.bySourceUrl;
 
   let downloaded = 0;
   let skippedTooLarge = 0;

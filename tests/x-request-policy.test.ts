@@ -37,6 +37,72 @@ test('one XRequestExecutor schedules across logical helper boundaries', async ()
   assert.deepEqual(sleeps, [25]);
 });
 
+test('one XRequestExecutor serializes admission for concurrent logical callers', async () => {
+  const sleepReleases: Array<() => void> = [];
+  const calls: string[] = [];
+  const executor = new XRequestExecutor({
+    delayMs: 25,
+    fetchImpl: (async (input: string | URL | Request) => {
+      calls.push(String(input));
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch,
+    sleep: async () => new Promise<void>((resolve) => { sleepReleases.push(resolve); }),
+  });
+
+  const pending = Promise.all([
+    executor.requestJson('https://x.com/first'),
+    executor.requestJson('https://x.com/second'),
+    executor.requestJson('https://x.com/third'),
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(calls, ['https://x.com/first']);
+  assert.equal(sleepReleases.length, 1);
+
+  sleepReleases.shift()!();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(calls, ['https://x.com/first', 'https://x.com/second']);
+  assert.equal(sleepReleases.length, 1);
+
+  sleepReleases.shift()!();
+  const results = await pending;
+  assert.deepEqual(calls, [
+    'https://x.com/first',
+    'https://x.com/second',
+    'https://x.com/third',
+  ]);
+  assert.equal(results.every((result) => result.status === 'ok'), true);
+  assert.equal(executor.attemptCount, 3);
+});
+
+test('attempt admission recovers without counting a rejected injected wait as an HTTP attempt', async () => {
+  let calls = 0;
+  let waits = 0;
+  const executor = new XRequestExecutor({
+    delayMs: 25,
+    fetchImpl: (async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch,
+    sleep: async () => {
+      waits += 1;
+      if (waits === 1) throw new Error('injected scheduler failure');
+    },
+  });
+
+  assert.equal((await executor.requestJson('https://x.com/first')).status, 'ok');
+  await assert.rejects(
+    executor.requestJson('https://x.com/not-attempted'),
+    /injected scheduler failure/,
+  );
+  assert.equal(executor.attemptCount, 1);
+  assert.equal(calls, 1);
+
+  assert.equal((await executor.requestJson('https://x.com/recovered')).status, 'ok');
+  assert.equal(executor.attemptCount, 2);
+  assert.equal(calls, 2);
+  assert.equal(waits, 2);
+});
+
 test('XRequestExecutor maps malformed successful bodies to a terminal decoding error', async () => {
   const executor = new XRequestExecutor({
     fetchImpl: (async () => new Response('<html>not json</html>', { status: 200 })) as typeof fetch,
@@ -62,6 +128,7 @@ test('XRequestExecutor reports nonempty or malformed GraphQL errors without disc
   for (const errors of [
     [{ message: 'partial branch unavailable' }],
     { message: 'malformed GraphQL errors shape' },
+    null,
   ]) {
     const json = { data: { focal: { id: '100' } }, errors };
     const executor = new XRequestExecutor({

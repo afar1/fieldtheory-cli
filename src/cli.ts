@@ -1371,10 +1371,14 @@ export function buildCli() {
 
       let manifest = snapshot.manifest;
       if (options.fetchMedia) {
+        const requestedMediaMaxBytes = Number(options.mediaMaxBytes);
+        const mediaMaxBytes = Number.isFinite(requestedMediaMaxBytes)
+          ? Math.max(0, requestedMediaMaxBytes)
+          : DEFAULT_MEDIA_MAX_BYTES;
         await fetchBookmarkMediaBatch(requestExecutor!, {
           records: [record],
           limit: 1,
-          maxBytes: Number(options.mediaMaxBytes) || DEFAULT_MEDIA_MAX_BYTES,
+          maxBytes: mediaMaxBytes,
           skipProfileImages: Boolean(options.skipProfileImages),
         });
         manifest = await loadBoundMediaManifest(record.id);
