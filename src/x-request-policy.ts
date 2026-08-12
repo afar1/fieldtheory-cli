@@ -1,5 +1,6 @@
 export type XRequestStatus =
   | 'ok'
+  | 'graphql_error'
   | 'not_found'
   | 'forbidden'
   | 'rate_limited'
@@ -9,6 +10,7 @@ export type XRequestStatus =
 export interface XJsonResponse {
   status: XRequestStatus;
   json?: unknown;
+  graphqlErrors?: unknown;
   httpStatus?: number;
   attempts: number;
 }
@@ -119,5 +121,20 @@ export class XRequestExecutor {
       return { status: 'error', httpStatus: response.status, attempts: attempt };
     }
     return { status: 'error', attempts: this.maxAttempts };
+  }
+
+  async requestGraphqlJson(input: string | URL | Request, init?: RequestInit): Promise<XJsonResponse> {
+    const response = await this.requestJson(input, init);
+    if (response.status !== 'ok') return response;
+    if (!response.json || typeof response.json !== 'object' || !Object.hasOwn(response.json, 'errors')) {
+      return response;
+    }
+    const errors = (response.json as { errors?: unknown }).errors;
+    if (Array.isArray(errors) && errors.length === 0) return response;
+    return {
+      ...response,
+      status: 'graphql_error',
+      graphqlErrors: errors,
+    };
   }
 }

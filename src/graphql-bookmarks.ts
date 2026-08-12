@@ -1487,7 +1487,7 @@ export type TweetFetchSource = 'graphql' | 'syndication';
 export interface TweetFetchResult {
   snapshot: QuotedTweetSnapshot | null;
   article?: TweetArticleContent | null;
-  status: 'ok' | 'empty' | 'not_found' | 'forbidden' | 'rate_limited' | 'server_error' | 'error';
+  status: 'ok' | 'empty' | 'graphql_error' | 'not_found' | 'forbidden' | 'rate_limited' | 'server_error' | 'error';
   httpStatus?: number;
   /**
    * Which backend produced this result. `'graphql'` is authoritative for
@@ -1690,7 +1690,7 @@ export async function fetchTweetByIdViaGraphQL(
   options: { executor?: XRequestExecutor; delayMs?: number } = {},
 ): Promise<TweetFetchResult> {
   const executor = options.executor ?? new XRequestExecutor({ delayMs: options.delayMs });
-  const response = await executor.requestJson(buildTweetResultByRestIdUrl(tweetId), {
+  const response = await executor.requestGraphqlJson(buildTweetResultByRestIdUrl(tweetId), {
     headers: buildHeaders(csrfToken, cookieHeader),
   });
   if (response.status !== 'ok') {
@@ -1793,11 +1793,13 @@ export async function fetchTweetDetailViaGraphQL(
 
   for (let page = 0; page < maxPages && pendingCursors.length > 0; page++) {
     const cursor = pendingCursors.shift();
-    const response = await executor.requestJson(buildTweetDetailUrl(tweetId, cursor), {
+    const response = await executor.requestGraphqlJson(buildTweetDetailUrl(tweetId, cursor), {
       headers: buildHeaders(csrfToken, cookieHeader),
     });
     if (response.status !== 'ok') {
-      if (response.status === 'error' && response.httpStatus && response.httpStatus >= 200 && response.httpStatus < 300) {
+      if (response.status === 'graphql_error') {
+        parserGaps.add('graphql_errors');
+      } else if (response.status === 'error' && response.httpStatus && response.httpStatus >= 200 && response.httpStatus < 300) {
         parserGaps.add('malformed_json');
       }
       return failedTweetDetailResult(

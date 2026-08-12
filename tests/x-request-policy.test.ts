@@ -46,3 +46,41 @@ test('XRequestExecutor maps malformed successful bodies to a terminal decoding e
   assert.equal(result.httpStatus, 200);
   assert.equal(result.attempts, 1);
 });
+
+test('XRequestExecutor keeps GraphQL semantics out of generic JSON decoding', async () => {
+  const executor = new XRequestExecutor({
+    fetchImpl: (async () => new Response(JSON.stringify({ errors: ['application field'], ok: true }), {
+      status: 200,
+    })) as typeof fetch,
+  });
+  const result = await executor.requestJson('https://example.com/not-graphql');
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.json, { errors: ['application field'], ok: true });
+});
+
+test('XRequestExecutor reports nonempty or malformed GraphQL errors without discarding partial data', async () => {
+  for (const errors of [
+    [{ message: 'partial branch unavailable' }],
+    { message: 'malformed GraphQL errors shape' },
+  ]) {
+    const json = { data: { focal: { id: '100' } }, errors };
+    const executor = new XRequestExecutor({
+      fetchImpl: (async () => new Response(JSON.stringify(json), { status: 200 })) as typeof fetch,
+    });
+    const result = await executor.requestGraphqlJson('https://x.com/i/api/graphql/test');
+    assert.equal(result.status, 'graphql_error');
+    assert.deepEqual(result.json, json);
+    assert.deepEqual(result.graphqlErrors, errors);
+    assert.equal(result.httpStatus, 200);
+  }
+});
+
+test('XRequestExecutor accepts an explicitly empty GraphQL errors list', async () => {
+  const executor = new XRequestExecutor({
+    fetchImpl: (async () => new Response(JSON.stringify({ data: { ok: true }, errors: [] }), {
+      status: 200,
+    })) as typeof fetch,
+  });
+  const result = await executor.requestGraphqlJson('https://x.com/i/api/graphql/test');
+  assert.equal(result.status, 'ok');
+});
