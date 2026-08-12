@@ -455,6 +455,7 @@ test('parseTweetArticleByRestId: extracts X Article rich-text content', () => {
           legacy: {
             id_str: '2042685676949270724',
             full_text: 'x.com/i/article/2042...',
+            entities: { urls: [{ expanded_url: 'https://x.com/i/article/2042676487711584257' }] },
           },
           article_results: {
             result: {
@@ -473,6 +474,8 @@ test('parseTweetArticleByRestId: extracts X Article rich-text content', () => {
   const article = parseTweetArticleByRestId(fixture);
   assert.ok(article);
   assert.equal(article.title, 'How agents should use context');
+  assert.equal(article.sourceTweetId, '2042685676949270724');
+  assert.equal(article.sourceLocator, 'https://x.com/i/article/2042676487711584257');
   assert.match(article.text, /Context discipline/);
   assert.match(article.text, /useful body lives in the X Article payload/);
 });
@@ -486,6 +489,7 @@ test('parseTweetArticleByRestId: extracts current X Article content_state shape'
           legacy: {
             id_str: '2045577435484221722',
             full_text: 'x.com/i/article/2045...',
+            entities: { urls: [{ expanded_url: 'https://x.com/i/article/2045577000000000000' }] },
           },
           article: {
             article_results: {
@@ -522,9 +526,45 @@ test('parseTweetArticleByRestId: rejects preview-only X Article payloads', () =>
           article: {
             article_results: {
               result: {
-                title: 'Preview is not the article',
+              title: 'Preview is not the article',
                 preview_text: 'This preview is deliberately longer than fifty characters but is not a recovered article body.',
                 summary_text: 'This summary is also not source-complete long-form content.',
+              },
+            },
+          },
+          legacy: {
+            id_str: '2045577435484221722',
+            full_text: 'x.com/i/article/2045...',
+            entities: { urls: [{ expanded_url: 'https://x.com/i/article/2045577000000000000' }] },
+          },
+        },
+      },
+    },
+  };
+
+  assert.equal(parseTweetArticleByRestId(fixture), null);
+});
+
+test('parseTweetArticleByRestId never attaches a quoted tweet article to the focal tweet', () => {
+  const fixture = {
+    data: {
+      tweetResult: {
+        result: {
+          rest_id: '100',
+          legacy: { id_str: '100', full_text: 'Root quoting an article.', entities: { urls: [] } },
+          quoted_status_result: {
+            result: {
+              rest_id: '200',
+              legacy: {
+                id_str: '200',
+                full_text: 'Quoted article.',
+                entities: { urls: [{ expanded_url: 'https://x.com/i/article/300' }] },
+              },
+              article_results: {
+                result: {
+                  title: 'Quoted article',
+                  articleBody: 'This is a sufficiently long quoted article body that must never bind to the focal root.',
+                },
               },
             },
           },
@@ -533,7 +573,7 @@ test('parseTweetArticleByRestId: rejects preview-only X Article payloads', () =>
     },
   };
 
-  assert.equal(parseTweetArticleByRestId(fixture), null);
+  assert.equal(parseTweetArticleByRestId(fixture, '100'), null);
 });
 
 test('parseTweetResultByRestId: returns null on tombstone / unavailable tweets', () => {
@@ -574,6 +614,8 @@ test('syncGaps: enriches X Article bookmarks through TweetResult payload', async
             title: 'How agents should use context',
             text: 'The article body is the useful content. It should not be lost behind an X Article link.',
             siteName: 'X Articles',
+            sourceTweetId: tweetId,
+            sourceLocator: 'https://x.com/i/article/2042676487711584257',
           },
           status: 'ok',
           source: 'graphql',
@@ -633,6 +675,39 @@ test('syncGaps: reports X Article when fallback only returns tweet preview', asy
     const refreshed = await getBookmarkById('2042685676949270724');
     assert.ok(refreshed);
     assert.equal(refreshed.articleText, null);
+  }, [xArticle]);
+});
+
+test('syncGaps: refuses to persist an article bound to a quoted or unrelated tweet', async () => {
+  const xArticle: BookmarkRecord = {
+    id: '2042685676949270724',
+    tweetId: '2042685676949270724',
+    url: 'https://x.com/danveloper/status/2042685676949270724',
+    text: 'x.com/i/article/2042...',
+    syncedAt: NOW,
+    links: ['https://x.com/i/article/2042676487711584257'],
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    const result = await syncGaps({
+      tweetFetcher: async (tweetId) => ({
+        snapshot: { id: tweetId, text: xArticle.text, url: xArticle.url },
+        article: {
+          title: 'Quoted article',
+          text: 'This body belongs to a quoted tweet and must not be stored under the focal bookmark.',
+          sourceTweetId: '2042685676949270000',
+          sourceLocator: 'https://x.com/i/article/2042676487711584257',
+        },
+        status: 'ok',
+        source: 'graphql',
+      }),
+    });
+
+    assert.equal(result.articlesEnriched, 0);
+    assert.equal(result.failed, 1);
+    assert.match(result.failures[0].reason, /did not bind/);
+    assert.equal((await getBookmarkById(xArticle.id))?.articleText, null);
   }, [xArticle]);
 });
 

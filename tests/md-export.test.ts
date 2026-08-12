@@ -81,6 +81,8 @@ test('exportBookmarks: includes enriched article content for X Article bookmarks
     await updateArticleContent([
       {
         id: '2042685676949270724',
+        sourceTweetId: '2042685676949270724',
+        sourceLocator: 'http://x.com/i/article/2042676487711584257',
         articleTitle: 'How agents should use context',
         articleText: 'The article body is the useful content. It should not be lost behind an X Article link.',
         articleSite: 'X Articles',
@@ -143,6 +145,8 @@ test('exportBookmarks: changed mode rewrites only stale enriched markdown', asyn
     await updateArticleContent([
       {
         id: '2042685676949270724',
+        sourceTweetId: '2042685676949270724',
+        sourceLocator: 'http://x.com/i/article/2042676487711584257',
         articleTitle: 'How agents should use context',
         articleText: 'The article body was added after the first markdown export.',
         articleSite: 'X Articles',

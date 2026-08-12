@@ -274,6 +274,7 @@ export interface TweetDetailParseResult {
   sawTweetResult: boolean;
   sawUnavailableTweet: boolean;
   sawUnparseableTweet: boolean;
+  parserGaps: string[];
 }
 
 export function parseTweetDetailResponse(json: any): TweetDetailParseResult {
@@ -282,15 +283,22 @@ export function parseTweetDetailResponse(json: any): TweetDetailParseResult {
   const instructions = recognizedTimeline ? instructionsValue : [];
   const tweets: ThreadTweetSnapshot[] = [];
   const collectResult = emptyCollectThreadResult();
+  const parserGaps = new Set<string>();
 
   for (const instruction of instructions) {
-    if (Array.isArray(instruction?.entries)) {
+    if (instruction?.type === 'TimelineAddEntries' && Array.isArray(instruction?.entries)) {
       mergeCollectThreadResult(collectResult, collectThreadEntries(instruction.entries, tweets));
-    }
-    if (instruction?.entry) {
+    } else if (instruction?.type === 'TimelineReplaceEntry' && instruction?.entry) {
       mergeCollectThreadResult(collectResult, collectThreadEntries([instruction.entry], tweets));
+    } else if (Array.isArray(instruction?.entries) || instruction?.entry) {
+      collectResult.sawUnparseableTweet = true;
+      parserGaps.add('unknown_instruction');
     }
   }
+
+  if (!recognizedTimeline) parserGaps.add('malformed_timeline');
+  if (collectResult.sawUnavailableTweet) parserGaps.add('unavailable_tweet');
+  if (collectResult.sawUnparseableTweet && parserGaps.size === 0) parserGaps.add('unparseable_entry');
 
   const byId = new Map<string, ThreadTweetSnapshot>();
   for (const tweet of tweets) {
@@ -304,6 +312,7 @@ export function parseTweetDetailResponse(json: any): TweetDetailParseResult {
     sawTweetResult: collectResult.sawTweetResult,
     sawUnavailableTweet: collectResult.sawUnavailableTweet,
     sawUnparseableTweet: collectResult.sawUnparseableTweet,
+    parserGaps: [...parserGaps].sort(),
   };
 }
 

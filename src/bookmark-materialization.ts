@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import type { MediaFetchEntry, MediaFetchManifest } from './bookmark-media.js';
 import type { BookmarkMediaObject, BookmarkRecord, QuotedTweetSnapshot, ThreadTweetSnapshot } from './types.js';
 import type { ExactXRefreshObservation } from './x-materialize.js';
+import { bindArticleLocator, isXArticleLocator, sameSourceLocator } from './source-bindings.js';
 
 export type MaterializationDisposition =
   | 'used'
@@ -129,37 +130,6 @@ function isPublicHttpUrl(value: string): boolean {
 
 function sourceTweetLinks(source: SourceTweet): string[] {
   return uniquePublicLinks(source.links ?? []);
-}
-
-function isXArticleLink(value: string): boolean {
-  try {
-    const parsed = new URL(value);
-    return (parsed.hostname === 'x.com' || parsed.hostname === 'twitter.com')
-      && parsed.pathname.startsWith('/i/article/');
-  } catch {
-    return false;
-  }
-}
-
-function xArticleLink(values: string[]): string | undefined {
-  const articleLinks = values.filter(isXArticleLink);
-  const identities = new Set(articleLinks.map(xArticleIdentity).filter((value): value is string => value !== null));
-  if (identities.size !== 1) return undefined;
-  const identity = identities.values().next().value as string;
-  return articleLinks.find((value) => (
-    new URL(value).hostname === 'x.com' && xArticleIdentity(value) === identity
-  )) ?? articleLinks[0];
-}
-
-function xArticleIdentity(value: string): string | null {
-  if (!isXArticleLink(value)) return null;
-  const parsed = new URL(value);
-  return parsed.pathname.replace(/\/+$/, '');
-}
-
-function isSameXArticleLink(value: string, recovered: string): boolean {
-  const valueIdentity = xArticleIdentity(value);
-  return valueIdentity !== null && valueIdentity === xArticleIdentity(recovered);
 }
 
 function mediaUrls(mediaObject: BookmarkMediaObject): string[] {
@@ -394,7 +364,13 @@ export async function materializeBookmark(
   const rootId = `x-${sha256(item.tweetId).slice(0, 20)}`;
   const components: SourceComponent[] = [];
   const rootLinks = uniquePublicLinks(item.links ?? []);
-  const recoveredArticleLink = item.articleText ? xArticleLink(item.links ?? []) : undefined;
+  const recoveredArticleLink = item.articleText
+    && item.articleSourceTweetId === item.tweetId
+      ? bindArticleLocator(rootLinks, item.articleLocator)
+      : undefined;
+  const boundManifest = manifest
+    ? { ...manifest, entries: manifest.entries.filter((entry) => entry.bookmarkId === item.id) }
+    : null;
   const rootSource: SourceTweet = {
     id: item.tweetId,
     text: item.text,
@@ -403,7 +379,7 @@ export async function materializeBookmark(
     authorName: item.authorName,
     postedAt: item.postedAt,
     links: recoveredArticleLink
-      ? rootLinks.filter((link) => !isSameXArticleLink(link, recoveredArticleLink))
+      ? rootLinks.filter((link) => !sameSourceLocator(link, recoveredArticleLink))
       : rootLinks,
     media: item.media,
     mediaObjects: item.mediaObjects,
@@ -423,7 +399,7 @@ export async function materializeBookmark(
     'used',
     'exact stored root identity recovered',
   ));
-  await appendTweetComponents(components, rootId, rootSource, 'post', 'root_post', 1, manifest);
+  await appendTweetComponents(components, rootId, rootSource, 'post', 'root_post', 1, boundManifest);
 
   for (const [index, row] of (item.threadContext ?? []).entries()) {
     await appendTweetComponents(
@@ -433,7 +409,7 @@ export async function materializeBookmark(
       `thread-context-${index + 1}`,
       'thread_parent_context',
       1,
-      manifest,
+      boundManifest,
     );
   }
   for (const [index, row] of (item.threadBelow ?? []).entries()) {
@@ -444,7 +420,7 @@ export async function materializeBookmark(
       `thread-continuation-${index + 1}`,
       'thread_same_author_continuation',
       1,
-      manifest,
+      boundManifest,
     );
   }
   if (!item.threadExpandedAt) {
@@ -478,7 +454,7 @@ export async function materializeBookmark(
   }
 
   if (item.quotedStatusId) {
-    if (item.quotedTweet) {
+    if (item.quotedTweet?.id === item.quotedStatusId) {
       await appendTweetComponents(
         components,
         rootId,
@@ -486,7 +462,7 @@ export async function materializeBookmark(
         'quoted-post',
         'quoted_post',
         1,
-        manifest,
+        boundManifest,
       );
     } else {
       components.push(component(
@@ -501,29 +477,34 @@ export async function materializeBookmark(
     }
   }
 
-  if (item.articleText) {
+  if (item.articleText && recoveredArticleLink) {
     components.push(component(
       rootId,
       'x-article',
       'embedded_x_article',
-      recoveredArticleLink ?? item.url,
+      recoveredArticleLink,
       item.articleText,
       'used',
       'X long-form article content recovered',
     ));
   } else if (
-    item.articleTitle
+    item.articleText
+    || item.articleTitle
     || item.articleSite
-    || (item.links ?? []).some((link) => link.includes('x.com/i/article/'))
+    || (item.links ?? []).some(isXArticleLocator)
   ) {
     components.push(component(
       rootId,
       'x-article',
       'embedded_x_article',
-      (item.links ?? []).find((link) => link.includes('x.com/i/article/')) ?? item.url,
+      bindArticleLocator(rootLinks, item.articleLocator)
+        ?? rootLinks.find(isXArticleLocator)
+        ?? item.url,
       null,
       'unresolved',
-      'X long-form article identity exists but article content is absent',
+      item.articleText
+        ? 'X long-form article content is present but source-tweet or locator identity is unbound'
+        : 'X long-form article identity exists but article content is absent',
     ));
   }
 

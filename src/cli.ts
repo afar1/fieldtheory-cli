@@ -33,9 +33,9 @@ import { exportBookmarks } from './md-export.js';
 import { renderViz } from './bookmarks-viz.js';
 import { listBrowserIds } from './browsers.js';
 import { configureHttpProxyFromEnv } from './http-proxy.js';
-import { canonicalLibraryDir, dataDir, ensureDataDir, isFirstRun, migrateLegacyIdeasData, twitterBookmarksCachePath, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir, bookmarkMediaDir, bookmarkMediaManifestPath } from './paths.js';
-import { pathExists, readJson, readJsonLines } from './fs.js';
+import { canonicalLibraryDir, dataDir, ensureDataDir, isFirstRun, migrateLegacyIdeasData, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir, bookmarkMediaDir, bookmarkMediaManifestPath } from './paths.js';
 import { materializeBookmark } from './bookmark-materialization.js';
+import { loadBoundMediaManifest, loadCanonicalBookmarkSnapshot } from './bookmark-snapshot.js';
 import { refreshExactXBookmark } from './x-materialize.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
@@ -1336,25 +1336,8 @@ export function buildCli() {
         throw new Error('Materialization requires one exact numeric X bookmark id.');
       }
 
-      const archived = (await readJsonLines<BookmarkRecord>(twitterBookmarksCachePath()))
-        .find((row) => row.tweetId === exactId || row.id === exactId);
-      if (!archived || archived.tweetId !== exactId) {
-        throw new Error(`Archived X bookmark not found: ${exactId}`);
-      }
-
-      const indexed = await pathExists(twitterBookmarksIndexPath())
-        ? await getBookmarkById(archived.id)
-        : null;
-      let record: BookmarkRecord = {
-        ...archived,
-        text: indexed?.text?.trim() ? indexed.text : archived.text,
-        quotedStatusId: indexed?.quotedStatusId ?? archived.quotedStatusId,
-        quotedTweet: indexed?.quotedTweet ?? archived.quotedTweet,
-        articleTitle: indexed?.articleTitle ?? archived.articleTitle,
-        articleText: indexed?.articleText ?? archived.articleText,
-        articleSite: indexed?.articleSite ?? archived.articleSite,
-        enrichedAt: indexed?.enrichedAt ?? archived.enrichedAt,
-      };
+      const snapshot = await loadCanonicalBookmarkSnapshot(exactId);
+      let record: BookmarkRecord = snapshot.record;
       let refreshObservation = null;
       if (options.refresh) {
         const directCookies = parseCookieOption(options.cookies);
@@ -1378,6 +1361,7 @@ export function buildCli() {
         refreshObservation = refreshed.observation;
       }
 
+      let manifest = snapshot.manifest;
       if (options.fetchMedia) {
         await fetchBookmarkMediaBatch({
           records: [record],
@@ -1385,11 +1369,9 @@ export function buildCli() {
           maxBytes: Number(options.mediaMaxBytes) || DEFAULT_MEDIA_MAX_BYTES,
           skipProfileImages: Boolean(options.skipProfileImages),
         });
+        manifest = await loadBoundMediaManifest(record.id);
       }
 
-      const manifest = await pathExists(bookmarkMediaManifestPath())
-        ? await readJson<MediaFetchManifest>(bookmarkMediaManifestPath())
-        : null;
       const result = await materializeBookmark(record, manifest, refreshObservation);
       if (options.json) {
         printJson(result);

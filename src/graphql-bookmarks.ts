@@ -9,6 +9,8 @@ import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText, upd
 import type { ArticleUpdate } from './bookmarks-db.js';
 import { fetchArticle, resolveTcoLink } from './bookmark-enrich.js';
 import type { ArticleContent } from './bookmark-enrich.js';
+import { bindArticleLocator, xArticleIdentity } from './source-bindings.js';
+import { XRequestExecutor } from './x-request-policy.js';
 import {
   compareThreadTweetsChronologically,
   expandVisibleUrlEntities,
@@ -1484,7 +1486,7 @@ export type TweetFetchSource = 'graphql' | 'syndication';
 
 export interface TweetFetchResult {
   snapshot: QuotedTweetSnapshot | null;
-  article?: ArticleContent | null;
+  article?: TweetArticleContent | null;
   status: 'ok' | 'empty' | 'not_found' | 'forbidden' | 'rate_limited' | 'server_error' | 'error';
   httpStatus?: number;
   /**
@@ -1494,6 +1496,11 @@ export interface TweetFetchResult {
    * treated as settling Gap 2.
    */
   source?: TweetFetchSource;
+}
+
+export interface TweetArticleContent extends ArticleContent {
+  sourceTweetId: string;
+  sourceLocator: string;
 }
 
 export function parseTweetResultByRestId(json: any, tweetId: string): QuotedTweetSnapshot | null {
@@ -1544,23 +1551,6 @@ export function parseTweetResultByRestId(json: any, tweetId: string): QuotedTwee
     inReplyToStatusId: legacy.in_reply_to_status_id_str,
     url: `https://x.com/${handle ?? '_'}/status/${resolvedId}`,
   };
-}
-
-function unwrapGraphqlResult(value: any): any {
-  return value?.result?.tweet ?? value?.result ?? value?.tweet ?? value;
-}
-
-function collectArticleCandidates(value: any, depth = 0): any[] {
-  if (!value || typeof value !== 'object' || depth > 8) return [];
-  const candidates: any[] = [];
-  for (const [key, child] of Object.entries(value)) {
-    if (!child || typeof child !== 'object') continue;
-    if (key.toLowerCase().includes('article')) {
-      candidates.push(unwrapGraphqlResult(child));
-    }
-    candidates.push(...collectArticleCandidates(child, depth + 1));
-  }
-  return candidates;
 }
 
 function blockText(block: any): string {
@@ -1619,14 +1609,39 @@ function articleFromCandidate(candidate: any): ArticleContent | null {
   return { title, text, siteName };
 }
 
-export function parseTweetArticleByRestId(json: any): ArticleContent | null {
+function focalArticleCandidates(tweet: any): any[] {
+  return [
+    tweet?.article_results?.result,
+    tweet?.article?.article_results?.result,
+    tweet?.article?.result,
+  ].filter((value) => value && typeof value === 'object');
+}
+
+function articleCandidateLocator(candidate: any, sourceLinks: string[]): string | undefined {
+  const candidateId = candidate?.rest_id ?? candidate?.article_id ?? candidate?.id;
+  if (candidateId !== undefined && candidateId !== null && String(candidateId).length > 0) {
+    const requested = `https://x.com/i/article/${String(candidateId)}`;
+    return bindArticleLocator(sourceLinks, requested) ?? requested;
+  }
+  return bindArticleLocator(sourceLinks);
+}
+
+export function parseTweetArticleByRestId(json: any, requestedTweetId?: string): TweetArticleContent | null {
   const result = json?.data?.tweetResult?.result;
   if (!result) return null;
   const tweet = result.tweet ?? result;
+  const responseTweetId = tweet?.legacy?.id_str ?? tweet?.rest_id;
+  if (responseTweetId === undefined || responseTweetId === null) return null;
+  const sourceTweetId = String(responseTweetId);
+  if (requestedTweetId && sourceTweetId !== requestedTweetId) return null;
+  const sourceLinks = extractExpandedLinks(tweetUrlEntities(tweet, tweet?.legacy));
 
-  for (const candidate of collectArticleCandidates(tweet)) {
+  for (const candidate of focalArticleCandidates(tweet)) {
     const article = articleFromCandidate(candidate);
-    if (article) return article;
+    const sourceLocator = articleCandidateLocator(candidate, sourceLinks);
+    if (article && sourceLocator && xArticleIdentity(sourceLocator)) {
+      return { ...article, sourceTweetId, sourceLocator };
+    }
   }
 
   return null;
@@ -1672,150 +1687,186 @@ export async function fetchTweetByIdViaGraphQL(
   tweetId: string,
   csrfToken: string,
   cookieHeader?: string,
+  options: { executor?: XRequestExecutor; delayMs?: number } = {},
 ): Promise<TweetFetchResult> {
-  for (let attempt = 0; attempt < 4; attempt++) {
-    let response: Response;
-    try {
-      response = await fetch(buildTweetResultByRestIdUrl(tweetId), {
-        headers: buildHeaders(csrfToken, cookieHeader),
-      });
-    } catch {
-      await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
-      continue;
-    }
-
-    if (response.ok) {
-      let json: any;
-      try {
-        json = await response.json();
-      } catch {
-        return { snapshot: null, status: 'error', source: 'graphql' };
-      }
-      // Tombstoned / deleted tweets come back with a result.__typename like
-      // TweetTombstone or TweetUnavailable and no legacy block.
-      const result = json?.data?.tweetResult?.result;
-      const typename = result?.__typename;
-      if (!result || typename === 'TweetTombstone' || typename === 'TweetUnavailable') {
-        return { snapshot: null, status: 'not_found', source: 'graphql' };
-      }
-      const snapshot = parseTweetResultByRestId(json, tweetId);
-      const article = parseTweetArticleByRestId(json);
-      if (!snapshot) return { snapshot: null, article: null, status: 'error', source: 'graphql' };
-      if (snapshot.id !== tweetId) {
-        return { snapshot: null, article: null, status: 'error', source: 'graphql' };
-      }
-      return { snapshot, article, status: 'ok', source: 'graphql' };
-    }
-
-    if (response.status === 429) {
-      await new Promise((r) => setTimeout(r, Math.min(15 * Math.pow(2, attempt), 120) * 1000));
-      continue;
-    }
-    if (response.status >= 500) {
-      await new Promise((r) => setTimeout(r, 5000 * (attempt + 1)));
-      continue;
-    }
-    if (response.status === 404) {
-      return { snapshot: null, status: 'not_found', httpStatus: 404, source: 'graphql' };
-    }
-    if (response.status === 401 || response.status === 403) {
-      return { snapshot: null, status: 'forbidden', httpStatus: response.status, source: 'graphql' };
-    }
-    // Other 4xx (400 usually means X rotated feature flags / queryId) — don't retry.
-    return { snapshot: null, status: 'error', httpStatus: response.status, source: 'graphql' };
+  const executor = options.executor ?? new XRequestExecutor({ delayMs: options.delayMs });
+  const response = await executor.requestJson(buildTweetResultByRestIdUrl(tweetId), {
+    headers: buildHeaders(csrfToken, cookieHeader),
+  });
+  if (response.status !== 'ok') {
+    return {
+      snapshot: null,
+      status: response.status,
+      ...(response.httpStatus ? { httpStatus: response.httpStatus } : {}),
+      source: 'graphql',
+    };
   }
-  return { snapshot: null, status: 'rate_limited', source: 'graphql' };
+
+  const json = response.json as any;
+  // Tombstoned / deleted tweets come back with a result.__typename like
+  // TweetTombstone or TweetUnavailable and no legacy block.
+  const result = json?.data?.tweetResult?.result;
+  const typename = result?.__typename;
+  if (!result || typename === 'TweetTombstone' || typename === 'TweetUnavailable') {
+    return { snapshot: null, status: 'not_found', source: 'graphql' };
+  }
+  const snapshot = parseTweetResultByRestId(json, tweetId);
+  const article = parseTweetArticleByRestId(json, tweetId);
+  if (!snapshot || snapshot.id !== tweetId) {
+    return { snapshot: null, article: null, status: 'error', source: 'graphql' };
+  }
+  return { snapshot, article, status: 'ok', source: 'graphql' };
+}
+
+export type TweetDetailTermination =
+  | 'exhausted'
+  | 'empty'
+  | 'missing_focal'
+  | 'parser_gap'
+  | 'limit'
+  | 'unavailable'
+  | 'error';
+
+export interface TweetDetailFetchResult {
+  tweets: ThreadTweetSnapshot[];
+  status: TweetFetchResult['status'];
+  httpStatus?: number;
+  focalTweetId: string;
+  focalBound: boolean;
+  pendingCursors: string[];
+  processedCursors: string[];
+  enumerationTermination: TweetDetailTermination;
+  enumerationComplete: boolean;
+  remainingCursor?: string;
+  remainingCursors?: string[];
+  parserGap: boolean;
+  parserGaps: string[];
+}
+
+function failedTweetDetailResult(
+  tweetId: string,
+  status: TweetFetchResult['status'],
+  tweets: ThreadTweetSnapshot[],
+  pendingCursors: Array<string | undefined>,
+  processedCursors: Set<string>,
+  parserGaps: Set<string>,
+  httpStatus?: number,
+): TweetDetailFetchResult {
+  const remainingCursors = pendingCursors.filter((value): value is string => Boolean(value));
+  const byId = new Map<string, ThreadTweetSnapshot>();
+  for (const tweet of tweets) if (!byId.has(tweet.id)) byId.set(tweet.id, tweet);
+  const enumerationTermination: TweetDetailTermination = status === 'not_found' || status === 'forbidden'
+    ? 'unavailable'
+    : 'error';
+  return {
+    tweets: Array.from(byId.values()).sort(compareThreadTweetsChronologically),
+    status,
+    ...(httpStatus ? { httpStatus } : {}),
+    focalTweetId: tweetId,
+    focalBound: byId.has(tweetId),
+    pendingCursors: remainingCursors,
+    processedCursors: [...processedCursors],
+    enumerationTermination,
+    enumerationComplete: false,
+    ...(remainingCursors[0] ? { remainingCursor: remainingCursors[0] } : {}),
+    ...(remainingCursors.length ? { remainingCursors } : {}),
+    parserGap: parserGaps.size > 0,
+    parserGaps: [...parserGaps].sort(),
+  };
 }
 
 export async function fetchTweetDetailViaGraphQL(
   tweetId: string,
   csrfToken: string,
   cookieHeader?: string,
-  options: { maxPages?: number; delayMs?: number } = {},
-): Promise<{
-  tweets: ThreadTweetSnapshot[];
-  status: TweetFetchResult['status'];
-  httpStatus?: number;
-  enumerationComplete: boolean;
-  remainingCursor?: string;
-  remainingCursors?: string[];
-  parserGap: boolean;
-}> {
+  options: { maxPages?: number; delayMs?: number; executor?: XRequestExecutor } = {},
+): Promise<TweetDetailFetchResult> {
   const maxPages = options.maxPages ?? 3;
-  const delayMs = options.delayMs ?? 300;
+  const executor = options.executor ?? new XRequestExecutor({ delayMs: options.delayMs ?? 300 });
   const tweets: ThreadTweetSnapshot[] = [];
   const pendingCursors: Array<string | undefined> = [undefined];
   const processedCursors = new Set<string>();
+  const parserGaps = new Set<string>();
   let sawRecognizedTimeline = false;
   let sawTweetResult = false;
   let sawUnavailableTweet = false;
-  let sawUnparseableTweet = false;
 
   for (let page = 0; page < maxPages && pendingCursors.length > 0; page++) {
     const cursor = pendingCursors.shift();
     if (cursor) processedCursors.add(cursor);
-    let response: Response;
-    try {
-      response = await fetch(buildTweetDetailUrl(tweetId, cursor), {
-        headers: buildHeaders(csrfToken, cookieHeader),
-      });
-    } catch {
-      return { tweets, status: 'error', enumerationComplete: false, parserGap: true };
+    const response = await executor.requestJson(buildTweetDetailUrl(tweetId, cursor), {
+      headers: buildHeaders(csrfToken, cookieHeader),
+    });
+    if (response.status !== 'ok') {
+      if (response.status === 'error' && response.httpStatus && response.httpStatus >= 200 && response.httpStatus < 300) {
+        parserGaps.add('malformed_json');
+      }
+      return failedTweetDetailResult(
+        tweetId,
+        response.status,
+        tweets,
+        pendingCursors,
+        processedCursors,
+        parserGaps,
+        response.httpStatus,
+      );
     }
-    if (response.status === 429) return { tweets, status: 'rate_limited', httpStatus: 429, enumerationComplete: false, parserGap: false };
-    if (response.status === 404) return { tweets, status: 'not_found', httpStatus: 404, enumerationComplete: false, parserGap: false };
-    if (response.status === 401 || response.status === 403) return { tweets, status: 'forbidden', httpStatus: response.status, enumerationComplete: false, parserGap: false };
-    if (response.status >= 500) return { tweets, status: 'server_error', httpStatus: response.status, enumerationComplete: false, parserGap: false };
-    if (!response.ok) return { tweets, status: 'error', httpStatus: response.status, enumerationComplete: false, parserGap: false };
 
-    let json: unknown;
-    try {
-      json = await response.json();
-    } catch {
-      return { tweets, status: 'error', httpStatus: response.status, enumerationComplete: false, parserGap: true };
-    }
-    const parsed = parseTweetDetailResponse(json);
+    const parsed = parseTweetDetailResponse(response.json);
     sawRecognizedTimeline ||= parsed.recognizedTimeline;
     sawTweetResult ||= parsed.sawTweetResult;
     sawUnavailableTweet ||= parsed.sawUnavailableTweet;
-    sawUnparseableTweet ||= parsed.sawUnparseableTweet;
+    for (const gap of parsed.parserGaps) parserGaps.add(gap);
     tweets.push(...parsed.tweets);
     for (const nextCursor of parsed.continuationCursors) {
       if (processedCursors.has(nextCursor)) {
-        sawUnparseableTweet = true;
+        parserGaps.add('repeated_cursor');
         continue;
       }
       if (!pendingCursors.includes(nextCursor)) pendingCursors.push(nextCursor);
-    }
-    if (page < maxPages - 1 && pendingCursors.length > 0) {
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
 
   const byId = new Map<string, ThreadTweetSnapshot>();
   for (const tweet of tweets) if (!byId.has(tweet.id)) byId.set(tweet.id, tweet);
-  const parserGap = sawUnavailableTweet || sawUnparseableTweet;
   const remainingCursors = pendingCursors.filter((value): value is string => Boolean(value));
-  const enumerationComplete = pendingCursors.length === 0 && !parserGap;
-  if (byId.size === 0) {
-    if (sawUnavailableTweet && !sawUnparseableTweet) return { tweets: [], status: 'not_found', enumerationComplete: false, parserGap };
-    if (sawRecognizedTimeline && !sawTweetResult) return {
-      tweets: [],
-      status: 'empty',
-      enumerationComplete: false,
-      ...(remainingCursors[0] ? { remainingCursor: remainingCursors[0] } : {}),
-      ...(remainingCursors.length > 0 ? { remainingCursors } : {}),
-      parserGap,
-    };
-    return { tweets: [], status: 'error', enumerationComplete: false, parserGap: true };
+  const focalBound = byId.has(tweetId);
+  let status: TweetFetchResult['status'] = 'ok';
+  let enumerationTermination: TweetDetailTermination;
+  if (byId.size === 0 && sawUnavailableTweet && parserGaps.size === 1 && parserGaps.has('unavailable_tweet')) {
+    status = 'not_found';
+    enumerationTermination = 'unavailable';
+  } else if (byId.size === 0 && sawRecognizedTimeline && !sawTweetResult) {
+    status = 'empty';
+    enumerationTermination = 'empty';
+  } else if (byId.size === 0) {
+    status = 'error';
+    enumerationTermination = 'error';
+    parserGaps.add('no_parseable_tweets');
+  } else if (parserGaps.size > 0) {
+    enumerationTermination = 'parser_gap';
+  } else if (remainingCursors.length > 0 || pendingCursors.length > 0) {
+    enumerationTermination = 'limit';
+  } else if (!focalBound) {
+    enumerationTermination = 'missing_focal';
+  } else {
+    enumerationTermination = 'exhausted';
   }
+  const parserGap = parserGaps.size > 0;
+  const enumerationComplete = enumerationTermination === 'exhausted';
   return {
     tweets: Array.from(byId.values()).sort(compareThreadTweetsChronologically),
-    status: 'ok',
+    status,
+    focalTweetId: tweetId,
+    focalBound,
+    pendingCursors: remainingCursors,
+    processedCursors: [...processedCursors],
+    enumerationTermination,
     enumerationComplete,
     ...(remainingCursors[0] ? { remainingCursor: remainingCursors[0] } : {}),
     ...(remainingCursors.length > 0 ? { remainingCursors } : {}),
     parserGap,
+    parserGaps: [...parserGaps].sort(),
   };
 }
 
@@ -1984,7 +2035,12 @@ async function readEnrichedBookmarkIds(): Promise<Set<string>> {
     const { twitterBookmarksIndexPath } = await import('./paths.js');
     const db = await openDb(twitterBookmarksIndexPath());
     try {
-      const rows = db.exec('SELECT id FROM bookmarks WHERE enriched_at IS NOT NULL');
+      const rows = db.exec(
+        `SELECT id FROM bookmarks
+         WHERE enriched_at IS NOT NULL
+           AND article_source_tweet_id = tweet_id
+           AND article_locator IS NOT NULL`,
+      );
       for (const row of rows[0]?.values ?? []) enrichedIds.add(row[0] as string);
     } finally { db.close(); }
   } catch { /* DB may not exist yet */ }
@@ -2069,7 +2125,7 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
     const tweetId = allFetchIds[i];
     const now = new Date().toISOString();
     let snapshot: QuotedTweetSnapshot | null = null;
-    let article: ArticleContent | null | undefined;
+    let article: TweetArticleContent | null | undefined;
     let resultStatus: TweetFetchResult['status'] = 'error';
     let resultSource: TweetFetchSource | undefined;
     try {
@@ -2133,16 +2189,32 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
     }
 
     if (article) {
+      let acceptedArticle = false;
       for (const record of recordsByXArticleTweetId.get(tweetId) ?? []) {
         if (enrichedIds.has(record.id)) continue;
+        const sourceLocator = article.sourceTweetId === tweetId
+          ? bindArticleLocator(record.links ?? [], article.sourceLocator)
+          : undefined;
+        if (!sourceLocator) continue;
         articleDbUpdates.push({
           id: record.id,
+          sourceTweetId: tweetId,
+          sourceLocator,
           articleTitle: article.title,
           articleText: article.text,
           articleSite: article.siteName,
         });
         enrichedIds.add(record.id);
         articlesEnriched++;
+        acceptedArticle = true;
+      }
+      if (!acceptedArticle && recordsByXArticleTweetId.has(tweetId)) {
+        failed++;
+        failures.push({
+          tweetId,
+          reason: 'X Article body did not bind to the fetched focal tweet and archived article locator',
+          url: `https://x.com/_/status/${tweetId}`,
+        });
       }
     } else if (recordsByXArticleTweetId.has(tweetId) && snapshot) {
       failed++;
@@ -2207,6 +2279,8 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
       if (article && article.text.length >= 50) {
         articleDbUpdates.push({
           id: record.id,
+          sourceTweetId: record.tweetId,
+          sourceLocator: targetUrl,
           articleTitle: article.title,
           articleText: article.text,
           articleSite: article.siteName,

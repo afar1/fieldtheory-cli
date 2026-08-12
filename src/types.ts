@@ -106,6 +106,10 @@ export interface BookmarkRecord {
   articleTitle?: string | null;
   articleText?: string | null;
   articleSite?: string | null;
+  /** Tweet whose payload supplied articleText. Required for derived enrichment. */
+  articleSourceTweetId?: string | null;
+  /** Exact outbound locator whose body is stored in articleText. */
+  articleLocator?: string | null;
   enrichedAt?: string | null;
   language?: string;
   sourceApp?: string;

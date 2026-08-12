@@ -914,6 +914,8 @@ test('ft materialize overlays article and quote enrichment retained in the bookm
     await buildIndex();
     await updateArticleContent([{
       id,
+      sourceTweetId: id,
+      sourceLocator: 'https://x.com/i/article/2042676487711584257',
       articleTitle: 'Indexed article',
       articleText: 'Exact long-form content retained only in the SQLite index.',
       articleSite: 'X Articles',
@@ -939,6 +941,67 @@ test('ft materialize overlays article and quote enrichment retained in the bookm
       result.components.find((row: any) => row.relation === 'quoted_post')?.content,
       'Indexed quoted source.',
     );
+  } finally {
+    process.env.FT_DATA_DIR = origEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ft materialize never lets a stale index replace newer archive identity or content', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-materialize-stale-index-'));
+  const origEnv = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = tmpDir;
+  const id = '2042685676949270724';
+  const oldQuote = '2042685676949270000';
+  const newQuote = '2042685676949270001';
+  const oldArticle = 'https://x.com/i/article/2042676487711584257';
+  const newArticle = 'https://x.com/i/article/2042676487711584258';
+  const old = {
+    id,
+    tweetId: id,
+    url: `https://x.com/operator/status/${id}`,
+    text: 'Old archived root.',
+    authorHandle: 'operator',
+    syncedAt: '2026-08-10T00:00:00.000Z',
+    quotedStatusId: oldQuote,
+    links: [oldArticle],
+  };
+  fs.writeFileSync(path.join(tmpDir, 'bookmarks.jsonl'), `${JSON.stringify(old)}\n`);
+
+  try {
+    await buildIndex();
+    await updateArticleContent([{
+      id,
+      sourceTweetId: id,
+      sourceLocator: oldArticle,
+      articleTitle: 'Old indexed article',
+      articleText: 'Old indexed article body.',
+    }]);
+    await updateQuotedTweets([{
+      id,
+      quotedTweet: {
+        id: oldQuote,
+        text: 'Old indexed quote.',
+        url: `https://x.com/quoted/status/${oldQuote}`,
+      },
+    }]);
+    fs.writeFileSync(path.join(tmpDir, 'bookmarks.jsonl'), `${JSON.stringify({
+      ...old,
+      text: 'New archive-owned root.',
+      syncedAt: '2026-08-11T00:00:00.000Z',
+      quotedStatusId: newQuote,
+      links: [newArticle],
+    })}\n`);
+
+    const output = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'materialize', id, '--json']);
+    });
+    const result = JSON.parse(output);
+    assert.equal(result.components.find((row: any) => row.relation === 'root_post')?.content, 'New archive-owned root.');
+    assert.equal(result.source_cutoff, '2026-08-11T00:00:00.000Z');
+    assert.equal(result.components.find((row: any) => row.relation === 'quoted_post')?.source_locator, `https://x.com/i/status/${newQuote}`);
+    assert.equal(result.components.some((row: any) => row.content === 'Old indexed quote.'), false);
+    assert.equal(result.components.some((row: any) => row.content === 'Old indexed article body.'), false);
   } finally {
     process.env.FT_DATA_DIR = origEnv;
     fs.rmSync(tmpDir, { recursive: true, force: true });

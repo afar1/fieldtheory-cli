@@ -17,7 +17,10 @@ function record(overrides: Partial<BookmarkRecord> = {}): BookmarkRecord {
     authorName: 'Operator',
     postedAt: '2026-08-01T12:00:00.000Z',
     syncedAt: '2026-08-10T12:00:00.000Z',
-    links: ['https://example.com/paper.pdf'],
+    links: [
+      'https://x.com/i/article/2042676487711584257',
+      'https://example.com/paper.pdf',
+    ],
     quotedStatusId: '2080000000000000000',
     quotedTweet: {
       id: '2080000000000000000',
@@ -43,6 +46,8 @@ function record(overrides: Partial<BookmarkRecord> = {}): BookmarkRecord {
     articleTitle: 'A long-form argument',
     articleText: 'Complete X Article body.',
     articleSite: 'X Articles',
+    articleSourceTweetId: '2080296884187652381',
+    articleLocator: 'https://x.com/i/article/2042676487711584257',
     enrichedAt: '2026-08-10T12:00:30.000Z',
     ...overrides,
   };
@@ -147,6 +152,20 @@ test('materializeBookmark exposes missing thread and quote content as explicit g
   );
 });
 
+test('materializeBookmark never uses quoted content with the wrong quoted identity', async () => {
+  const result = await materializeBookmark(record({
+    quotedTweet: {
+      id: '1111111111111111111',
+      text: 'Wrong quoted content.',
+      url: 'https://x.com/wrong/status/1111111111111111111',
+    },
+  }));
+  const quote = result.components.find((row) => row.relation === 'quoted_post');
+  assert.equal(quote?.disposition, 'unavailable');
+  assert.equal(quote?.content, null);
+  assert.equal(JSON.stringify(result).includes('Wrong quoted content.'), false);
+});
+
 test('materializeBookmark does not duplicate a recovered X Article as an unresolved outbound gap', async () => {
   const articleUrl = 'https://x.com/i/article/2042676487711584257';
   const articleAlias = 'https://twitter.com/i/article/2042676487711584257';
@@ -174,11 +193,15 @@ test('materializeBookmark leaves every X Article locator unresolved when body id
   const secondArticle = 'https://x.com/i/article/1000000000000000000';
   const result = await materializeBookmark(record({
     links: [firstArticle, secondArticle],
+    articleLocator: null,
   }));
 
   const recovered = result.components.find((row) => row.relation === 'embedded_x_article');
-  assert.equal(recovered?.source_locator, result.locator);
-  assert.equal(recovered?.disposition, 'used');
+  assert.equal(recovered?.disposition, 'unresolved');
+  assert.equal(
+    result.components.some((row) => row.relation === 'embedded_x_article' && row.disposition === 'used'),
+    false,
+  );
   for (const locator of [firstArticle, secondArticle]) {
     assert.equal(
       result.components.find((row) => row.source_locator === locator)?.disposition,
@@ -268,4 +291,56 @@ test('materializeBookmark binds poster and video variant to separate exact asset
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('materializeBookmark rejects a media manifest entry owned by a different bookmark', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ft-materialize-wrong-owner-'));
+  const assetPath = path.join(dir, 'image.jpg');
+  const sourceUrl = 'https://pbs.twimg.com/media/root.jpg';
+  await writeFile(assetPath, Buffer.from([1, 2, 3, 4]));
+  try {
+    const source = record({ mediaObjects: [{ type: 'photo', url: sourceUrl }] });
+    const manifest: MediaFetchManifest = {
+      schemaVersion: 1,
+      generatedAt: '2026-08-10T12:02:00.000Z',
+      limit: 1,
+      maxBytes: 1024,
+      processed: 1,
+      downloaded: 1,
+      skippedTooLarge: 0,
+      failed: 0,
+      entries: [{
+        bookmarkId: 'different-bookmark',
+        tweetId: source.tweetId,
+        tweetUrl: source.url,
+        sourceUrl,
+        localPath: assetPath,
+        contentType: 'image/jpeg',
+        bytes: 4,
+        status: 'downloaded',
+        fetchedAt: '2026-08-10T12:02:00.000Z',
+      }],
+    };
+
+    const result = await materializeBookmark(source, manifest);
+    assert.equal(
+      result.components.find((row) => row.relation === 'post_attached_media')?.source_asset,
+      null,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('materializeBookmark output and component ordering are deterministic', async () => {
+  const source = record({
+    links: [
+      'https://z.example/source',
+      'https://x.com/i/article/2042676487711584257',
+      'https://a.example/source',
+    ],
+  });
+  const first = await materializeBookmark(source);
+  const second = await materializeBookmark({ ...source, links: [...source.links!].reverse() });
+  assert.deepEqual(second, first);
 });

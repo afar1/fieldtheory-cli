@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { refreshExactXBookmark } from '../src/x-materialize.js';
 import { parseTweetDetailResponse } from '../src/tweet-snapshots.js';
+import { XRequestExecutor } from '../src/x-request-policy.js';
 import type { BookmarkRecord } from '../src/types.js';
 
 function tweet(id: string, text: string, parent?: string) {
@@ -102,6 +103,8 @@ test('refreshExactXBookmark refreshes one root and bounded thread in memory', as
       now: '2026-08-11T00:00:00.000Z',
     });
     assert.equal(result.observation.status, 'complete');
+    assert.equal(result.observation.parent_termination, 'root');
+    assert.equal(result.observation.continuation_termination, 'exhausted');
     assert.equal(result.record.text, 'Current root.');
     assert.deepEqual(result.record.threadContext?.map((row) => row.id), ['99']);
     assert.deepEqual(result.record.threadBelow?.map((row) => row.id), ['101']);
@@ -171,6 +174,7 @@ test('refreshExactXBookmark reports a remaining continuation cursor as partial',
     });
     assert.equal(result.observation.status, 'partial');
     assert.equal(result.observation.continuation_enumeration_complete, false);
+    assert.equal(result.observation.continuation_termination, 'limit');
     assert.equal(result.record.threadExpandedAt, undefined);
   } finally {
     globalThis.fetch = originalFetch;
@@ -222,6 +226,7 @@ test('refreshExactXBookmark traverses every supported continuation branch before
       now: '2026-08-11T00:00:00.000Z',
     });
     assert.equal(result.observation.status, 'complete');
+    assert.equal(result.observation.continuation_termination, 'exhausted');
     assert.deepEqual(detailCursors, [undefined, 'BRANCH_A', 'BRANCH_B']);
     assert.deepEqual(result.record.threadBelow?.map((row) => row.id), ['101', '102']);
   } finally {
@@ -251,6 +256,7 @@ test('refreshExactXBookmark keeps a recognized tweet-free timeline partial', asy
     });
     assert.equal(result.observation.status, 'partial');
     assert.equal(result.observation.continuation_status, 'empty');
+    assert.equal(result.observation.continuation_termination, 'empty');
     assert.equal(result.observation.continuation_enumeration_complete, false);
     assert.equal(result.record.threadExpandedAt, undefined);
   } finally {
@@ -279,6 +285,7 @@ test('refreshExactXBookmark requires the focal tweet before completing traversal
       now: '2026-08-11T00:00:00.000Z',
     });
     assert.equal(result.observation.status, 'partial');
+    assert.equal(result.observation.continuation_termination, 'missing_focal');
     assert.deepEqual(result.record.threadBelow, []);
     assert.equal(result.record.threadExpandedAt, undefined);
   } finally {
@@ -309,6 +316,7 @@ test('refreshExactXBookmark converts a malformed TweetDetail body into a partial
     });
     assert.equal(result.observation.status, 'partial');
     assert.equal(result.observation.continuation_status, 'error');
+    assert.equal(result.observation.continuation_termination, 'error');
     assert.equal(result.observation.continuation_enumeration_complete, false);
     assert.equal(result.record.threadExpandedAt, undefined);
   } finally {
@@ -540,9 +548,85 @@ test('refreshExactXBookmark rejects identity-less parent and quote responses', a
     const result = await refreshExactXBookmark(source, { csrfToken: 'ct0', delayMs: 0 });
     assert.equal(result.observation.status, 'partial');
     assert.equal(result.observation.parent_status, 'error');
+    assert.equal(result.observation.parent_termination, 'error');
     assert.equal(result.observation.quote_status, 'error');
     assert.equal(result.record.threadExpandedAt, undefined);
     assert.equal(result.record.quotedTweet, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('refreshExactXBookmark sends helper retries through the shared configured request executor', async () => {
+  const sleeps: number[] = [];
+  let attempts = 0;
+  const executor = new XRequestExecutor({
+    delayMs: 41,
+    fetchImpl: (async (input: string | URL | Request) => {
+      attempts += 1;
+      const url = String(input);
+      if (attempts === 1) throw new Error('retry root');
+      if (url.includes('/TweetDetail?')) {
+        return new Response(JSON.stringify(detailResponse([tweet('100', 'Current root.')])), { status: 200 });
+      }
+      return new Response(JSON.stringify({ data: { tweetResult: { result: tweet('100', 'Current root.') } } }), { status: 200 });
+    }) as typeof fetch,
+    sleep: async (milliseconds) => { sleeps.push(milliseconds); },
+    retryBackoffMs: () => 0,
+  });
+
+  const result = await refreshExactXBookmark(archived(), {
+    csrfToken: 'ct0',
+    delayMs: 41,
+    requestExecutor: executor,
+    now: '2026-08-11T00:00:00.000Z',
+  });
+  assert.equal(result.observation.status, 'complete');
+  assert.equal(executor.attemptCount, 3);
+  assert.deepEqual(sleeps, [41, 41]);
+});
+
+test('refreshExactXBookmark distinguishes cyclic and limited parent traversal from root termination', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetDetail?')) {
+      return new Response(JSON.stringify(detailResponse([tweet('100', 'Current root.', '99')])), { status: 200 });
+    }
+    const variables = JSON.parse(new URL(url).searchParams.get('variables') ?? '{}');
+    const row = variables.tweetId === '100'
+      ? tweet('100', 'Current root.', '99')
+      : variables.tweetId === '99'
+        ? tweet('99', 'Parent.', '100')
+        : tweet('98', 'Grandparent.');
+    return new Response(JSON.stringify({ data: { tweetResult: { result: row } } }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const cyclic = await refreshExactXBookmark(archived(), { csrfToken: 'ct0', delayMs: 0 });
+    assert.equal(cyclic.observation.status, 'partial');
+    assert.equal(cyclic.observation.parent_termination, 'cycle');
+    assert.equal(cyclic.record.threadExpandedAt, undefined);
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/TweetDetail?')) {
+        return new Response(JSON.stringify(detailResponse([tweet('100', 'Current root.', '99')])), { status: 200 });
+      }
+      const variables = JSON.parse(new URL(url).searchParams.get('variables') ?? '{}');
+      const row = variables.tweetId === '100'
+        ? tweet('100', 'Current root.', '99')
+        : tweet('99', 'Parent.', '98');
+      return new Response(JSON.stringify({ data: { tweetResult: { result: row } } }), { status: 200 });
+    }) as typeof fetch;
+    const limited = await refreshExactXBookmark(archived(), {
+      csrfToken: 'ct0',
+      delayMs: 0,
+      maxParents: 1,
+    });
+    assert.equal(limited.observation.status, 'partial');
+    assert.equal(limited.observation.parent_termination, 'limit');
+    assert.equal(limited.observation.parent_limit_reached, true);
   } finally {
     globalThis.fetch = originalFetch;
   }
