@@ -447,6 +447,81 @@ test('parseTweetResultByRestId: extracts note_tweet body from live TweetResultBy
   assert.ok(snapshot.text.startsWith('LLM Knowledge Bases'));
 });
 
+test('parseTweetResultByRestId preserves the focal tweet live quote identity', () => {
+  const row = makeTweetResult({ legacy: { quoted_status_id_str: '5555555' } });
+  const snapshot = parseTweetResultByRestId({
+    data: { tweetResult: { result: row } },
+  }, '1234567890');
+
+  assert.equal(snapshot?.quotedStatusId, '5555555');
+});
+
+test('parseTweetResultByRestId uses an exact wrapped quoted-result identity as fallback', () => {
+  const row = makeTweetResult({
+    tweet: {
+      quoted_status_result: {
+        result: {
+          tweet: {
+            rest_id: '5555555',
+            legacy: { id_str: '5555555', full_text: 'Embedded quote.' },
+          },
+        },
+      },
+    },
+  });
+  const snapshot = parseTweetResultByRestId({
+    data: { tweetResult: { result: row } },
+  }, '1234567890');
+
+  assert.equal(snapshot?.quotedStatusId, '5555555');
+});
+
+test('parseTweetResultByRestId rejects contradictory or malformed quote identity', () => {
+  for (const row of [
+    makeTweetResult({
+      legacy: { quoted_status_id_str: '5555555' },
+      tweet: { quoted_status_result: { result: { rest_id: '6666666' } } },
+    }),
+    makeTweetResult({ legacy: { quoted_status_id_str: 5555555 } }),
+    makeTweetResult({
+      tweet: {
+        quoted_status_result: {
+          result: { rest_id: '6666666', legacy: { id_str: '5555555' } },
+        },
+      },
+    }),
+  ]) {
+    assert.equal(parseTweetResultByRestId({
+      data: { tweetResult: { result: row } },
+    }, '1234567890'), null);
+  }
+});
+
+test('parseTweetResultByRestId rejects malformed or contradictory focal identity aliases', () => {
+  for (const row of [
+    makeTweetResult({ tweet: { rest_id: '9999999999' } }),
+    makeTweetResult({ legacy: { id_str: 1234567890 } }),
+    makeTweetResult({ tweet: { rest_id: 1234567890 } }),
+  ]) {
+    assert.equal(parseTweetResultByRestId({
+      data: { tweetResult: { result: row } },
+    }, '1234567890'), null);
+  }
+});
+
+test('parseTweetResultByRestId preserves the focal root when quote identity is unavailable', () => {
+  const row = makeTweetResult({
+    tweet: { quoted_status_result: { result: { __typename: 'TweetTombstone' } } },
+  });
+  const snapshot = parseTweetResultByRestId({
+    data: { tweetResult: { result: row } },
+  }, '1234567890');
+
+  assert.equal(snapshot?.id, '1234567890');
+  assert.equal(snapshot?.quotedStatusId, undefined);
+  assert.equal(snapshot?.quotedStatusIdentityUnresolved, true);
+});
+
 test('parseTweetArticleByRestId: extracts X Article rich-text content', () => {
   const fixture = {
     data: {
@@ -516,6 +591,62 @@ test('parseTweetArticleByRestId: extracts current X Article content_state shape'
   assert.equal(article.title, 'Thoughts and Feelings around Claude Design');
   assert.match(article.text, /I tried Claude Design yesterday/);
   assert.match(article.text, /components, styles, variables, and props/);
+});
+
+test('parseTweetArticleByRestId rejects malformed, contradictory, or locator-crossing exact IDs', () => {
+  const articleBody = 'This recovered article body is deliberately long enough to pass the source body threshold.';
+  for (const candidate of [
+    { rest_id: 2042676487711584257, articleBody },
+    { rest_id: '2042676487711584257', article_id: '2042676487711584258', articleBody },
+    { rest_id: '2042676487711584257', articleBody },
+  ]) {
+    const articleLink = candidate.rest_id === '2042676487711584257' && candidate.article_id === undefined
+      ? 'https://x.com/i/article/2042676487711584258'
+      : 'https://x.com/i/article/2042676487711584257';
+    const fixture = {
+      data: {
+        tweetResult: {
+          result: {
+            rest_id: '100',
+            legacy: {
+              id_str: '100',
+              full_text: 'Focal article post.',
+              entities: { urls: [{ expanded_url: articleLink }] },
+            },
+            article_results: { result: candidate },
+          },
+        },
+      },
+    };
+    assert.equal(parseTweetArticleByRestId(fixture, '100'), null);
+  }
+});
+
+test('parseTweetArticleByRestId accepts agreeing exact article aliases bound to the focal locator', () => {
+  const articleId = '2042676487711584257';
+  const fixture = {
+    data: {
+      tweetResult: {
+        result: {
+          rest_id: '100',
+          legacy: {
+            id_str: '100',
+            full_text: 'Focal article post.',
+            entities: { urls: [{ expanded_url: `https://x.com/i/article/${articleId}` }] },
+          },
+          article_results: {
+            result: {
+              rest_id: articleId,
+              article_id: articleId,
+              articleBody: 'This recovered article body has matching exact aliases and a matching focal locator.',
+            },
+          },
+        },
+      },
+    },
+  };
+
+  assert.equal(parseTweetArticleByRestId(fixture, '100')?.sourceLocator, `https://x.com/i/article/${articleId}`);
 });
 
 test('parseTweetArticleByRestId: rejects preview-only X Article payloads', () => {

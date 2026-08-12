@@ -194,6 +194,71 @@ test('materializeBookmark does not duplicate a recovered X Article as an unresol
   );
 });
 
+test('materializeBookmark keeps ordinary enriched webpages as unresolved outbound gaps', async () => {
+  const externalArticle = 'https://example.com/article';
+  const externalBody = 'Destination-owned ordinary article body.';
+  const result = await materializeBookmark(record({
+    links: [externalArticle],
+    articleText: externalBody,
+    articleTitle: 'Ordinary external article',
+    articleSite: 'Example',
+    articleSourceTweetId: '2080296884187652381',
+    articleLocator: externalArticle,
+    threadExpandedAt: undefined,
+    enrichedAt: '2026-08-12T12:00:00.000Z',
+  }));
+
+  const outbound = result.components.find((row) => row.source_locator === externalArticle);
+  assert.equal(outbound?.relation, 'post_outbound_link');
+  assert.equal(outbound?.disposition, 'unresolved');
+  assert.equal(
+    result.components.some((row) => row.relation === 'embedded_x_article'),
+    false,
+  );
+  assert.equal(JSON.stringify(result).includes(externalBody), false);
+  assert.equal(result.source_cutoff, '2026-08-10T12:00:00.000Z');
+});
+
+test('materializeBookmark does not let ordinary enrichment consume a separate X Article gap', async () => {
+  const externalArticle = 'https://example.com/article';
+  const xArticle = 'https://x.com/i/article/2042676487711584257';
+  const externalBody = 'Destination-owned ordinary article body.';
+  const result = await materializeBookmark(record({
+    links: [externalArticle, xArticle],
+    articleText: externalBody,
+    articleSourceTweetId: '2080296884187652381',
+    articleLocator: externalArticle,
+  }));
+
+  assert.equal(
+    result.components.find((row) => row.source_locator === externalArticle)?.disposition,
+    'unresolved',
+  );
+  assert.equal(
+    result.components.find((row) => row.relation === 'embedded_x_article')?.source_locator,
+    xArticle,
+  );
+  assert.equal(
+    result.components.find((row) => row.relation === 'embedded_x_article')?.disposition,
+    'unresolved',
+  );
+  assert.equal(JSON.stringify(result).includes(externalBody), false);
+});
+
+test('materializeBookmark treats X Article prefix lookalikes as ordinary outbound links', async () => {
+  const lookalike = 'https://x.com/i/article/2042676487711584257/extra';
+  const result = await materializeBookmark(record({
+    links: [lookalike],
+    articleText: 'Content fetched from a non-article route.',
+    articleSourceTweetId: '2080296884187652381',
+    articleLocator: lookalike,
+  }));
+
+  assert.equal(result.components.find((row) => row.source_locator === lookalike)?.relation, 'post_outbound_link');
+  assert.equal(result.components.find((row) => row.source_locator === lookalike)?.disposition, 'unresolved');
+  assert.equal(result.components.some((row) => row.relation === 'embedded_x_article'), false);
+});
+
 test('materializeBookmark leaves every X Article locator unresolved when body identity is ambiguous', async () => {
   const firstArticle = 'https://x.com/i/article/2042676487711584257';
   const secondArticle = 'https://x.com/i/article/1000000000000000000';

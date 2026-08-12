@@ -959,6 +959,50 @@ test('ft materialize overlays article and quote enrichment retained in the bookm
   }
 });
 
+test('ft materialize keeps indexed ordinary webpage content search-only and outbound', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-materialize-ordinary-index-'));
+  const origEnv = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = tmpDir;
+  const id = '2042685676949270724';
+  const externalArticle = 'https://example.com/article';
+  const externalBody = 'Destination-owned body retained only for index search.';
+  fs.writeFileSync(path.join(tmpDir, 'bookmarks.jsonl'), `${JSON.stringify({
+    id,
+    tweetId: id,
+    url: `https://x.com/operator/status/${id}`,
+    text: 'Archived root.',
+    authorHandle: 'operator',
+    syncedAt: '2026-08-11T00:00:00.000Z',
+    links: [externalArticle],
+  })}\n`);
+
+  try {
+    await buildIndex();
+    await updateArticleContent([{
+      id,
+      sourceTweetId: id,
+      sourceLocator: externalArticle,
+      articleTitle: 'Ordinary indexed article',
+      articleText: externalBody,
+      articleSite: 'Example',
+    }]);
+
+    const output = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'materialize', id, '--json']);
+    });
+    const result = JSON.parse(output);
+    const outbound = result.components.find((row: any) => row.source_locator === externalArticle);
+    assert.equal(outbound?.relation, 'post_outbound_link');
+    assert.equal(outbound?.disposition, 'unresolved');
+    assert.equal(result.components.some((row: any) => row.relation === 'embedded_x_article'), false);
+    assert.equal(JSON.stringify(result).includes(externalBody), false);
+    assert.equal(result.source_cutoff, '2026-08-11T00:00:00.000Z');
+  } finally {
+    process.env.FT_DATA_DIR = origEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('ft materialize --refresh retains indexed article content when the current focal response does not contradict it', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-materialize-refresh-index-'));
   const origEnv = process.env.FT_DATA_DIR;

@@ -9,13 +9,14 @@ import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText, upd
 import type { ArticleUpdate } from './bookmarks-db.js';
 import { fetchArticle, resolveTcoLink } from './bookmark-enrich.js';
 import type { ArticleContent } from './bookmark-enrich.js';
-import { bindArticleEnrichment, bindArticleLocator, xArticleIdentity } from './source-bindings.js';
+import { bindArticleEnrichment, bindArticleLocator, isXArticleLocator, xArticleIdentity } from './source-bindings.js';
 import { XRequestExecutor } from './x-request-policy.js';
 import {
   compareThreadTweetsChronologically,
   expandVisibleUrlEntities,
   extractExpandedLinks,
   parseTweetDetailResponse,
+  reduceExactDecimalIdentity,
   tweetUrlEntities,
 } from './tweet-snapshots.js';
 
@@ -1520,13 +1521,26 @@ export function parseTweetResultByRestId(json: any, tweetId: string): QuotedTwee
   const userResult = tweet?.core?.user_results?.result;
   const handle = userResult?.core?.screen_name ?? userResult?.legacy?.screen_name;
   const mediaEntities: any[] = legacy?.extended_entities?.media ?? legacy?.entities?.media ?? [];
-  const responseId = legacy.id_str ?? tweet?.rest_id;
-  if (responseId === undefined || responseId === null || String(responseId).length === 0) return null;
-  const resolvedId = String(responseId);
+  const focalIdentity = reduceExactDecimalIdentity(legacy.id_str, tweet?.rest_id);
+  if (focalIdentity.status !== 'ok' || focalIdentity.id !== tweetId) return null;
+  const resolvedId = focalIdentity.id;
+  const quotedStatusResult = tweet?.quoted_status_result;
+  const quotedResult = quotedStatusResult?.result;
+  const quotedTweet = quotedResult?.tweet ?? quotedResult;
+  const quoteIdentity = reduceExactDecimalIdentity(
+    legacy.quoted_status_id_str,
+    quotedTweet?.legacy?.id_str,
+    quotedTweet?.rest_id,
+  );
+  if (quoteIdentity.status === 'invalid') return null;
+  const quotedStatusId = quoteIdentity.status === 'ok' ? quoteIdentity.id : undefined;
+  const quotedStatusIdentityUnresolved = Boolean(quotedStatusResult && !quotedStatusId);
 
   return {
     id: resolvedId,
     text,
+    ...(quotedStatusId ? { quotedStatusId } : {}),
+    ...(quotedStatusIdentityUnresolved ? { quotedStatusIdentityUnresolved: true } : {}),
     authorHandle: handle,
     authorName: userResult?.core?.name ?? userResult?.legacy?.name,
     authorProfileImageUrl:
@@ -1618,10 +1632,14 @@ function focalArticleCandidates(tweet: any): any[] {
 }
 
 function articleCandidateLocator(candidate: any, sourceLinks: string[]): string | undefined {
-  const candidateId = candidate?.rest_id ?? candidate?.article_id ?? candidate?.id;
-  if (candidateId !== undefined && candidateId !== null && String(candidateId).length > 0) {
-    const requested = `https://x.com/i/article/${String(candidateId)}`;
-    return bindArticleLocator(sourceLinks, requested) ?? requested;
+  const identity = reduceExactDecimalIdentity(candidate?.rest_id, candidate?.article_id, candidate?.id);
+  if (identity.status === 'invalid') return undefined;
+  if (identity.status === 'ok') {
+    const requested = `https://x.com/i/article/${identity.id}`;
+    const focalArticleLinks = sourceLinks.filter(isXArticleLocator);
+    return focalArticleLinks.length > 0
+      ? bindArticleLocator(focalArticleLinks, requested)
+      : requested;
   }
   return bindArticleLocator(sourceLinks);
 }
@@ -1630,9 +1648,9 @@ export function parseTweetArticleByRestId(json: any, requestedTweetId?: string):
   const result = json?.data?.tweetResult?.result;
   if (!result) return null;
   const tweet = result.tweet ?? result;
-  const responseTweetId = tweet?.legacy?.id_str ?? tweet?.rest_id;
-  if (responseTweetId === undefined || responseTweetId === null) return null;
-  const sourceTweetId = String(responseTweetId);
+  const focalIdentity = reduceExactDecimalIdentity(tweet?.legacy?.id_str, tweet?.rest_id);
+  if (focalIdentity.status !== 'ok') return null;
+  const sourceTweetId = focalIdentity.id;
   if (requestedTweetId && sourceTweetId !== requestedTweetId) return null;
   const sourceLinks = extractExpandedLinks(tweetUrlEntities(tweet, tweet?.legacy));
 
@@ -2026,16 +2044,6 @@ function isLinkOnlyBookmark(record: BookmarkRecord): boolean {
   return textWithoutUrls(record.text ?? '').length < LINK_ONLY_THRESHOLD;
 }
 
-function isXArticleUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    const host = url.hostname.toLowerCase();
-    return (host === 'x.com' || host === 'twitter.com') && url.pathname.startsWith('/i/article/');
-  } catch {
-    return false;
-  }
-}
-
 async function readEnrichedBookmarkIds(records: BookmarkRecord[]): Promise<Set<string>> {
   const enrichedIds = new Set<string>();
   const recordsById = new Map(records.map((record) => [record.id, record]));
@@ -2102,7 +2110,7 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
   // Gap 3a: X Article bookmarks can look short ("x.com/i/article/…") even
   // when the useful body exists in the authenticated TweetResult payload.
   const needsXArticle = records.filter((r) =>
-    !enrichedIds.has(r.id) && isLinkOnlyBookmark(r) && (r.links ?? []).some(isXArticleUrl)
+    !enrichedIds.has(r.id) && isLinkOnlyBookmark(r) && (r.links ?? []).some(isXArticleLocator)
   );
   const xArticleIds = new Set(needsXArticle.map((r) => r.tweetId));
 
@@ -2291,7 +2299,7 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
   // Filter to link-only bookmarks not yet enriched
   const needsEnrichment = records.filter((r) => {
     if (enrichedIds.has(r.id)) return false;
-    if ((r.links ?? []).some(isXArticleUrl)) return false;
+    if ((r.links ?? []).some(isXArticleLocator)) return false;
     return isLinkOnlyBookmark(r);
   });
 

@@ -8,7 +8,7 @@ import {
 import type { BookmarkMediaObject, BookmarkRecord, QuotedTweetSnapshot, ThreadTweetSnapshot } from './types.js';
 import type { ExactXRefreshObservation } from './x-materialize.js';
 import {
-  bindArticleEnrichment,
+  bindXArticleEnrichment,
   bindArticleLocator,
   isXArticleLocator,
   sameSourceLocator,
@@ -374,11 +374,18 @@ export async function materializeBookmark(
   const components: SourceComponent[] = [];
   const verificationCache: MediaVerificationCache = new Map();
   const rootLinks = uniquePublicLinks(item.links ?? []);
-  const recoveredArticleLink = bindArticleEnrichment(item.tweetId, rootLinks, {
+  const recoveredArticleLink = bindXArticleEnrichment(item.tweetId, rootLinks, {
     articleText: item.articleText,
     sourceTweetId: item.articleSourceTweetId,
     sourceLocator: item.articleLocator,
   });
+  const xArticleLinks = rootLinks.filter(isXArticleLocator);
+  const requestedXArticleLocator = item.articleLocator && isXArticleLocator(item.articleLocator)
+    ? item.articleLocator
+    : undefined;
+  const unresolvedXArticleLink = recoveredArticleLink
+    ? undefined
+    : bindArticleLocator(xArticleLinks, requestedXArticleLocator) ?? xArticleLinks[0];
   const boundManifest = manifest
     ? { ...manifest, entries: manifest.entries.filter((entry) => entry.bookmarkId === item.id) }
     : null;
@@ -501,24 +508,15 @@ export async function materializeBookmark(
       'used',
       'X long-form article content recovered',
     ));
-  } else if (
-    item.articleText
-    || item.articleTitle
-    || item.articleSite
-    || (item.links ?? []).some(isXArticleLocator)
-  ) {
+  } else if (unresolvedXArticleLink) {
     components.push(component(
       rootId,
       'x-article',
       'embedded_x_article',
-      bindArticleLocator(rootLinks, item.articleLocator)
-        ?? rootLinks.find(isXArticleLocator)
-        ?? item.url,
+      unresolvedXArticleLink,
       null,
       'unresolved',
-      item.articleText
-        ? 'X long-form article content is present but source-tweet or locator identity is unbound'
-        : 'X long-form article identity exists but article content is absent',
+      'X long-form article identity exists but article content is absent or not bound to this locator',
     ));
   }
 
@@ -530,7 +528,10 @@ export async function materializeBookmark(
     locator: item.url,
     author_handle: item.authorHandle ?? null,
     posted_at: item.postedAt ?? null,
-    source_cutoff: item.threadExpandedAt ?? item.enrichedAt ?? item.syncedAt ?? null,
+    source_cutoff: item.threadExpandedAt
+      ?? (recoveredArticleLink ? item.enrichedAt : undefined)
+      ?? item.syncedAt
+      ?? null,
     achieved_depth: incomplete
       ? 'source-owned root and enumerated components with explicit unresolved depth'
       : 'source-owned root and enumerated components recovered',

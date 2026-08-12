@@ -43,6 +43,10 @@ export interface BookmarkEngagementSnapshot {
 export interface QuotedTweetSnapshot {
   id: string;
   text: string;
+  /** Exact quote identity owned by this tweet's response, when present. */
+  quotedStatusId?: string;
+  /** The response identifies a quote relationship but exposes no exact quote ID. */
+  quotedStatusIdentityUnresolved?: boolean;
   authorHandle?: string;
   authorName?: string;
   authorProfileImageUrl?: string;

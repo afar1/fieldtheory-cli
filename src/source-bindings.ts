@@ -79,3 +79,16 @@ export function bindArticleEnrichment(
     || !enrichment.sourceLocator) return undefined;
   return bindArticleLocator(sourceLinks, enrichment.sourceLocator);
 }
+
+export function bindXArticleEnrichment(
+  rootTweetId: string,
+  sourceLinks: string[],
+  enrichment: {
+    articleText?: string | null;
+    sourceTweetId?: string | null;
+    sourceLocator?: string | null;
+  },
+): string | undefined {
+  const locator = bindArticleEnrichment(rootTweetId, sourceLinks, enrichment);
+  return locator && isXArticleLocator(locator) ? locator : undefined;
+}

@@ -6,7 +6,12 @@ import {
   type TweetDetailTermination,
 } from './graphql-bookmarks.js';
 import { extractSameAuthorThreadBelow } from './tweet-snapshots.js';
-import { bindArticleEnrichment, isXArticleLocator, sameSourceLocator } from './source-bindings.js';
+import {
+  bindArticleEnrichment,
+  bindXArticleEnrichment,
+  isXArticleLocator,
+  sameSourceLocator,
+} from './source-bindings.js';
 import type { BookmarkRecord, ThreadTweetSnapshot } from './types.js';
 import { XRequestExecutor } from './x-request-policy.js';
 
@@ -53,7 +58,7 @@ function reduceArticleCurrentness(
   liveArticle: TweetFetchResult['article'],
 ): ArticleCurrentnessReduction {
   const liveLocator = liveArticle
-    ? bindArticleEnrichment(record.tweetId, currentLinks, {
+    ? bindXArticleEnrichment(record.tweetId, currentLinks, {
         articleText: liveArticle.text,
         sourceTweetId: liveArticle.sourceTweetId,
         sourceLocator: liveArticle.sourceLocator,
@@ -83,6 +88,19 @@ function reduceArticleCurrentness(
     sourceLocator: record.articleLocator,
   });
   const currentArticleLinks = currentLinks.filter(isXArticleLocator);
+  if (archivedLocator && !isXArticleLocator(archivedLocator)) {
+    const retainOrdinaryEnrichment = Boolean(reaffirmedLocator);
+    return {
+      fields: {
+        articleTitle: retainOrdinaryEnrichment ? record.articleTitle ?? null : null,
+        articleText: retainOrdinaryEnrichment ? record.articleText ?? null : null,
+        articleSite: retainOrdinaryEnrichment ? record.articleSite ?? null : null,
+        articleSourceTweetId: retainOrdinaryEnrichment ? record.tweetId : null,
+        articleLocator: retainOrdinaryEnrichment ? reaffirmedLocator ?? null : null,
+      },
+      status: liveArticle || currentArticleLinks.length > 0 ? 'unresolved' : 'not_applicable',
+    };
+  }
   const locatorContradicted = Boolean(
     archivedLocator
     && isXArticleLocator(archivedLocator)
@@ -142,6 +160,11 @@ function refreshedRoot(
       ? [...links, liveArticleLocator]
       : links;
   const article = reduceArticleCurrentness(record, articleLinks, result.article);
+  const liveQuotedStatusId = snapshot.quotedStatusId;
+  const quotedStatusId = liveQuotedStatusId ?? record.quotedStatusId;
+  const quotedTweet = quotedStatusId && record.quotedTweet?.id === quotedStatusId
+    ? record.quotedTweet
+    : undefined;
   return {
     record: {
       ...record,
@@ -155,6 +178,8 @@ function refreshedRoot(
       postedAt: snapshot.postedAt ?? record.postedAt,
       conversationId: snapshot.conversationId ?? record.conversationId,
       inReplyToStatusId: snapshot.inReplyToStatusId ?? record.inReplyToStatusId,
+      quotedStatusId,
+      quotedTweet,
       media: snapshot.media ?? record.media,
       mediaObjects: snapshot.mediaObjects ?? record.mediaObjects,
       links: article.fields.articleLocator
@@ -272,6 +297,7 @@ export async function refreshExactXBookmark(
     ? extractSameAuthorThreadBelow(detail.tweets, record.tweetId, record.authorHandle)
     : [];
   let quoteStatus: TweetFetchResult['status'] = 'ok';
+  const quoteIdentityUnresolved = Boolean(root.snapshot.quotedStatusIdentityUnresolved);
   let quotedTweet = record.quotedStatusId && record.quotedTweet?.id === record.quotedStatusId
     ? record.quotedTweet
     : undefined;
@@ -285,6 +311,7 @@ export async function refreshExactXBookmark(
     quoteStatus = quoted.status;
     if (quoted.status === 'ok' && quoted.snapshot) quotedTweet = quoted.snapshot;
   }
+  if (quoteIdentityUnresolved && quoteStatus === 'ok') quoteStatus = 'empty';
   const articleStatus = refreshed.articleStatus;
   const complete = refreshComplete({ parents, detail, quoteStatus, articleStatus });
 

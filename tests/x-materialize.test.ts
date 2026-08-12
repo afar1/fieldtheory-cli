@@ -118,6 +118,182 @@ test('refreshExactXBookmark refreshes one root and bounded thread in memory', as
   }
 });
 
+test('refreshExactXBookmark discovers and fetches a live quote missing from the archive', async () => {
+  const originalFetch = globalThis.fetch;
+  const seenTweetIds: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      const variables = JSON.parse(new URL(url).searchParams.get('variables') ?? '{}');
+      seenTweetIds.push(variables.tweetId);
+      const row = variables.tweetId === '98'
+        ? tweet('98', 'Live quoted source.')
+        : tweet('100', 'Current root.');
+      if (variables.tweetId === '100') row.legacy.quoted_status_id_str = '98';
+      return new Response(JSON.stringify({ data: { tweetResult: { result: row } } }), { status: 200 });
+    }
+    return new Response(JSON.stringify(detailResponse([tweet('100', 'Current root.')])), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const result = await refreshExactXBookmark(archived(), {
+      csrfToken: 'ct0',
+      delayMs: 0,
+      now: '2026-08-12T00:00:00.000Z',
+    });
+    assert.deepEqual(seenTweetIds, ['100', '98']);
+    assert.equal(result.record.quotedStatusId, '98');
+    assert.equal(result.record.quotedTweet?.id, '98');
+    assert.equal(result.record.quotedTweet?.text, 'Live quoted source.');
+    assert.equal(result.observation.quote_status, 'ok');
+    assert.equal(result.observation.status, 'complete');
+    assert.equal(result.record.threadExpandedAt, '2026-08-12T00:00:00.000Z');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('refreshExactXBookmark replaces stale archived quote identity with the live focal identity', async () => {
+  const originalFetch = globalThis.fetch;
+  const seenTweetIds: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      const variables = JSON.parse(new URL(url).searchParams.get('variables') ?? '{}');
+      seenTweetIds.push(variables.tweetId);
+      const row = variables.tweetId === '98'
+        ? tweet('98', 'Replacement quoted source.')
+        : tweet('100', 'Current root.');
+      if (variables.tweetId === '100') row.legacy.quoted_status_id_str = '98';
+      return new Response(JSON.stringify({ data: { tweetResult: { result: row } } }), { status: 200 });
+    }
+    return new Response(JSON.stringify(detailResponse([tweet('100', 'Current root.')])), { status: 200 });
+  }) as typeof fetch;
+
+  const source = archived();
+  source.quotedStatusId = '97';
+  source.quotedTweet = { id: '97', text: 'Stale quote.', url: 'https://x.com/stale/status/97' };
+  try {
+    const result = await refreshExactXBookmark(source, { csrfToken: 'ct0', delayMs: 0 });
+    assert.deepEqual(seenTweetIds, ['100', '98']);
+    assert.equal(result.record.quotedStatusId, '98');
+    assert.equal(result.record.quotedTweet?.id, '98');
+    assert.equal(JSON.stringify(result).includes('Stale quote.'), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('refreshExactXBookmark remains partial when a newly discovered live quote is unavailable', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      const variables = JSON.parse(new URL(url).searchParams.get('variables') ?? '{}');
+      if (variables.tweetId === '98') return new Response('', { status: 404 });
+      const row = tweet('100', 'Current root.');
+      row.legacy.quoted_status_id_str = '98';
+      return new Response(JSON.stringify({ data: { tweetResult: { result: row } } }), { status: 200 });
+    }
+    return new Response(JSON.stringify(detailResponse([tweet('100', 'Current root.')])), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const result = await refreshExactXBookmark(archived(), { csrfToken: 'ct0', delayMs: 0 });
+    assert.equal(result.record.quotedStatusId, '98');
+    assert.equal(result.record.quotedTweet, undefined);
+    assert.equal(result.observation.quote_status, 'not_found');
+    assert.equal(result.observation.status, 'partial');
+    assert.equal(result.record.threadExpandedAt, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('refreshExactXBookmark fails the root closed on contradictory live quote identities', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    const row = tweet('100', 'Current root.');
+    row.legacy.quoted_status_id_str = '98';
+    (row as any).quoted_status_result = { result: { rest_id: '97' } };
+    return new Response(JSON.stringify({ data: { tweetResult: { result: row } } }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const source = archived();
+    const result = await refreshExactXBookmark(source, { csrfToken: 'ct0', delayMs: 0 });
+    assert.equal(result.observation.status, 'unavailable');
+    assert.equal(result.observation.root_status, 'error');
+    assert.deepEqual(result.record, source);
+    assert.equal(result.record.threadExpandedAt, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('refreshExactXBookmark keeps a focal root with unavailable quote identity explicitly partial', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      const row: any = tweet('100', 'Current focal root.');
+      row.quoted_status_result = { result: { __typename: 'TweetTombstone' } };
+      return new Response(JSON.stringify({ data: { tweetResult: { result: row } } }), { status: 200 });
+    }
+    return new Response(JSON.stringify(detailResponse([tweet('100', 'Current focal root.')])), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const result = await refreshExactXBookmark(archived(), {
+      csrfToken: 'ct0',
+      delayMs: 0,
+      now: '2026-08-12T00:00:00.000Z',
+    });
+    assert.equal(result.record.text, 'Current focal root.');
+    assert.equal(result.record.quotedStatusId, undefined);
+    assert.equal(result.observation.root_status, 'ok');
+    assert.equal(result.observation.quote_status, 'empty');
+    assert.equal(result.observation.status, 'partial');
+    assert.equal(result.record.threadExpandedAt, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('refreshExactXBookmark does not certify an archived quote when the live quote identity is unavailable', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      const variables = JSON.parse(new URL(url).searchParams.get('variables') ?? '{}');
+      if (variables.tweetId === '98') {
+        return new Response(JSON.stringify({ data: { tweetResult: { result: tweet('98', 'Archived candidate quote.') } } }), { status: 200 });
+      }
+      const row: any = tweet('100', 'Current focal root.');
+      row.quoted_status_result = { result: { __typename: 'TweetTombstone' } };
+      return new Response(JSON.stringify({ data: { tweetResult: { result: row } } }), { status: 200 });
+    }
+    return new Response(JSON.stringify(detailResponse([tweet('100', 'Current focal root.')])), { status: 200 });
+  }) as typeof fetch;
+
+  const source = archived();
+  source.quotedStatusId = '98';
+  try {
+    const result = await refreshExactXBookmark(source, {
+      csrfToken: 'ct0',
+      delayMs: 0,
+      now: '2026-08-12T00:00:00.000Z',
+    });
+    assert.equal(result.record.quotedStatusId, '98');
+    assert.equal(result.record.quotedTweet?.id, '98');
+    assert.equal(result.observation.quote_status, 'empty');
+    assert.equal(result.observation.status, 'partial');
+    assert.equal(result.record.threadExpandedAt, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('refreshExactXBookmark preserves archived bytes when the exact root is unavailable', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => new Response('', { status: 404 })) as typeof fetch;
@@ -488,15 +664,14 @@ test('refreshExactXBookmark applies the configured delay before every request af
     const row = variables.tweetId === '98'
       ? tweet('98', 'Current quoted source.')
       : tweet('100', 'Current root.');
+    if (variables.tweetId === '100') row.legacy.quoted_status_id_str = '98';
     return new Response(JSON.stringify({ data: { tweetResult: { result: row } } }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     });
   }) as typeof fetch;
-  const source = archived();
-  source.quotedStatusId = '98';
   try {
-    const result = await refreshExactXBookmark(source, {
+    const result = await refreshExactXBookmark(archived(), {
       csrfToken: 'ct0',
       delayMs: 20,
       now: '2026-08-11T00:00:00.000Z',
@@ -505,6 +680,91 @@ test('refreshExactXBookmark applies the configured delay before every request af
     assert.equal(requestTimes.length, 3);
     assert.ok(requestTimes[1] - requestTimes[0] >= 15);
     assert.ok(requestTimes[2] - requestTimes[1] >= 15);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('refreshExactXBookmark preserves current-bound ordinary enrichment without treating it as an X Article gap', async () => {
+  const externalArticle = 'https://example.com/article';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      const row = tweet('100', 'Current root with an ordinary outbound link.');
+      row.legacy.entities.urls = [{ expanded_url: externalArticle }];
+      return new Response(JSON.stringify({ data: { tweetResult: { result: row } } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify(detailResponse([
+      tweet('100', 'Current root with an ordinary outbound link.'),
+    ])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  const source = archived();
+  source.links = [externalArticle];
+  source.articleTitle = 'Ordinary external article';
+  source.articleText = 'Search-only destination body.';
+  source.articleSite = 'Example';
+  source.articleSourceTweetId = source.tweetId;
+  source.articleLocator = externalArticle;
+  try {
+    const result = await refreshExactXBookmark(source, {
+      csrfToken: 'ct0',
+      delayMs: 0,
+      now: '2026-08-12T00:00:00.000Z',
+    });
+    assert.equal(result.observation.status, 'complete');
+    assert.equal(result.observation.article_status, 'not_applicable');
+    assert.equal(result.record.articleText, 'Search-only destination body.');
+    assert.equal(result.record.articleLocator, externalArticle);
+    assert.equal(result.record.threadExpandedAt, '2026-08-12T00:00:00.000Z');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('refreshExactXBookmark clears stale ordinary enrichment without creating an X Article gap', async () => {
+  const externalArticle = 'https://example.com/article';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/TweetResultByRestId?')) {
+      return new Response(JSON.stringify({ data: { tweetResult: { result: tweet('100', 'Current root.') } } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify(detailResponse([tweet('100', 'Current root.')])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  const source = archived();
+  source.links = [externalArticle];
+  source.articleTitle = 'Stale ordinary article';
+  source.articleText = 'Stale search-only destination body.';
+  source.articleSite = 'Example';
+  source.articleSourceTweetId = source.tweetId;
+  source.articleLocator = externalArticle;
+  try {
+    const result = await refreshExactXBookmark(source, {
+      csrfToken: 'ct0',
+      delayMs: 0,
+      now: '2026-08-12T00:00:00.000Z',
+    });
+    assert.equal(result.observation.status, 'complete');
+    assert.equal(result.observation.article_status, 'not_applicable');
+    assert.equal(result.record.articleText, null);
+    assert.equal(result.record.articleSourceTweetId, null);
+    assert.equal(result.record.articleLocator, null);
+    assert.equal(result.record.threadExpandedAt, '2026-08-12T00:00:00.000Z');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -782,6 +1042,19 @@ test('TweetDetail fails closed on a tweet envelope with no response-owned result
         },
       },
     });
+    assert.equal(parsed.sawUnparseableTweet, true);
+    assert.deepEqual(parsed.parserGaps, ['unparseable_entry']);
+  }
+});
+
+test('TweetDetail fails closed on malformed or contradictory tweet identity aliases', () => {
+  for (const row of [
+    { ...tweet('100', 'Current root.'), rest_id: '999' },
+    { ...tweet('100', 'Current root.'), rest_id: 100 },
+    { ...tweet('100', 'Current root.'), legacy: { ...tweet('100', 'Current root.').legacy, id_str: 100 } },
+  ]) {
+    const parsed = parseTweetDetailResponse(detailResponse([row]));
+    assert.equal(parsed.tweets.length, 0);
     assert.equal(parsed.sawUnparseableTweet, true);
     assert.deepEqual(parsed.parserGaps, ['unparseable_entry']);
   }

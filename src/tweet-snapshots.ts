@@ -14,6 +14,23 @@ export function uniqueStrings(values: string[]): string[] {
   return [...new Set(values)];
 }
 
+export type ExactDecimalIdentity =
+  | { status: 'ok'; id: string }
+  | { status: 'absent' | 'invalid' };
+
+/** Accept response-owned decimal-string aliases only when every present value agrees. */
+export function reduceExactDecimalIdentity(...values: unknown[]): ExactDecimalIdentity {
+  const present = values.filter((value) => value !== undefined && value !== null);
+  if (present.length === 0) return { status: 'absent' };
+  if (present.some((value) => typeof value !== 'string' || !/^\d+$/.test(value))) {
+    return { status: 'invalid' };
+  }
+  const identities = uniqueStrings(present as string[]);
+  return identities.length === 1
+    ? { status: 'ok', id: identities[0] }
+    : { status: 'invalid' };
+}
+
 function urlEntityKey(entity: any): string {
   return String(entity?.url ?? entity?.expanded_url ?? entity?.expandedUrl ?? entity?.display_url ?? entity?.displayUrl ?? '');
 }
@@ -77,7 +94,7 @@ export function compareThreadTweetsChronologically(a: ThreadTweetSnapshot, b: Th
 
 function parseThreadTweetResult(
   value: any,
-  fallbackId?: string,
+  expectedId?: string,
   metadata: Partial<ThreadTweetSnapshot> = {},
 ): ThreadTweetSnapshot | null {
   const tweet = value?.tweet ?? value;
@@ -87,8 +104,9 @@ function parseThreadTweetResult(
   const urlEntities = tweetUrlEntities(tweet, legacy);
   const noteText = tweet?.note_tweet?.note_tweet_results?.result?.text;
   const text = expandVisibleUrlEntities(noteText ?? legacy.full_text ?? legacy.text ?? '', urlEntities);
-  const resolvedId = String(legacy.id_str ?? tweet?.rest_id ?? fallbackId ?? '');
-  if (!resolvedId || !text) return null;
+  const identity = reduceExactDecimalIdentity(legacy.id_str, tweet?.rest_id);
+  if (identity.status !== 'ok' || (expectedId && identity.id !== expectedId) || !text) return null;
+  const resolvedId = identity.id;
 
   const userResult = tweet?.core?.user_results?.result;
   const handle = userResult?.core?.screen_name ?? userResult?.legacy?.screen_name;
