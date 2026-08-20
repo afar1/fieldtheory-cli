@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -190,8 +191,9 @@ test('ft link prints canonical wiki links for commands and library docs', async 
       await buildCli().parseAsync(['node', 'ft', 'link', 'save', '--json']);
     });
     const parsed = JSON.parse(jsonOutput);
-    assert.equal(parsed.link, '[[save]]');
-    assert.equal(parsed.entry.place, 'commands');
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.data.link, '[[save]]');
+    assert.equal(parsed.data.entry.place, 'commands');
   } finally {
     for (const [key, value] of Object.entries(origEnv)) {
       if (value === undefined) delete process.env[key];
@@ -346,43 +348,96 @@ test('ft navigation commands cover links tags writes app targets and location st
   }
 });
 
-test('ft current keeps document content opt-in for model-facing JSON', async () => {
+test('ft current exposes flat agent JSON and updates the source document by hash', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-cli-'));
+  const previousLibraryDir = process.env.FT_LIBRARY_DIR;
   const previousExitCode = process.exitCode;
   try {
+    const libraryDir = path.join(tmpDir, 'library');
     const sessionDir = path.join(tmpDir, 'session');
     fs.mkdirSync(sessionDir, { recursive: true });
+    fs.mkdirSync(libraryDir, { recursive: true });
+    process.env.FT_LIBRARY_DIR = libraryDir;
+    const sourcePath = path.join(libraryDir, 'current-body.md');
     const contentPath = path.join(sessionDir, 'active.md');
     const manifestPath = path.join(sessionDir, 'context.json');
-    fs.writeFileSync(contentPath, '# Current Body\n\nprivate working text\n');
+    const replacementPath = path.join(tmpDir, 'replacement.md');
+    const parentReplacementPath = path.join(tmpDir, 'parent-replacement.md');
+    fs.writeFileSync(sourcePath, '# Source Body\n\nprivate source text\n');
+    fs.writeFileSync(contentPath, '# Cached Body\n\nprivate cached text\n');
+    fs.writeFileSync(replacementPath, '# Updated Body\n');
+    fs.writeFileSync(parentReplacementPath, '# Parent Updated Body\n');
     fs.writeFileSync(manifestPath, JSON.stringify({
       updatedAt: '2026-01-02T00:00:00.000Z',
       activeDocument: {
         title: 'Current Body',
-        path: '/library/current-body.md',
+        path: sourcePath,
         kind: 'wiki',
         contentMode: 'rendered',
         contentPath,
       },
     }));
-
-    const summaryOutput = await captureStdout(async () => {
-      await buildCli().parseAsync(['node', 'ft', 'current', '--manifest', manifestPath, '--json']);
+    const runCurrent = (...args: string[]) => execFileSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'current', ...args], {
+      cwd: process.cwd(),
+      env: { ...process.env, FT_LIBRARY_DIR: libraryDir },
+      encoding: 'utf-8',
     });
-    const summary = JSON.parse(summaryOutput);
-    assert.equal(summary.activeDocument.title, 'Current Body');
+
+    const fullOutput = runCurrent('--manifest', manifestPath, '--json');
+    const fullEnvelope = JSON.parse(fullOutput);
+    assert.equal(fullEnvelope.ok, true);
+    const full = fullEnvelope.data;
+    assert.equal(full.title, 'Current Body');
+    assert.equal(fs.realpathSync(full.sourcePath), fs.realpathSync(sourcePath));
+    assert.equal(full.editable, true);
+    assert.equal(full.activeDocument, undefined);
+    assert.match(full.content, /private source text/);
+
+    const summaryOutput = runCurrent('--manifest', manifestPath, '--summary', '--json');
+    const summaryEnvelope = JSON.parse(summaryOutput);
+    assert.equal(summaryEnvelope.ok, true);
+    const summary = summaryEnvelope.data;
+    assert.equal(summary.title, 'Current Body');
     assert.equal(summary.content, undefined);
 
-    const contentOutput = await captureStdout(async () => {
-      await buildCli().parseAsync(['node', 'ft', 'current', '--manifest', manifestPath, '--content-only']);
-    });
-    assert.equal(contentOutput, '# Current Body\n\nprivate working text\n');
+    const contentOutput = runCurrent('--manifest', manifestPath, '--content-only');
+    assert.equal(contentOutput, '# Source Body\n\nprivate source text\n');
 
-    const fullOutput = await captureStdout(async () => {
-      await buildCli().parseAsync(['node', 'ft', 'current', '--manifest', manifestPath, '--include-content', '--json']);
-    });
-    assert.match(JSON.parse(fullOutput).content, /private working text/);
+    const updateOutput = runCurrent(
+      'update',
+      '--manifest',
+      manifestPath,
+      '--file',
+      replacementPath,
+      '--expected-sha256',
+      full.version.sha256,
+      '--json',
+    );
+    const updatedEnvelope = JSON.parse(updateOutput);
+    assert.equal(updatedEnvelope.ok, true);
+    const updated = updatedEnvelope.data;
+    assert.equal(fs.readFileSync(sourcePath, 'utf-8'), '# Updated Body\n');
+    assert.equal(fs.readFileSync(contentPath, 'utf-8'), '# Cached Body\n\nprivate cached text\n');
+    assert.notEqual(updated.version.sha256, full.version.sha256);
+
+    const parentUpdateOutput = runCurrent(
+      '--manifest',
+      manifestPath,
+      '--json',
+      'update',
+      '--file',
+      parentReplacementPath,
+      '--expected-sha256',
+      updated.version.sha256,
+    );
+    const parentUpdatedEnvelope = JSON.parse(parentUpdateOutput);
+    assert.equal(parentUpdatedEnvelope.ok, true);
+    assert.equal(parentUpdatedEnvelope.data.data, undefined);
+    assert.equal(fs.readFileSync(sourcePath, 'utf-8'), '# Parent Updated Body\n');
+    assert.notEqual(parentUpdatedEnvelope.data.version.sha256, updated.version.sha256);
   } finally {
+    if (previousLibraryDir === undefined) delete process.env.FT_LIBRARY_DIR;
+    else process.env.FT_LIBRARY_DIR = previousLibraryDir;
     process.exitCode = previousExitCode;
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -420,11 +475,29 @@ test('ft state prints a read-only repo workflow table', async () => {
     });
     assert.match(output, /^FT state/);
     assert.match(output, /FT state/);
-    assert.match(output, /Root\?/);
-    assert.match(output, /Origin\?/);
-    assert.match(output, /Root/);
+    assert.match(output, /In Local App/);
+    assert.match(output, /Saved Remotely/);
+    assert.match(output, /Folder Name/);
+    assert.match(output, /Combined app/);
     assert.match(output, /not inside a Git checkout/);
     assert.match(output, /Verdict: not a repo\./);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ft state names the combined app after the mac-app folder when present', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fieldtheory-'));
+  try {
+    execFileSync('git', ['init', '--quiet'], { cwd: tmpDir, stdio: 'ignore' });
+    fs.mkdirSync(path.join(tmpDir, 'mac-app'));
+
+    const output = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'state', '--repo', tmpDir, '--no-fetch']);
+    });
+
+    assert.match(output, new RegExp(`${path.basename(tmpDir)}/mac-app`));
+    assert.doesNotMatch(output, /\| - \| up to date \| Combined app \|/);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -497,9 +570,10 @@ test('ft paths --json prints canonical roots', async () => {
       await buildCli().parseAsync(['node', 'ft', 'paths', '--json']);
     });
     const parsed = JSON.parse(output);
-    assert.equal(parsed.canonical.bookmarksDir, process.env.FT_DATA_DIR);
-    assert.equal(parsed.canonical.libraryDir, process.env.FT_LIBRARY_DIR);
-    assert.equal(parsed.canonical.commandsDir, process.env.FT_COMMANDS_DIR);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.data.canonical.bookmarksDir, process.env.FT_DATA_DIR);
+    assert.equal(parsed.data.canonical.libraryDir, process.env.FT_LIBRARY_DIR);
+    assert.equal(parsed.data.canonical.commandsDir, process.env.FT_COMMANDS_DIR);
   } finally {
     for (const [key, value] of Object.entries(origEnv)) {
       if (value === undefined) delete process.env[key];

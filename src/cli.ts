@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { Command, InvalidArgumentError, Option } from 'commander';
 import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
@@ -33,13 +34,15 @@ import { exportBookmarks } from './md-export.js';
 import { renderViz } from './bookmarks-viz.js';
 import { listBrowserIds } from './browsers.js';
 import { configureHttpProxyFromEnv } from './http-proxy.js';
+import { captureXTimeline, type XTimelineKind } from './x-timeline.js';
 import { dataDir, ensureDataDir, isFirstRun, migrateLegacyIdeasData, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir, bookmarkMediaDir, bookmarkMediaManifestPath } from './paths.js';
 import { PromptCancelledError, promptText } from './prompt.js';
+import { error as jsonError, ok as jsonOk } from './json-contract.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import { registerCompanionCommands } from './companion-cli.js';
 import { getPathReport } from './field-status.js';
 import { formatAgentContext, getAgentContext } from './agent-context.js';
-import { formatCurrentDocumentSummary, readCurrentDocumentContext, readCurrentDocumentSummary } from './current.js';
+import { formatCurrentDocumentSummary, readCurrentDocumentSummary, readCurrentDocumentView, updateCurrentDocument } from './current.js';
 import { formatWorkflowState, getWorkflowState } from './workflow-state.js';
 import {
   appendNavigationDocument,
@@ -309,8 +312,109 @@ function warnIfEmpty(totalBookmarks: number): void {
   console.log(`    \u2022 Try: ft sync --cookies <ct0> <auth_token>  (paste from DevTools)\n`);
 }
 
+type JsonOutputCapture = {
+  stdoutChunks: string[];
+  stderrChunks: string[];
+  previousExitCode: typeof process.exitCode;
+  originalStdoutWrite: typeof process.stdout.write;
+  originalStderrWrite: typeof process.stderr.write;
+  wroteContract: boolean;
+};
+
+let activeJsonOutputCapture: JsonOutputCapture | null = null;
+
+function writeStdout(value: string): void {
+  if (activeJsonOutputCapture) {
+    activeJsonOutputCapture.originalStdoutWrite.call(process.stdout, value);
+    return;
+  }
+  process.stdout.write(value);
+}
+
 function printJson(value: unknown): void {
-  console.log(JSON.stringify(value, null, 2));
+  if (activeJsonOutputCapture) {
+    activeJsonOutputCapture.wroteContract = true;
+  }
+  writeStdout(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function isJsonContractEnvelope(value: unknown): boolean {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && typeof (value as { ok?: unknown }).ok === 'boolean'
+    && typeof (value as { schemaVersion?: unknown }).schemaVersion === 'number'
+    && (
+      (value as { ok: boolean }).ok
+        ? Object.prototype.hasOwnProperty.call(value, 'data')
+        : Object.prototype.hasOwnProperty.call(value, 'error')
+    )
+  );
+}
+
+function beginJsonOutputCapture(): void {
+  if (activeJsonOutputCapture) return;
+  const capture: JsonOutputCapture = {
+    stdoutChunks: [],
+    stderrChunks: [],
+    previousExitCode: process.exitCode,
+    originalStdoutWrite: process.stdout.write,
+    originalStderrWrite: process.stderr.write,
+    wroteContract: false,
+  };
+  process.stdout.write = ((chunk: any, encodingOrCb?: any, cb?: any) => {
+    capture.stdoutChunks.push(Buffer.isBuffer(chunk) ? chunk.toString('utf-8') : String(chunk));
+    if (typeof encodingOrCb === 'function') encodingOrCb();
+    if (typeof cb === 'function') cb();
+    return true;
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: any, encodingOrCb?: any, cb?: any) => {
+    capture.stderrChunks.push(Buffer.isBuffer(chunk) ? chunk.toString('utf-8') : String(chunk));
+    if (typeof encodingOrCb === 'function') encodingOrCb();
+    if (typeof cb === 'function') cb();
+    return true;
+  }) as typeof process.stderr.write;
+  activeJsonOutputCapture = capture;
+}
+
+function finishJsonOutputCapture(): void {
+  const capture = activeJsonOutputCapture;
+  if (!capture) return;
+  activeJsonOutputCapture = null;
+  process.stdout.write = capture.originalStdoutWrite;
+  process.stderr.write = capture.originalStderrWrite;
+
+  const output = capture.stdoutChunks.join('');
+  const stderr = capture.stderrChunks.join('');
+  if (capture.wroteContract) return;
+
+  try {
+    const parsed = JSON.parse(output);
+    if (isJsonContractEnvelope(parsed)) {
+      writeStdout(output);
+      return;
+    }
+  } catch {
+    // Fall back to wrapping legacy text output below.
+  }
+
+  const failed = typeof process.exitCode === 'number'
+    && process.exitCode !== 0
+    && process.exitCode !== capture.previousExitCode;
+  if (failed) {
+    printJson(jsonError(stderr.trim() || output.trim() || 'Command failed', 'COMMAND_FAILED'));
+    return;
+  }
+  const data = stderr ? { output: output.trimEnd(), stderr: stderr.trimEnd() } : { output: output.trimEnd() };
+  printJson(jsonOk(data));
+}
+
+function jsonOutputCaptureErrorMessage(fallback: string): string {
+  const capture = activeJsonOutputCapture;
+  if (!capture) return fallback;
+  const stderr = capture.stderrChunks.join('').trim();
+  const stdout = capture.stdoutChunks.join('').trim();
+  return stderr || fallback || stdout || 'Command failed';
 }
 
 function formatMarkdownLink(label: string, href: string): string {
@@ -491,7 +595,10 @@ function isInternalWorkerCommand(command: Command): boolean {
 
 function shouldSkipCommandChrome(command: Command): boolean {
   if (isInternalWorkerCommand(command)) return true;
-  if (command.opts().json) return true;
+  if (command.parent?.name() === 'bookmarks') return true;
+  if (command.parent?.name() === 'seed' && command.parent.parent?.name() === 'possible') return true;
+  if (command.optsWithGlobals<{ json?: boolean }>().json) return true;
+  if (command.name() === 'update' && command.parent?.name() === 'current') return true;
   if ([
     'path', 'paths', 'current', 'recent', 'state', 'ls', 'tree', 'find', 'grep', 'cat',
     'head', 'meta', 'pwd', 'context', 'open', 'tab', 'reveal', 'link', 'links',
@@ -585,8 +692,13 @@ function showSyncWelcome(): void {
 }
 
 /** Check that bookmarks have been synced. Returns true if data exists. */
-function requireData(): boolean {
+function requireData(options?: { json?: boolean }): boolean {
   if (isFirstRun()) {
+    if (options?.json) {
+      printJson(jsonError('No bookmarks synced yet. Run: ft sync', 'BOOKMARK_DATA_MISSING'));
+      process.exitCode = 1;
+      return false;
+    }
     console.log(`
   No bookmarks synced yet.
 
@@ -602,9 +714,14 @@ function requireData(): boolean {
 }
 
 /** Check that the search index exists. Returns true if it does. */
-function requireIndex(): boolean {
-  if (!requireData()) return false;
+function requireIndex(options?: { json?: boolean }): boolean {
+  if (!requireData(options)) return false;
   if (!fs.existsSync(twitterBookmarksIndexPath())) {
+    if (options?.json) {
+      printJson(jsonError('Search index not built yet. Run: ft index', 'BOOKMARK_INDEX_MISSING'));
+      process.exitCode = 1;
+      return false;
+    }
     console.log(`
   Search index not built yet.
 
@@ -712,21 +829,161 @@ export function engineOption(): Option {
 }
 
 /** Wrap an async action with graceful error handling. */
+function actionArgsRequestedJson(args: unknown[]): boolean {
+  const command = args.at(-1);
+  if (command && typeof command === 'object' && typeof (command as { opts?: unknown }).opts === 'function') {
+    let current: unknown = command;
+    while (current && typeof current === 'object') {
+      const record = current as { opts?: unknown; parent?: unknown };
+      if (typeof record.opts === 'function') {
+        try {
+          if ((record.opts as () => { json?: unknown })().json === true) return true;
+        } catch {
+          // Keep walking parents; a parent command may still own --json.
+        }
+      }
+      current = record.parent;
+    }
+  }
+
+  const options = args.at(-2) ?? args.at(-1);
+  return Boolean(options && typeof options === 'object' && (options as { json?: unknown }).json === true);
+}
+
+function userArgsRequestedJson(args: readonly string[]): boolean {
+  for (const arg of args) {
+    if (arg === '--') return false;
+    if (arg === '--json') return true;
+  }
+  return false;
+}
+
+type ParseContext = {
+  userArgs: readonly string[];
+};
+
+const parseArgsStore = new AsyncLocalStorage<ParseContext>();
+
+function userArgsFromParseArgs(args: readonly string[], parseOptions: unknown): readonly string[] {
+  const from = parseOptions && typeof parseOptions === 'object'
+    ? (parseOptions as { from?: unknown }).from
+    : undefined;
+  if (from === 'user') return args;
+  if (from === 'electron') return args.slice(1);
+  return args.slice(2);
+}
+
+function currentParseUserArgs(): readonly string[] {
+  return parseArgsStore.getStore()?.userArgs ?? process.argv.slice(2);
+}
+
+function isCommanderExitError(error: unknown): error is { code: string; exitCode: number; message: string } {
+  return Boolean(
+    error
+    && typeof error === 'object'
+    && typeof (error as { code?: unknown }).code === 'string'
+    && typeof (error as { exitCode?: unknown }).exitCode === 'number'
+    && typeof (error as { message?: unknown }).message === 'string'
+  );
+}
+
+function installParseErrorHandling(program: Command): void {
+  program
+    .exitOverride()
+    .configureOutput({
+      writeErr: (str) => {
+        if (!userArgsRequestedJson(currentParseUserArgs())) process.stderr.write(str);
+      },
+      outputError: (str, write) => {
+        if (!userArgsRequestedJson(currentParseUserArgs())) write(str);
+      },
+    });
+
+  const originalParseAsync = program.parseAsync.bind(program);
+  program.parseAsync = (async (...args: Parameters<Command['parseAsync']>) => {
+    const argv = args[0];
+    const parseArgs = Array.isArray(argv) ? argv : process.argv;
+    const userArgs = userArgsFromParseArgs(parseArgs, args[1]);
+    const wantsJson = userArgsRequestedJson(userArgs);
+    return parseArgsStore.run({ userArgs }, async () => {
+      try {
+        return await originalParseAsync(...args);
+      } catch (error) {
+        if (!isCommanderExitError(error)) {
+          if (!wantsJson) throw error;
+          const message = error instanceof Error ? error.message : String(error);
+          printJson(jsonError(jsonOutputCaptureErrorMessage(message), 'COMMAND_FAILED'));
+          process.exitCode = 1;
+          return program;
+        }
+        if (error.exitCode !== 0 && wantsJson) {
+          printJson(jsonError(error.message, error.code));
+        }
+        process.exitCode = error.exitCode;
+        return program;
+      } finally {
+        finishJsonOutputCapture();
+      }
+    });
+  }) as Command['parseAsync'];
+}
+
 function safe(fn: (...args: any[]) => Promise<void>): (...args: any[]) => Promise<void> {
   return async (...args: any[]) => {
     try {
       await fn(...args);
     } catch (err) {
+      const wantsJson = actionArgsRequestedJson(args);
       if (err instanceof PromptCancelledError) {
-        console.log(`\n  ${err.message}\n`);
+        if (wantsJson) printJson(jsonError(err.message, 'PROMPT_CANCELLED'));
+        else console.log(`\n  ${err.message}\n`);
         process.exitCode = err.exitCode;
         return;
       }
       const msg = (err as Error).message;
-      console.error(`\n  Error: ${msg}\n`);
+      if (wantsJson) printJson(jsonError(msg));
+      else console.error(`\n  Error: ${msg}\n`);
       process.exitCode = 1;
     }
   };
+}
+
+function commandHasOption(command: Command, longName: string): boolean {
+  return command.options.some((option) => option.long === longName);
+}
+
+function commandHasAction(command: Command): boolean {
+  return Boolean((command as unknown as { _actionHandler?: unknown })._actionHandler);
+}
+
+function commandIsHidden(command: Command): boolean {
+  return Boolean((command as unknown as { _hidden?: unknown })._hidden);
+}
+
+function ensureJsonOptionOnActionCommands(command: Command): void {
+  if (
+    commandHasAction(command)
+    && command.commands.length === 0
+    && !commandIsHidden(command)
+    && !commandHasOption(command, '--json')
+  ) {
+    command.option('--json', 'JSON output');
+  }
+  for (const child of command.commands) {
+    ensureJsonOptionOnActionCommands(child);
+  }
+}
+
+function installJsonFallbackHooks(program: Command): void {
+  program
+    .hook('preAction', (_thisCommand, actionCommand) => {
+      if (actionCommand.optsWithGlobals<{ json?: boolean }>().json) {
+        beginJsonOutputCapture();
+      }
+    })
+    .hook('postAction', () => {
+      finishJsonOutputCapture();
+    });
 }
 
 function parsePositiveInteger(value: string): number {
@@ -755,6 +1012,7 @@ export function buildCli() {
   }
 
   const program = new Command();
+  installParseErrorHandling(program);
 
   async function rebuildIndex(): Promise<number> {
     process.stderr.write('  Building search index...\n');
@@ -1179,6 +1437,51 @@ export function buildCli() {
       }
     });
 
+  // ── feed ────────────────────────────────────────────────────────────────
+
+  const feed = program
+    .command('feed')
+    .description('Capture authenticated X timelines through the private read-only GraphQL used by x.com');
+
+  const registerFeedCommand = (name: XTimelineKind, description: string): void => {
+    feed
+      .command(name)
+      .description(description)
+      .option('--limit <n>', 'Exact number of unique non-promoted posts', parsePositiveInteger, 300)
+      .option('--page-size <n>', 'Posts requested per GraphQL page', parsePositiveInteger, 40)
+      .option('--max-pages <n>', 'Maximum GraphQL pages before failing', parsePositiveInteger, 50)
+      .option('--delay-ms <n>', 'Delay between GraphQL requests in milliseconds', (value: string) => Number(value), 500)
+      .option('--browser <name>', 'Browser whose logged-in X session should be used')
+      .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+      .option('--chrome-profile-directory <name>', 'Chrome-family profile name')
+      .option('--firefox-profile-dir <path>', 'Firefox profile directory')
+      .option('--output <path>', 'Write the complete capture to a local JSON file')
+      .option('--json', 'JSON output')
+      .action(safe(async (options) => {
+        const result = await captureXTimeline(name, {
+          limit: Number(options.limit),
+          pageSize: Number(options.pageSize),
+          maxPages: Number(options.maxPages),
+          delayMs: Number(options.delayMs),
+          browser: options.browser ? String(options.browser) : undefined,
+          chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+          chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+          firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+          outputPath: options.output ? String(options.output) : undefined,
+        });
+        if (options.json) {
+          printJson(jsonOk(result));
+          return;
+        }
+        console.log(`Captured ${result.retainedCount} ${name} posts across ${result.pagesFetched} GraphQL pages.`);
+        console.log(`Excluded ${result.excludedPromoted} promoted and ${result.excludedDuplicates} duplicate posts.`);
+        if (result.outputPath) console.log(`Saved: ${result.outputPath}`);
+      }));
+  };
+
+  registerFeedCommand('for-you', 'Capture the personalized For You timeline');
+  registerFeedCommand('following', 'Capture the Following timeline');
+
   // ── search ──────────────────────────────────────────────────────────────
 
   program
@@ -1191,7 +1494,7 @@ export function buildCli() {
     .option('--limit <n>', 'Max results', (v: string) => Number(v), 20)
     .option('--json', 'JSON output')
     .action(safe(async (query: string, options) => {
-      if (!requireIndex()) return;
+      if (!requireIndex(options)) return;
       const results = await searchBookmarks({
         query,
         author: options.author ? String(options.author) : undefined,
@@ -1200,7 +1503,7 @@ export function buildCli() {
         limit: Number(options.limit) || 20,
       });
       if (options.json) {
-        printJson(results);
+        printJson(jsonOk(results));
         return;
       }
       console.log(formatSearchResults(results));
@@ -1222,7 +1525,7 @@ export function buildCli() {
     .option('--offset <n>', 'Offset into results', (v: string) => Number(v), 0)
     .option('--json', 'JSON output')
     .action(safe(async (options) => {
-      if (!requireIndex()) return;
+      if (!requireIndex(options)) return;
 
       // Resolve --folder to an exact name via the same exact-then-prefix rules
       // that `ft sync --folder` uses, so both flags behave identically.
@@ -1231,6 +1534,11 @@ export function buildCli() {
         const { counts } = await getFolderCounts();
         const names = Object.keys(counts);
         if (names.length === 0) {
+          if (options.json) {
+            printJson(jsonError('No folder data in local cache. Run: ft sync --folders', 'NO_FOLDER_DATA'));
+            process.exitCode = 1;
+            return;
+          }
           console.error(`  No folder data in local cache. Run: ft sync --folders`);
           process.exitCode = 1;
           return;
@@ -1251,7 +1559,7 @@ export function buildCli() {
         offset: Number(options.offset) || 0,
       });
       if (options.json) {
-        console.log(JSON.stringify(items, null, 2));
+        printJson(jsonOk(items));
         return;
       }
       for (const item of items) {
@@ -1272,15 +1580,20 @@ export function buildCli() {
     .argument('<id>', 'Bookmark id')
     .option('--json', 'JSON output')
     .action(safe(async (id: string, options) => {
-      if (!requireIndex()) return;
+      if (!requireIndex(options)) return;
       const item = await getBookmarkById(String(id));
       if (!item) {
+        if (options.json) {
+          printJson(jsonError(`Bookmark not found: ${String(id)}`, 'BOOKMARK_NOT_FOUND'));
+          process.exitCode = 1;
+          return;
+        }
         console.log(`  Bookmark not found: ${String(id)}`);
         process.exitCode = 1;
         return;
       }
       if (options.json) {
-        console.log(JSON.stringify(item, null, 2));
+        printJson(jsonOk(item));
         return;
       }
       console.log(`${item.id} \u00b7 ${item.authorHandle ? `@${item.authorHandle}` : '@?'}`);
@@ -1301,10 +1614,10 @@ export function buildCli() {
     .description('Aggregate statistics from your bookmarks')
     .option('--json', 'JSON output')
     .action(safe(async (options) => {
-      if (!requireIndex()) return;
+      if (!requireIndex(options)) return;
       const stats = await getStats();
       if (options.json) {
-        printJson(stats);
+        printJson(jsonOk(stats));
         return;
       }
       console.log(`Bookmarks: ${stats.totalBookmarks}`);
@@ -1554,10 +1867,10 @@ export function buildCli() {
     .action(safe(async (options) => {
       const view = await getBookmarkStatusView();
       if (options.json) {
-        printJson({
+        printJson(jsonOk({
           bookmarks: view,
           paths: getPathReport(),
-        });
+        }));
         return;
       }
       console.log(formatBookmarkStatus(view));
@@ -1579,7 +1892,7 @@ export function buildCli() {
     .action(safe(async (options) => {
       const context = getAgentContext(options.repo ?? process.cwd(), options.limit);
       if (options.json) {
-        printJson(context);
+        printJson(jsonOk(context));
         return;
       }
       process.stdout.write(formatAgentContext(context));
@@ -1594,25 +1907,36 @@ export function buildCli() {
     .action(safe(async (place: string | undefined, options) => {
       if (!place) {
         const places = listNavigationPlaces();
-        if (options.json) printJson(places);
+        if (options.json) printJson(jsonOk(places));
         else process.stdout.write(formatNavigationPlaces());
         return;
       }
-      const parsedPlace = parseNavigationPlace(place);
+      let parsedPlace: NavigationPlace;
+      try {
+        parsedPlace = parseNavigationPlace(place);
+      } catch (error) {
+        if (options.json) {
+          const message = error instanceof Error ? error.message : String(error);
+          printJson(jsonError(message, 'UNKNOWN_PLACE'));
+          process.exitCode = 1;
+          return;
+        }
+        throw error;
+      }
       if (parsedPlace === 'recent') {
         const context = getAgentContext(process.cwd(), options.limit ?? 10);
-        if (options.json) printJson(context);
+        if (options.json) printJson(jsonOk(context));
         else process.stdout.write(formatAgentContext(context));
         return;
       }
       if (parsedPlace === 'current') {
         const summary = readCurrentDocumentSummary();
-        if (options.json) printJson(summary);
+        if (options.json) printJson(jsonOk(summary));
         else process.stdout.write(formatCurrentDocumentSummary(summary));
         return;
       }
       const entries = listNavigationEntries(parsedPlace, options.limit);
-      if (options.json) printJson(entries);
+      if (options.json) printJson(jsonOk(entries));
       else process.stdout.write(formatNavigationEntries(entries));
     }));
 
@@ -1623,7 +1947,7 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (options) => {
       const entries = listNavigationEntries('library', options.limit);
-      if (options.json) printJson(entries.map((entry) => entry.relPath));
+      if (options.json) printJson(jsonOk(entries.map((entry) => entry.relPath)));
       else process.stdout.write(entries.length ? `${entries.map((entry) => entry.relPath).join('\n')}\n` : '(none)\n');
     }));
 
@@ -1635,7 +1959,7 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (query: string, options) => {
       const entries = findNavigationEntries(query, options.limit);
-      if (options.json) printJson(entries);
+      if (options.json) printJson(jsonOk(entries));
       else process.stdout.write(formatNavigationEntries(entries));
     }));
 
@@ -1647,7 +1971,7 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (query: string, options) => {
       const entries = grepNavigationContent(query, options.limit);
-      if (options.json) printJson(entries);
+      if (options.json) printJson(jsonOk(entries));
       else process.stdout.write(formatNavigationSearchResults(entries));
     }));
 
@@ -1658,7 +1982,7 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (targetPath: string, options) => {
       const doc = await readNavigationDocument(targetPath);
-      if (options.json) printJson(doc);
+      if (options.json) printJson(jsonOk(doc));
       else process.stdout.write(doc.content.endsWith('\n') ? doc.content : `${doc.content}\n`);
     }));
 
@@ -1670,7 +1994,7 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (targetPath: string, options) => {
       const doc = await readNavigationDocument(targetPath);
-      if (options.json) printJson({ ...doc, content: formatNavigationHead(doc.content, options.lines) });
+      if (options.json) printJson(jsonOk({ ...doc, content: formatNavigationHead(doc.content, options.lines) }));
       else process.stdout.write(formatNavigationHead(doc.content, options.lines));
     }));
 
@@ -1682,7 +2006,7 @@ export function buildCli() {
     .action(safe(async (targetPath: string, options) => {
       const doc = await readNavigationDocument(targetPath);
       const { content: _content, ...entry } = doc;
-      if (options.json) printJson(entry);
+      if (options.json) printJson(jsonOk(entry));
       else process.stdout.write(formatNavigationMeta(entry));
     }));
 
@@ -1700,7 +2024,7 @@ export function buildCli() {
         query: options.query ? String(options.query) : undefined,
       });
       if (options.json) {
-        printJson(result);
+        printJson(jsonOk(result));
         return;
       }
       console.log(result.url ?? result.path);
@@ -1720,7 +2044,7 @@ export function buildCli() {
         query: options.query ? String(options.query) : undefined,
       });
       if (options.json) {
-        printJson(result);
+        printJson(jsonOk(result));
         return;
       }
       const href = result.url ?? result.path;
@@ -1744,7 +2068,7 @@ export function buildCli() {
         query: options.query ? String(options.query) : undefined,
       });
       if (options.json) {
-        printJson(result);
+        printJson(jsonOk(result));
         return;
       }
       const href = result.url ?? result.path;
@@ -1759,7 +2083,7 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (targetPath: string, options) => {
       const result = await openNavigationDocument(targetPath, { launch: options.launch !== false, action: 'tab' });
-      if (options.json) printJson(result);
+      if (options.json) printJson(jsonOk(result));
       else console.log(result.url ?? result.path);
     }));
 
@@ -1771,7 +2095,7 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (targetPath: string, options) => {
       const result = await openNavigationDocument(targetPath, { launch: options.launch !== false, action: 'reveal' });
-      if (options.json) printJson(result);
+      if (options.json) printJson(jsonOk(result));
       else console.log(result.url ?? result.path);
     }));
 
@@ -1799,7 +2123,7 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (targetPath: string, options) => {
       const result = buildNavigationWikiLink(targetPath, options.alias ? String(options.alias) : undefined);
-      if (options.json) printJson(result);
+      if (options.json) printJson(jsonOk(result));
       else console.log(result.link);
     }));
 
@@ -1810,7 +2134,7 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (targetPath: string, options) => {
       const links = listNavigationLinks(targetPath);
-      if (options.json) printJson(links);
+      if (options.json) printJson(jsonOk(links));
       else process.stdout.write(formatNavigationLinks(links));
     }));
 
@@ -1821,7 +2145,7 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (targetPath: string, options) => {
       const entries = listNavigationBacklinks(targetPath);
-      if (options.json) printJson(entries);
+      if (options.json) printJson(jsonOk(entries));
       else process.stdout.write(formatNavigationEntries(entries));
     }));
 
@@ -1831,7 +2155,7 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (options) => {
       const tags = listNavigationTags();
-      if (options.json) printJson(tags);
+      if (options.json) printJson(jsonOk(tags));
       else process.stdout.write(formatNavigationTags(tags));
     }));
 
@@ -1842,7 +2166,7 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (tag: string, options) => {
       const entries = listNavigationTagged(tag);
-      if (options.json) printJson(entries);
+      if (options.json) printJson(jsonOk(entries));
       else process.stdout.write(formatNavigationEntries(entries));
     }));
 
@@ -1859,7 +2183,7 @@ export function buildCli() {
         stdin: Boolean(options.stdin),
         file: options.file ? String(options.file) : undefined,
       });
-      if (options.json) printJson(entry);
+      if (options.json) printJson(jsonOk(entry));
       else console.log(`Created: ${entry.path}`);
     }));
 
@@ -1879,7 +2203,7 @@ export function buildCli() {
         file: options.file ? String(options.file) : undefined,
         content,
       });
-      if (options.json) printJson(entry);
+      if (options.json) printJson(jsonOk(entry));
       else console.log(`Appended: ${entry.path}`);
     }));
 
@@ -1891,7 +2215,7 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (text: string, options) => {
       const entry = await createNavigationNote(text, options.title ? String(options.title) : undefined);
-      if (options.json) printJson(entry);
+      if (options.json) printJson(jsonOk(entry));
       else console.log(`Noted: ${entry.path}`);
     }));
 
@@ -1903,7 +2227,7 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (targetPath: string, title: string, options) => {
       const entry = await renameNavigationDocument(targetPath, title);
-      if (options.json) printJson(entry);
+      if (options.json) printJson(jsonOk(entry));
       else console.log(`Renamed: ${entry.path}`);
     }));
 
@@ -1914,7 +2238,7 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (targetPath: string, options) => {
       const state = cdNavigation(targetPath);
-      if (options.json) printJson(state);
+      if (options.json) printJson(jsonOk(state));
       else process.stdout.write(formatNavigationState(state));
     }));
 
@@ -1924,30 +2248,52 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (options) => {
       const state = backNavigation();
-      if (options.json) printJson(state);
+      if (options.json) printJson(jsonOk(state));
       else process.stdout.write(formatNavigationState(state));
     }));
 
-  program
+  const currentCommand = program
     .command('current')
     .description('Show the active Field Theory document attached to the Mac app terminal')
     .option('--manifest <path>', 'Read a specific context manifest')
     .option('--content-only', 'Print only the active document markdown/content')
-    .option('--include-content', 'Include active document content in --json output')
+    .option('--include-content', 'Compatibility flag; --json includes content unless --summary is passed')
+    .option('--summary', 'Omit active document content in --json output')
     .option('--json', 'JSON output')
     .action(safe(async (options) => {
       if (options.contentOnly) {
-        process.stdout.write(readCurrentDocumentContext(options.manifest).content);
+        process.stdout.write(readCurrentDocumentView(options.manifest).content ?? '');
         return;
       }
-      const context = options.includeContent
-        ? readCurrentDocumentContext(options.manifest)
-        : readCurrentDocumentSummary(options.manifest);
       if (options.json) {
-        printJson(context);
+        printJson(jsonOk(readCurrentDocumentView(options.manifest, { includeContent: !options.summary })));
         return;
       }
-      process.stdout.write(formatCurrentDocumentSummary(context));
+      process.stdout.write(formatCurrentDocumentSummary(readCurrentDocumentSummary(options.manifest)));
+    }));
+
+  currentCommand
+    .command('update')
+    .description('Replace the active Field Theory Markdown document')
+    .option('--manifest <path>', 'Read a specific context manifest')
+    .option('--stdin', 'Read replacement Markdown from stdin')
+    .option('--file <path>', 'Read replacement Markdown from a file')
+    .requiredOption('--expected-sha256 <hash>', 'Expected current source SHA-256')
+    .option('--json', 'JSON output')
+    .action(safe(async (options, command) => {
+      const parentOptions = command.parent?.opts?.() ?? {};
+      const result = await updateCurrentDocument({
+        manifestPath: options.manifest ?? parentOptions.manifest,
+        stdin: options.stdin,
+        file: options.file,
+        expectedSha256: options.expectedSha256,
+      });
+      if (options.json ?? parentOptions.json) {
+        printJson(jsonOk(result));
+        return;
+      }
+      console.log(`Updated: ${result.sourcePath}`);
+      console.log(`sha256: ${result.version?.sha256 ?? '(unknown)'}`);
     }));
 
   program
@@ -1962,7 +2308,7 @@ export function buildCli() {
         fetch: options.fetch !== false,
       });
       if (options.json) {
-        printJson(state);
+        printJson(jsonOk(state));
         return;
       }
       process.stdout.write(formatWorkflowState(state));
@@ -2112,20 +2458,24 @@ export function buildCli() {
     .option('--save', 'Save the answer as a concept page')
     .option('--json', 'Output JSON instead of text')
     .action(safe(async (question, options) => {
-      if (!requireIndex()) return;
+      if (!requireIndex({ json: options.json })) return;
       let lastLine = '';
       const spinner = createSpinner(() => lastLine);
-      const result = await askMd(question, {
-        save: options.save,
-        onProgress: (s) => {
-          lastLine = s;
-          spinner.update();
-        },
-      });
-      spinner.stop();
+      let result;
+      try {
+        result = await askMd(question, {
+          save: options.save,
+          onProgress: (s) => {
+            lastLine = s;
+            spinner.update();
+          },
+        });
+      } finally {
+        spinner.stop();
+      }
 
       if (options.json) {
-        console.log(JSON.stringify(result, null, 2));
+        printJson(jsonOk(result));
       } else {
         console.log(`\n${result.answer}`);
         if (result.pagesRead.length > 0) {
@@ -2149,18 +2499,19 @@ export function buildCli() {
     .option('--fix', 'Auto-fix fixable issues with targeted recompile')
     .option('--json', 'Output JSON instead of text')
     .action(safe(async (options) => {
-      if (!requireIndex()) return;
+      if (!requireIndex({ json: options.json })) return;
       const result = await lintMd();
 
       if (options.fix && result.issues.some((i) => i.fixable)) {
-        console.log('Fixing issues...');
+        if (!options.json) console.log('Fixing issues...');
         const fixed = await fixLintIssues(result.issues);
-        console.log(`Fixed ${fixed} pages.`);
+        if (options.json) printJson(jsonOk({ ...result, fixed }));
+        else console.log(`Fixed ${fixed} pages.`);
         return;
       }
 
       if (options.json) {
-        console.log(JSON.stringify(result, null, 2));
+        printJson(jsonOk(result));
         return;
       }
 
@@ -2391,12 +2742,17 @@ export function buildCli() {
     .action(safe(async (jobId: string, options) => {
       const job = readIdeasJob(String(jobId));
       if (!job) {
+        if (options.json) {
+          printJson(jsonError(`Job not found: ${String(jobId)}`, 'JOB_NOT_FOUND'));
+          process.exitCode = 1;
+          return;
+        }
         console.log(`  Job not found: ${String(jobId)}`);
         process.exitCode = 1;
         return;
       }
       if (options.json) {
-        console.log(JSON.stringify(job, null, 2));
+        printJson(jsonOk(job));
         return;
       }
       console.log(formatIdeasJob(job, { includeLog: Boolean(options.log), logLines: Number(options.tail) || 20 }));
@@ -3110,10 +3466,10 @@ export function buildCli() {
     .description('(alias) Seed commands live under `ft seeds`');
 
   for (const cmd of ['list', 'show', 'create', 'text', 'delete']) {
-    possibleSeed.command(cmd).description(`Alias for: ft seeds ${cmd}`).allowUnknownOption(true)
+    possibleSeed.command(cmd).description(`Alias for: ft seeds ${cmd}`).allowUnknownOption(true).allowExcessArguments(true)
       .action(async () => {
-        const args = ['node', 'ft', 'seeds', cmd, ...process.argv.slice(4)];
-        await program.parseAsync(args);
+        const args = ['node', 'ft', 'seeds', cmd, ...currentParseUserArgs().slice(3)];
+        await buildCli().parseAsync(args);
       });
   }
 
@@ -3318,16 +3674,19 @@ export function buildCli() {
   const bookmarksAlias = program.command('bookmarks').description('(alias) Bookmark commands').helpOption(false);
   for (const cmd of ['sync', 'search', 'list', 'show', 'stats', 'viz', 'classify', 'classify-domains',
     'categories', 'domains', 'folders', 'model', 'index', 'auth', 'status', 'path', 'sample', 'fetch-media']) {
-    bookmarksAlias.command(cmd).description(`Alias for: ft ${cmd}`).allowUnknownOption(true)
+    bookmarksAlias.command(cmd).description(`Alias for: ft ${cmd}`).allowUnknownOption(true).allowExcessArguments(true)
       .action(async () => {
-        const args = ['node', 'ft', cmd, ...process.argv.slice(4)];
-        await program.parseAsync(args);
+        const args = ['node', 'ft', cmd, ...currentParseUserArgs().slice(2)];
+        await buildCli().parseAsync(args);
       });
   }
-  bookmarksAlias.command('enable').description('Alias for: ft sync').action(async () => {
-    const args = ['node', 'ft', 'sync', ...process.argv.slice(4)];
-    await program.parseAsync(args);
+  bookmarksAlias.command('enable').description('Alias for: ft sync').allowUnknownOption(true).allowExcessArguments(true).action(async () => {
+    const args = ['node', 'ft', 'sync', ...currentParseUserArgs().slice(2)];
+    await buildCli().parseAsync(args);
   });
+
+  ensureJsonOptionOnActionCommands(program);
+  installJsonFallbackHooks(program);
 
   program.on('afterHelp', showCachedUpdateNotice);
 
