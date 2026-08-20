@@ -10,9 +10,9 @@ import type { ArticleUpdate } from './bookmarks-db.js';
 import { fetchArticle, resolveTcoLink } from './bookmark-enrich.js';
 import type { ArticleContent } from './bookmark-enrich.js';
 
-const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
+export const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
 
-const X_PUBLIC_BEARER =
+export const X_PUBLIC_BEARER =
   'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
 
 const BOOKMARKS_QUERY_ID = 'Z9GWmP0kP2dajyckAaDUBw';
@@ -220,7 +220,7 @@ function buildUrl(cursor?: string, count = 20): string {
   return `https://x.com/i/api/graphql/${BOOKMARKS_QUERY_ID}/${BOOKMARKS_OPERATION}?${params}`;
 }
 
-function buildHeaders(csrfToken: string, cookieHeader?: string): Record<string, string> {
+export function buildHeaders(csrfToken: string, cookieHeader?: string): Record<string, string> {
   return {
     authorization: `Bearer ${X_PUBLIC_BEARER}`,
     'x-csrf-token': csrfToken,
