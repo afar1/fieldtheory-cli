@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { legacyCodexContextSessionsDir, runtimeContextSessionStatePath, runtimeContextSessionsDir } from './paths.js';
+import { isPathInside, readContentInput, readDocumentVersion, updateMarkdownFile, type DocumentVersion } from './document-ops.js';
+import { canonicalLibraryDir, commandsDir, legacyCodexContextSessionsDir, libraryDir, runtimeContextSessionStatePath, runtimeContextSessionsDir } from './paths.js';
 
 export interface CurrentDocumentSelection {
   textPath: string;
@@ -34,7 +35,45 @@ export interface CurrentDocumentContext extends CurrentDocumentSummary {
   content: string;
 }
 
+export interface CurrentDocumentLineNumbers {
+  activeSurface: string | null;
+  activeLineKind: unknown;
+  visibleRowsOnly: unknown;
+  instructions: string;
+  lines: unknown[];
+}
+
+export interface CurrentDocumentView {
+  title: string | null;
+  kind: string | null;
+  contentMode: string | null;
+  sourcePath: string | null;
+  editable: boolean;
+  version: DocumentVersion | null;
+  updateCommand: string | null;
+  updatedAt: string | null;
+  manifestPath: string;
+  lineNumbers: CurrentDocumentLineNumbers;
+  selection: CurrentDocumentSelection | null;
+  recent: CurrentDocumentRelatedPage[];
+  includedPages: CurrentDocumentRelatedPage[];
+  content?: string;
+}
+
+export interface CurrentDocumentUpdateInput {
+  manifestPath?: string;
+  stdin?: boolean;
+  file?: string;
+  content?: string;
+  expectedSha256?: string;
+}
+
 type ManifestRecord = Record<string, unknown>;
+
+interface EditableRoot {
+  resolved: string;
+  real: string;
+}
 
 interface SessionStateManifestCandidate {
   manifestPath: string;
@@ -86,6 +125,105 @@ function assertInsideDirectory(filePath: string, dirPath: string): void {
   if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
     throw new Error(`Context content path must stay inside its session directory: ${filePath}`);
   }
+}
+
+function isMarkdownSourcePath(filePath: string): boolean {
+  return /\.(md|markdown)$/i.test(path.basename(filePath));
+}
+
+function realPathOrResolved(filePath: string): string {
+  try {
+    return fs.realpathSync(filePath);
+  } catch {
+    return path.resolve(filePath);
+  }
+}
+
+function uniqueExistingRoots(roots: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(
+    roots
+      .filter((root): root is string => typeof root === 'string' && root.trim().length > 0)
+      .map(realPathOrResolved),
+  ));
+}
+
+function editableRootPaths(roots: Array<string | null | undefined>): EditableRoot[] {
+  const entries = roots
+    .filter((root): root is string => typeof root === 'string' && root.trim().length > 0)
+    .map((root) => ({
+      resolved: path.resolve(root),
+      real: realPathOrResolved(root),
+    }));
+  return Array.from(
+    new Map(entries.map((entry) => [`${entry.resolved}\0${entry.real}`, entry])).values(),
+  );
+}
+
+function isInsideAnyRoot(filePath: string, roots: string[]): boolean {
+  const realFilePath = realPathOrResolved(filePath);
+  return roots.some((root) => isPathInside(root, realFilePath));
+}
+
+function isPathAndTargetInsideAnyRoot(filePath: string, roots: EditableRoot[]): boolean {
+  const resolvedFilePath = path.resolve(filePath);
+  const realFilePath = realPathOrResolved(filePath);
+  return roots.some((root) => isPathInside(root.resolved, resolvedFilePath) && isPathInside(root.real, realFilePath));
+}
+
+function editableDocumentRoots(): EditableRoot[] {
+  return editableRootPaths([
+    libraryDir(),
+    commandsDir(),
+  ]);
+}
+
+function blockedSharedCacheRoots(): string[] {
+  return uniqueExistingRoots([
+    path.join(canonicalLibraryDir(), 'River (shared)'),
+    path.join(libraryDir(), 'River (shared)'),
+    process.env.FT_SHARED_FILES_CACHE_DIR,
+    process.env.FT_SHARED_FILES_DIR,
+  ]);
+}
+
+function readEditableSourcePath(summary: CurrentDocumentSummary): string | null {
+  const sourcePath = summary.activeDocument.path;
+  if (!sourcePath || sourcePath.includes('\0') || !path.isAbsolute(sourcePath)) return null;
+
+  const resolvedSourcePath = path.resolve(sourcePath);
+  if (!isMarkdownSourcePath(resolvedSourcePath)) return null;
+  if (resolvedSourcePath === path.resolve(summary.activeDocument.contentPath)) return null;
+
+  try {
+    if (!fs.statSync(resolvedSourcePath).isFile()) return null;
+  } catch {
+    return null;
+  }
+  if (!isPathAndTargetInsideAnyRoot(resolvedSourcePath, editableDocumentRoots())) return null;
+  if (isInsideAnyRoot(resolvedSourcePath, blockedSharedCacheRoots())) return null;
+  return realPathOrResolved(resolvedSourcePath);
+}
+
+function lineNumbersFromMapping(lineMapping: unknown, contentMode: string | null): CurrentDocumentLineNumbers {
+  const fallback = {
+    activeSurface: contentMode,
+    activeLineKind: null,
+    visibleRowsOnly: false,
+    instructions: 'No rendered line map was attached. Treat content newline numbers as Markdown source lines.',
+    lines: [],
+  };
+  if (!lineMapping || typeof lineMapping !== 'object' || Array.isArray(lineMapping)) {
+    return fallback;
+  }
+
+  const record = lineMapping as ManifestRecord;
+  return {
+    activeSurface: stringField(record.activeSurface) ?? stringField(record.contentMode) ?? fallback.activeSurface,
+    activeLineKind: record.activeLineKind ?? fallback.activeLineKind,
+    visibleRowsOnly: record.visibleRowsOnly ?? fallback.visibleRowsOnly,
+    instructions: stringField(record.instructions) ?? fallback.instructions,
+    lines: Array.isArray(record.lines) ? record.lines : fallback.lines,
+  };
 }
 
 function readSessionManifests(sessionsDir: string): string[] {
@@ -230,6 +368,59 @@ export function readCurrentDocumentContext(manifestPath = findCurrentContextMani
     ...summary,
     content: fs.readFileSync(summary.activeDocument.contentPath, 'utf-8'),
   };
+}
+
+export function readCurrentDocumentView(
+  manifestPath = findCurrentContextManifest(),
+  options: { includeContent?: boolean } = {},
+): CurrentDocumentView {
+  const summary = readCurrentDocumentSummary(manifestPath);
+  const sourcePath = readEditableSourcePath(summary);
+  const version = sourcePath ? readDocumentVersion(sourcePath) : null;
+  const includeContent = options.includeContent ?? true;
+  const contentPath = sourcePath ?? summary.activeDocument.contentPath;
+  const updateCommand = version
+    ? `ft current update --stdin --expected-sha256 ${version.sha256}`
+    : null;
+
+  return {
+    title: summary.activeDocument.title,
+    kind: summary.activeDocument.kind,
+    contentMode: summary.activeDocument.contentMode,
+    sourcePath,
+    editable: Boolean(sourcePath),
+    version,
+    updateCommand,
+    updatedAt: summary.updatedAt,
+    manifestPath: summary.manifestPath,
+    lineNumbers: lineNumbersFromMapping(summary.activeDocument.lineMapping, summary.activeDocument.contentMode),
+    selection: summary.selection,
+    recent: summary.recent,
+    includedPages: summary.includedPages,
+    ...(includeContent ? { content: fs.readFileSync(contentPath, 'utf-8') } : {}),
+  };
+}
+
+export async function updateCurrentDocument(input: CurrentDocumentUpdateInput): Promise<CurrentDocumentView> {
+  const summary = readCurrentDocumentSummary(input.manifestPath);
+  const sourcePath = readEditableSourcePath(summary);
+  if (!sourcePath) {
+    throw new Error('Current Field Theory document is not editable: activeDocument.path is not an existing Markdown source file.');
+  }
+  if (!input.expectedSha256) {
+    throw new Error('Refusing to update current document without --expected-sha256.');
+  }
+  if (!input.stdin && !input.file && input.content === undefined) {
+    throw new Error('Pass --stdin or --file when updating the current document.');
+  }
+
+  const content = await readContentInput({
+    stdin: input.stdin,
+    file: input.file,
+    fallback: input.content,
+  });
+  await updateMarkdownFile(sourcePath, content, { expectedSha256: input.expectedSha256 });
+  return readCurrentDocumentView(summary.manifestPath, { includeContent: false });
 }
 
 export function formatCurrentDocumentContext(context: CurrentDocumentContext): string {

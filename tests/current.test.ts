@@ -8,8 +8,10 @@ import {
   findCurrentContextManifest,
   formatCurrentDocumentContext,
   formatCurrentDocumentSummary,
+  readCurrentDocumentView,
   readCurrentDocumentContext,
   readCurrentDocumentSummary,
+  updateCurrentDocument,
 } from '../src/current.js';
 
 function writeContext(root: string, id: string, title: string, content: string, updatedAt: string, extra: Record<string, unknown> = {}): string {
@@ -31,6 +33,17 @@ function writeContext(root: string, id: string, title: string, content: string, 
     ...extra,
   }));
   return manifestPath;
+}
+
+async function withLibraryDir<T>(libraryDir: string, fn: () => T | Promise<T>): Promise<T> {
+  const previousLibraryDir = process.env.FT_LIBRARY_DIR;
+  process.env.FT_LIBRARY_DIR = libraryDir;
+  try {
+    return await fn();
+  } finally {
+    if (previousLibraryDir === undefined) delete process.env.FT_LIBRARY_DIR;
+    else process.env.FT_LIBRARY_DIR = previousLibraryDir;
+  }
 }
 
 test('readCurrentDocumentContext reads newest Field Theory context manifest', () => {
@@ -59,6 +72,227 @@ test('readCurrentDocumentContext reads newest Field Theory context manifest', ()
     assert.doesNotMatch(formatCurrentDocumentSummary(context), /# Newer/);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('readCurrentDocumentView reads editable source content and version', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-view-'));
+  try {
+    const libraryDir = path.join(tmpDir, 'library');
+    await withLibraryDir(libraryDir, () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      const sourcePath = path.join(libraryDir, 'Library Page.md');
+      fs.mkdirSync(libraryDir, { recursive: true });
+      fs.writeFileSync(sourcePath, '# Source\n');
+      const manifestPath = writeContext(sessionsDir, 'session', 'Library Page', '# Cached\n', '2026-01-01T00:00:00.000Z');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+      manifest.activeDocument.path = sourcePath;
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+
+      const view = readCurrentDocumentView(manifestPath);
+
+      assert.equal(view.title, 'Library Page');
+      assert.equal(fs.realpathSync(view.sourcePath ?? ''), fs.realpathSync(sourcePath));
+      assert.equal(view.editable, true);
+      assert.equal(view.content, '# Source\n');
+      assert.equal(view.version?.size, 9);
+      assert.match(view.updateCommand ?? '', /^ft current update --stdin --expected-sha256 [a-f0-9]{64}$/);
+    });
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('updateCurrentDocument writes the editable source when the expected hash matches', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-update-'));
+  try {
+    const libraryDir = path.join(tmpDir, 'library');
+    await withLibraryDir(libraryDir, async () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      const sourcePath = path.join(libraryDir, 'Library Page.md');
+      fs.mkdirSync(libraryDir, { recursive: true });
+      fs.writeFileSync(sourcePath, '# Before\n');
+      const manifestPath = writeContext(sessionsDir, 'session', 'Library Page', '# Cached\n', '2026-01-01T00:00:00.000Z');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+      manifest.activeDocument.path = sourcePath;
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+
+      const before = readCurrentDocumentView(manifestPath);
+      const after = await updateCurrentDocument({
+        manifestPath,
+        content: '# After\n',
+        expectedSha256: before.version?.sha256,
+      });
+
+      assert.equal(fs.readFileSync(sourcePath, 'utf-8'), '# After\n');
+      assert.equal(readCurrentDocumentContext(manifestPath).content, '# Cached\n');
+      assert.equal(fs.realpathSync(after.sourcePath ?? ''), fs.realpathSync(sourcePath));
+      assert.notEqual(after.version?.sha256, before.version?.sha256);
+    });
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('updateCurrentDocument rejects stale expected hashes', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-stale-'));
+  try {
+    const libraryDir = path.join(tmpDir, 'library');
+    await withLibraryDir(libraryDir, async () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      const sourcePath = path.join(libraryDir, 'Library Page.md');
+      fs.mkdirSync(libraryDir, { recursive: true });
+      fs.writeFileSync(sourcePath, '# Before\n');
+      const manifestPath = writeContext(sessionsDir, 'session', 'Library Page', '# Cached\n', '2026-01-01T00:00:00.000Z');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+      manifest.activeDocument.path = sourcePath;
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+
+      const before = readCurrentDocumentView(manifestPath);
+      fs.writeFileSync(sourcePath, '# Changed elsewhere\n');
+
+      await assert.rejects(
+        () => updateCurrentDocument({
+          manifestPath,
+          content: '# After\n',
+          expectedSha256: before.version?.sha256,
+        }),
+        /File changed on disk/,
+      );
+    });
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('updateCurrentDocument rejects non-editable current documents', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-readonly-'));
+  try {
+    const sessionsDir = path.join(tmpDir, 'sessions');
+    const manifestPath = writeContext(sessionsDir, 'session', 'Generated Page', '# Cached\n', '2026-01-01T00:00:00.000Z');
+    const view = readCurrentDocumentView(manifestPath);
+
+    assert.equal(view.editable, false);
+    assert.equal(view.sourcePath, null);
+    assert.equal(view.version, null);
+    assert.equal(view.content, '# Cached\n');
+
+    await assert.rejects(
+      () => updateCurrentDocument({
+        manifestPath,
+        content: '# After\n',
+        expectedSha256: '0'.repeat(64),
+      }),
+      /not editable/,
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('updateCurrentDocument rejects app-owned River shared cache documents', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-river-'));
+  try {
+    const libraryDir = path.join(tmpDir, 'library');
+    await withLibraryDir(libraryDir, async () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      const sourcePath = path.join(libraryDir, 'River (shared)', 'Brief.md');
+      fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+      fs.writeFileSync(sourcePath, '# River\n');
+      const manifestPath = writeContext(sessionsDir, 'session', 'River Brief', '# Cached\n', '2026-01-01T00:00:00.000Z');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+      manifest.activeDocument.path = sourcePath;
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+      const view = readCurrentDocumentView(manifestPath);
+
+      assert.equal(view.editable, false);
+      assert.equal(view.content, '# Cached\n');
+      await assert.rejects(
+        () => updateCurrentDocument({
+          manifestPath,
+          content: '# After\n',
+          expectedSha256: '0'.repeat(64),
+        }),
+        /not editable/,
+      );
+    });
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('updateCurrentDocument rejects outside symlinks to editable documents', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-symlink-'));
+  try {
+    const libraryDir = path.join(tmpDir, 'library');
+    await withLibraryDir(libraryDir, async () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      const sourcePath = path.join(libraryDir, 'Allowed.md');
+      const outsidePath = path.join(tmpDir, 'outside.md');
+      fs.mkdirSync(libraryDir, { recursive: true });
+      fs.writeFileSync(sourcePath, '# Allowed\n');
+      fs.symlinkSync(sourcePath, outsidePath);
+      const manifestPath = writeContext(sessionsDir, 'session', 'Allowed', '# Cached\n', '2026-01-01T00:00:00.000Z');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+      manifest.activeDocument.path = outsidePath;
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+      const view = readCurrentDocumentView(manifestPath);
+
+      assert.equal(view.editable, false);
+      await assert.rejects(
+        () => updateCurrentDocument({
+          manifestPath,
+          content: '# After\n',
+          expectedSha256: '0'.repeat(64),
+        }),
+        /not editable/,
+      );
+      assert.equal(fs.lstatSync(outsidePath).isSymbolicLink(), true);
+      assert.equal(fs.readFileSync(sourcePath, 'utf-8'), '# Allowed\n');
+    });
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('updateCurrentDocument rejects River shared cache under the active legacy library root', async () => {
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-current-legacy-river-'));
+  const previousHome = process.env.HOME;
+  const previousLibraryDir = process.env.FT_LIBRARY_DIR;
+  const previousCommandsDir = process.env.FT_COMMANDS_DIR;
+  delete process.env.FT_LIBRARY_DIR;
+  delete process.env.FT_COMMANDS_DIR;
+  process.env.HOME = homeDir;
+  try {
+    const legacyLibraryDir = path.join(homeDir, '.ft-bookmarks', 'md');
+    const sourcePath = path.join(legacyLibraryDir, 'River (shared)', 'Brief.md');
+    const sessionsDir = path.join(homeDir, 'sessions');
+    fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+    fs.writeFileSync(sourcePath, '# Legacy River\n');
+    const manifestPath = writeContext(sessionsDir, 'session', 'Legacy River', '# Cached\n', '2026-01-01T00:00:00.000Z');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    manifest.activeDocument.path = sourcePath;
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    const view = readCurrentDocumentView(manifestPath);
+
+    assert.equal(view.editable, false);
+    await assert.rejects(
+      () => updateCurrentDocument({
+        manifestPath,
+        content: '# After\n',
+        expectedSha256: '0'.repeat(64),
+      }),
+      /not editable/,
+    );
+    assert.equal(fs.readFileSync(sourcePath, 'utf-8'), '# Legacy River\n');
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousLibraryDir === undefined) delete process.env.FT_LIBRARY_DIR;
+    else process.env.FT_LIBRARY_DIR = previousLibraryDir;
+    if (previousCommandsDir === undefined) delete process.env.FT_COMMANDS_DIR;
+    else process.env.FT_COMMANDS_DIR = previousCommandsDir;
+    fs.rmSync(homeDir, { recursive: true, force: true });
   }
 });
 
