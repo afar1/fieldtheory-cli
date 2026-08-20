@@ -161,18 +161,26 @@ function worktreeName(worktreePath: string): string {
   return path.basename(worktreePath);
 }
 
+function combinedAppFolderName(root: string): string {
+  const macAppPath = path.join(root, 'mac-app');
+  if (fs.existsSync(macAppPath) && fs.statSync(macAppPath).isDirectory()) {
+    return `${path.basename(root)}/mac-app`;
+  }
+  return path.basename(root);
+}
+
 function workerPlainEnglish(worktreePath: string, branch: string | null, changes: string[], includedInRoot: string, inOrigin: string): string {
   const name = branch ? `\`${branch}\`` : worktreeName(worktreePath);
-  if (changes.length > 0) return `${name} has local file changes in its own worktree.`;
-  if (includedInRoot === 'yes' && inOrigin === 'yes') return `${name} is clean and already preserved in root and remote history.`;
-  if (includedInRoot === 'yes') return `${name} is clean and already present in root, but not obviously preserved remotely.`;
-  if (inOrigin === 'yes') return `${name} is clean and preserved remotely, but not included in root.`;
-  return `${name} is clean, local-only active work.`;
+  if (changes.length > 0) return `${name} has local file changes in its own folder.`;
+  if (includedInRoot === 'yes' && inOrigin === 'yes') return `${name} is already in your local app and saved remotely.`;
+  if (includedInRoot === 'yes') return `${name} is already in your local app, but not obviously saved remotely.`;
+  if (inOrigin === 'yes') return `${name} is saved remotely, but not included in your local app.`;
+  return `${name} has no local file changes, but is only on this machine.`;
 }
 
 function workerNext(changes: string[], includedInRoot: string, inOrigin: string): string {
   if (changes.length > 0) return 'save, ship, or abandon';
-  if (includedInRoot === 'yes' && inOrigin === 'yes') return 'clean';
+  if (includedInRoot === 'yes' && inOrigin === 'yes') return '-';
   if (includedInRoot === 'yes') return 'ship or clean';
   return 'save, ship, or abandon';
 }
@@ -184,9 +192,9 @@ export function getWorkflowState(options: WorkflowStateOptions = {}): WorkflowSt
   if (!root) {
     const rows: WorkflowStateRow[] = [
       {
-        active: 'Root',
+        active: 'Combined app',
         plainEnglish: 'This directory is not inside a Git checkout.',
-        includedInRoot: 'root',
+        includedInRoot: '-',
         inOrigin: 'unknown',
         next: 'choose a repo',
       },
@@ -246,13 +254,13 @@ export function getWorkflowState(options: WorkflowStateOptions = {}): WorkflowSt
   });
 
   rows.push({
-    active: 'Root',
+    active: combinedAppFolderName(stagingRoot),
     plainEnglish: changes.length === 0
-      ? 'The staging checkout has no local file changes.'
-      : 'The staging checkout has local work that is not clean yet.',
-    includedInRoot: 'root',
+      ? 'Your local app has no local file changes.'
+      : `Your local app has ${formatCount(changes.length, 'changed file')}.`,
+    includedInRoot: '-',
     inOrigin: [ahead > 0 ? `ahead ${ahead}` : null, behind > 0 ? `behind ${behind}` : null].filter(Boolean).join(', ') || 'up to date',
-    next: changes.length === 0 ? '' : 'save, ship, or abandon',
+    next: '-',
   });
 
   if (prunableWorktrees.length > 0) {
@@ -276,7 +284,7 @@ export function getWorkflowState(options: WorkflowStateOptions = {}): WorkflowSt
   }
 
   let verdict = 'clean working state';
-  let summary = `Root is on ${branch}`;
+  let summary = `Combined app is on ${branch}`;
   if (changes.length > 0 || activeWorkers.length > 0 || prunableWorktrees.length > 0 || ahead > 0 || behind > 0) {
     verdict = 'not clean yet';
     summary = [
@@ -287,27 +295,28 @@ export function getWorkflowState(options: WorkflowStateOptions = {}): WorkflowSt
       behind > 0 ? `behind ${behind}` : null,
     ].filter(Boolean).join(', ');
   } else if (openPullRequests.length > 0) {
-    summary = `Root is clean and ${formatCount(openPullRequests.length, 'PR')} remains open.`;
+    summary = `Combined app has no local file changes and ${formatCount(openPullRequests.length, 'PR')} remains open.`;
   } else {
-    summary = `Root is clean on ${branch}, with no active local workers or open PRs.`;
+    summary = `Combined app has no local file changes on ${branch}, with no active local workers or open PRs.`;
   }
 
   return { repo, root: stagingRoot, rows, openPullRequests, verdict, summary };
 }
 
 export function formatWorkflowState(state: WorkflowState): string {
-  const headers = ['Active', 'Root?', 'Origin?', 'Next', 'Plain English'];
+  const headers = ['In Local App', 'Saved Remotely', 'Folder Name', 'Description', 'Action'];
+  const formatCell = (value: string) => value === 'yes' ? '✓' : value;
 
   const lines = ['FT state', ''];
   lines.push(`| ${headers.join(' | ')} |`);
   lines.push(`| ${headers.map(() => '---').join(' | ')} |`);
   for (const row of state.rows) {
     lines.push(`| ${[
+      formatCell(row.includedInRoot),
+      formatCell(row.inOrigin),
       row.active,
-      row.includedInRoot,
-      row.inOrigin,
-      row.next,
       row.plainEnglish,
+      row.next,
     ].join(' | ')} |`);
   }
 
