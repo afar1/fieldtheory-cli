@@ -1,0 +1,43 @@
+name: CLI CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  cli:
+    name: Test and build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke CLI entrypoint
+        env:
+          HOME: ${{ runner.temp }}/fieldtheory-home
+          XDG_CONFIG_HOME: ${{ runner.temp }}/fieldtheory-config
+          XDG_DATA_HOME: ${{ runner.temp }}/fieldtheory-data
+        run: |
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
+          node bin/ft.mjs --help >/dev/null
