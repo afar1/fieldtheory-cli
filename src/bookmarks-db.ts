@@ -606,15 +606,20 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
     }
     if (!rows.length) return [];
 
-    return rows[0].values.map((row) => ({
-      id: row[0] as string,
-      url: row[1] as string,
-      text: row[2] as string,
-      authorHandle: row[3] as string | undefined,
-      authorName: row[4] as string | undefined,
-      postedAt: row[5] as string | null,
-      score: row[6] as number,
-    }));
+    return rows[0].values.map((row, index) => {
+      const rawRank = Number(row[6] ?? 0);
+      const bm25Score = options.query ? Math.max(0, -rawRank) : 0;
+      const fallbackScore = options.query ? 1 / (index + 1) : 0;
+      return {
+        id: row[0] as string,
+        url: row[1] as string,
+        text: row[2] as string,
+        authorHandle: row[3] as string | undefined,
+        authorName: row[4] as string | undefined,
+        postedAt: row[5] as string | null,
+        score: bm25Score > 0 ? bm25Score : fallbackScore,
+      };
+    });
   } finally {
     db.close();
   }

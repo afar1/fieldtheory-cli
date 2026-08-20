@@ -21,11 +21,12 @@ import {
   updateLibraryDocument,
 } from './library.js';
 import { appPanelNavigationDocument } from './navigation.js';
+import { ok as jsonOk } from './json-contract.js';
 
 type SafeAction = (fn: (...args: any[]) => Promise<void>) => (...args: any[]) => Promise<void>;
 
 function printJson(value: unknown): void {
-  console.log(JSON.stringify(value, null, 2));
+  console.log(JSON.stringify(jsonOk(value), null, 2));
 }
 
 function parseOpenKind(value: unknown): FieldTheoryOpenKind | undefined {

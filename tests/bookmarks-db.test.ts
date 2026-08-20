@@ -118,6 +118,15 @@ test('searchBookmarks: full-text search returns matching results', async () => {
   });
 });
 
+test('searchBookmarks: full-text search returns positive relevance scores', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    const results = await searchBookmarks({ query: 'learning', limit: 10 });
+    assert.equal(results.length, 2);
+    assert.ok(results.every((r) => r.score > 0), `expected positive scores, got ${JSON.stringify(results.map((r) => r.score))}`);
+  });
+});
+
 test('searchBookmarks: author filter works', async () => {
   await withIsolatedDataDir(async () => {
     await buildIndex();
