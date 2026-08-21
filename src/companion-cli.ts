@@ -20,6 +20,7 @@ import {
   showLibraryDocument,
   updateLibraryDocument,
 } from './library.js';
+import { appPanelNavigationDocument } from './navigation.js';
 
 type SafeAction = (fn: (...args: any[]) => Promise<void>) => (...args: any[]) => Promise<void>;
 
@@ -354,6 +355,24 @@ export function registerCompanionCommands(program: Command, safe: SafeAction): v
         console.log(target.note ?? 'No app deep link available for this target.');
         console.log(target.path);
       }
+    }));
+
+  appCommand
+    .command('url')
+    .description('Print a Field Theory panel URL for a Library or command document')
+    .argument('[path]', 'Relative or absolute markdown path, title, or filename')
+    .option('--query <query>', 'Find one matching document and link it')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string | undefined, options) => {
+      const result = await appPanelNavigationDocument(targetPath ?? '', {
+        launch: false,
+        query: options.query ? String(options.query) : undefined,
+      });
+      if (options.json) {
+        printJson(result);
+        return;
+      }
+      console.log(result.url ?? result.path);
     }));
 
   const install = program

@@ -1,8 +1,21 @@
 # Field Theory CLI
 
-Sync and store locally all of your X/Twitter bookmarks. Search, classify, and make them available to Claude Code, Codex, or any agent with shell access.
+Sync and store bookmarks locally, manage Field Theory Library and command workflows, and make local context available to Claude Code, Codex, or any agent with shell access.
 
 Free and open source. Designed for Mac.
+
+Field Theory CLI also acts as the command-line companion to the Field Theory Mac app: it knows the local `~/.fieldtheory` paths, can open Library pages in the packaged app, installs agent skills, and can download packaged app releases from the release feed.
+
+## Repository Family
+
+Field Theory is split across sibling repositories:
+
+- [`afar1/fieldtheory`](https://github.com/afar1/fieldtheory): Field Theory Mac app source.
+- [`afar1/fieldtheory-cli`](https://github.com/afar1/fieldtheory-cli): this CLI, licensed under MIT.
+- [`afar1/fieldtheory-plugin`](https://github.com/afar1/fieldtheory-plugin): Field Theory Codex plugin and skills.
+- [`afar1/field-releases`](https://github.com/afar1/field-releases): packaged Mac app release artifacts and updater metadata.
+
+Use the app source repo for Mac app issues, this repo for CLI issues, the plugin repo for agent-plugin issues, and the release feed only for installer, download, update-feed, or release-artifact problems.
 
 ## Install
 
@@ -223,6 +236,17 @@ export FT_COMMANDS_DIR=/path/to/custom/commands
 
 To remove bookmark and Library data: `rm -rf ~/.fieldtheory/bookmarks ~/.fieldtheory/library`
 
+## Field Theory Repos
+
+The CLI is one piece of the Field Theory repo family.
+
+- [`afar1/fieldtheory`](https://github.com/afar1/fieldtheory): Field Theory Mac app source, licensed under AGPL-3.0-or-later.
+- [`afar1/fieldtheory-cli`](https://github.com/afar1/fieldtheory-cli): this CLI, licensed under MIT.
+- [`afar1/fieldtheory-plugin`](https://github.com/afar1/fieldtheory-plugin): Field Theory Codex plugin and skills, licensed under MIT.
+- [`afar1/field-releases`](https://github.com/afar1/field-releases): packaged Mac app release artifacts and updater metadata only.
+
+File app-source issues in the app source repo. Keep binary installer, updater, and release-feed issues out of this CLI repo unless the bug is caused by `ft install app` or CLI launch behavior.
+
 ## Categories
 
 | Category | What it catches |
@@ -277,6 +301,14 @@ Session sync extracts cookies from your browser's local database. Use `ft sync -
 **OAuth tokens** are stored with `chmod 600` (owner-only). Treat `~/.fieldtheory/bookmarks/oauth-token.json` like a password.
 
 **The default sync uses X's internal GraphQL API**, the same API that x.com uses in your browser. For the official v2 API, use `ft auth` + `ft sync --api`.
+
+Do not open a public issue for suspected vulnerabilities, exposed credentials, auth bypasses, token-handling bugs, or private data exposure. Use the private maintainer contact in `SECURITY.md`.
+
+## Contributing
+
+By submitting a PR, patch, or contribution, you certify that you have the right to contribute it and agree to license it under the MIT License.
+
+No CLA is required. Maintainers may ask for explicit signoff on larger, sensitive, or ambiguous contributions.
 
 ## License
 

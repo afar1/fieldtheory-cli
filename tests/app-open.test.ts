@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { buildFieldTheoryOpenTarget, openFieldTheoryTarget } from '../src/app-open.js';
+import { buildFieldTheoryOpenTarget, buildFieldTheoryPanelOpenTarget, inferOpenKind, openFieldTheoryTarget } from '../src/app-open.js';
 
 test('app-open builds Field Theory wiki URL for library paths', () => {
   const previous = process.env.FT_LIBRARY_DIR;
@@ -13,6 +13,23 @@ test('app-open builds Field Theory wiki URL for library paths', () => {
     assert.equal(target.path, path.join('/tmp/ft-library', 'entries', 'hello.md'));
     assert.ok(target.url?.startsWith('fieldtheory://wiki/open?'));
     assert.ok(target.url?.includes('immersive=true'));
+  } finally {
+    if (previous === undefined) delete process.env.FT_LIBRARY_DIR;
+    else process.env.FT_LIBRARY_DIR = previous;
+  }
+});
+
+test('app-open builds Browser Library panel URL for library paths', () => {
+  const previous = process.env.FT_LIBRARY_DIR;
+  process.env.FT_LIBRARY_DIR = '/tmp/ft-library';
+  try {
+    const target = buildFieldTheoryPanelOpenTarget('entries/hello', 'library');
+    assert.equal(target.kind, 'library');
+    assert.equal(target.supported, true);
+    assert.equal(target.path, path.join('/tmp/ft-library', 'entries', 'hello.md'));
+    assert.ok(target.url?.startsWith('fieldtheory://browser-library/open?'));
+    assert.ok(target.url?.includes('kind=wiki'));
+    assert.ok(target.url?.includes('path=entries%2Fhello.md'));
   } finally {
     if (previous === undefined) delete process.env.FT_LIBRARY_DIR;
     else process.env.FT_LIBRARY_DIR = previous;
@@ -31,6 +48,21 @@ test('app-open reports command paths as unsupported deep links', () => {
   } finally {
     if (previous === undefined) delete process.env.FT_COMMANDS_DIR;
     else process.env.FT_COMMANDS_DIR = previous;
+  }
+});
+
+test('app-open infers nested Library/Commands paths as commands', () => {
+  const previousLibrary = process.env.FT_LIBRARY_DIR;
+  const previousCommands = process.env.FT_COMMANDS_DIR;
+  process.env.FT_LIBRARY_DIR = '/tmp/ft-library';
+  delete process.env.FT_COMMANDS_DIR;
+  try {
+    assert.equal(inferOpenKind(path.join('/tmp/ft-library', 'Commands', 'review.md')), 'command');
+  } finally {
+    if (previousLibrary === undefined) delete process.env.FT_LIBRARY_DIR;
+    else process.env.FT_LIBRARY_DIR = previousLibrary;
+    if (previousCommands === undefined) delete process.env.FT_COMMANDS_DIR;
+    else process.env.FT_COMMANDS_DIR = previousCommands;
   }
 });
 

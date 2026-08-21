@@ -96,6 +96,8 @@ export interface SyncOptions {
   resumeCursor?: string;
   /** Flush to disk every N pages. Default: 25 */
   checkpointEvery?: number;
+  /** Stop at the next safe loop boundary, then persist final state. */
+  signal?: AbortSignal;
 }
 
 export interface SyncProgress {
@@ -650,6 +652,10 @@ export async function syncBookmarksGraphQL(
   };
 
   while (page < maxPages) {
+    if (options.signal?.aborted) {
+      stopReason = 'interrupted';
+      break;
+    }
     if (Date.now() - started > maxMinutes * 60_000) {
       stopReason = 'max runtime reached';
       break;
@@ -745,6 +751,10 @@ export async function syncBookmarksGraphQL(
 
     // Continue paginating with no stale-page or caught-up limits
     while (page < maxPages) {
+      if (options.signal?.aborted) {
+        stopReason = 'interrupted';
+        break;
+      }
       if (Date.now() - started > maxMinutes * 60_000) {
         stopReason = 'max runtime reached';
         break;

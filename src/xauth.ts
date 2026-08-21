@@ -24,7 +24,7 @@ export function buildTwitterOAuthUrl(): { url: string; state: string; verifier: 
   }
 
   const { verifier, challenge, state } = createPkce();
-  const url = new URL('https://twitter.com/i/oauth2/authorize');
+  const url = new URL('https://x.com/i/oauth2/authorize');
   url.searchParams.set('response_type', 'code');
   url.searchParams.set('client_id', cfg.clientId);
   url.searchParams.set('redirect_uri', cfg.callbackUrl);

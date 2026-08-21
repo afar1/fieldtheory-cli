@@ -13,6 +13,7 @@ export interface DocumentVersion {
 export interface DocumentUpdateOptions {
   expectedSha256?: string;
   force?: boolean;
+  allowEmpty?: boolean;
 }
 
 export interface DocumentUpdateResult {
@@ -31,7 +32,7 @@ export function sha256(value: string): string {
 
 export function isPathInside(parentPath: string, childPath: string): boolean {
   const relPath = path.relative(parentPath, childPath);
-  return relPath === '' || (!!relPath && !relPath.startsWith(`..${path.sep}`) && !path.isAbsolute(relPath));
+  return relPath === '' || (!!relPath && relPath !== '..' && !relPath.startsWith(`..${path.sep}`) && !path.isAbsolute(relPath));
 }
 
 export function normalizeMarkdownFileName(name: string, options: { rejectLeadingUnderscore?: boolean } = {}): string | null {
@@ -117,9 +118,12 @@ export async function updateMarkdownFile(filePath: string, content: string, opti
   if (!await pathExists(filePath)) {
     throw new Error(`File not found: ${filePath}`);
   }
+  if (content.length === 0 && !options.allowEmpty) {
+    throw new Error('Refusing to overwrite with empty content. Pipe the complete document content to stdin, or pass --allow-empty to intentionally clear it.');
+  }
   const current = readDocumentVersion(filePath);
   if (options.expectedSha256 && current.sha256 !== options.expectedSha256) {
-    throw new Error(`File changed on disk. Expected ${options.expectedSha256}, found ${current.sha256}.`);
+    throw new Error(`File changed on disk. Expected ${options.expectedSha256}, found ${current.sha256}. To continue editing safely, run ft current --json, merge the requested change into the returned content, then run ft current update --stdin --expected-sha256 ${current.sha256}. Use the sha256 printed after each successful update for the next edit.`);
   }
   if (!options.force && !options.expectedSha256) {
     throw new Error('Refusing to overwrite without --expected-sha256 or --force.');

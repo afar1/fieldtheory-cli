@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { canonicalCommandsDir, canonicalLibraryDir } from './paths.js';
+import { canonicalLibraryDir, commandsDir } from './paths.js';
 import { isPathInside, resolveMarkdownPath } from './document-ops.js';
 
 const DEFAULT_FIELD_THEORY_BUNDLE_ID = 'com.fieldtheory.app';
@@ -29,10 +29,14 @@ export interface FieldTheoryLaunchOptions {
   spawn?: SpawnRunner;
 }
 
+function posixRelativePath(from: string, to: string): string {
+  return path.relative(from, to).split(path.sep).join('/');
+}
+
 export function inferOpenKind(filePath: string): FieldTheoryOpenKind | null {
   const resolved = path.resolve(filePath);
+  if (isPathInside(path.resolve(commandsDir()), resolved)) return 'command';
   if (isPathInside(path.resolve(canonicalLibraryDir()), resolved)) return 'library';
-  if (isPathInside(path.resolve(canonicalCommandsDir()), resolved)) return 'command';
   return null;
 }
 
@@ -45,7 +49,7 @@ export function buildFieldTheoryOpenTarget(inputPath: string, kind?: FieldTheory
     throw new Error(`Unknown target kind: ${String(resolvedKind)}`);
   }
 
-  const root = resolvedKind === 'library' ? canonicalLibraryDir() : canonicalCommandsDir();
+  const root = resolvedKind === 'library' ? canonicalLibraryDir() : commandsDir();
   const resolvedPath = resolveMarkdownPath(root, inputPath);
   if (!resolvedPath) throw new Error(`Path is outside the ${resolvedKind} root or is not markdown.`);
 
@@ -66,6 +70,31 @@ export function buildFieldTheoryOpenTarget(inputPath: string, kind?: FieldTheory
     supported: false,
     note: 'Field Theory does not expose a command-file deep link yet; open this path in the Commands view.',
   };
+}
+
+export function buildFieldTheoryPanelOpenTarget(inputPath: string, kind?: FieldTheoryOpenKind): FieldTheoryOpenTarget {
+  const target = buildFieldTheoryOpenTarget(inputPath, kind);
+  if (target.kind === 'library') {
+    const relPath = posixRelativePath(path.resolve(canonicalLibraryDir()), target.path);
+    const params = new URLSearchParams({ kind: 'wiki', path: relPath });
+    return {
+      ...target,
+      url: `fieldtheory://browser-library/open?${params.toString()}`,
+      supported: true,
+    };
+  }
+
+  if (target.kind === 'command') {
+    const params = new URLSearchParams({ kind: 'command', path: target.path });
+    return {
+      ...target,
+      url: `fieldtheory://browser-library/open?${params.toString()}`,
+      supported: true,
+      note: undefined,
+    };
+  }
+
+  return target;
 }
 
 function runLauncher(spawn: SpawnRunner, command: string, args: string[], method: FieldTheoryLaunchResult['method'], cwd?: string): FieldTheoryLaunchResult {

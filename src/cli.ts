@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command, Option } from 'commander';
+import { Command, InvalidArgumentError, Option } from 'commander';
 import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
 import { runTwitterOAuthFlow } from './xauth.js';
@@ -34,11 +34,47 @@ import { renderViz } from './bookmarks-viz.js';
 import { startWeb } from './web.js';
 import { listBrowserIds } from './browsers.js';
 import { configureHttpProxyFromEnv } from './http-proxy.js';
-import { dataDir, ensureDataDir, isFirstRun, migrateLegacyIdeasData, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir, bookmarkMediaDir, bookmarkMediaManifestPath } from './paths.js';
+import { canonicalLibraryDir, dataDir, ensureDataDir, isFirstRun, migrateLegacyIdeasData, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir, bookmarkMediaDir, bookmarkMediaManifestPath } from './paths.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import { registerCompanionCommands } from './companion-cli.js';
 import { getPathReport } from './field-status.js';
+import { formatAgentContext, getAgentContext } from './agent-context.js';
+import { currentDocumentJson, formatCurrentDocumentSummary, isEditableCurrentSourcePath, readCurrentDocumentContext, readCurrentDocumentSummary } from './current.js';
+import { isPathInside, readContentInput, updateMarkdownFile } from './document-ops.js';
+import { updateLibraryDocument } from './library.js';
+import { formatWorkflowState, getWorkflowState } from './workflow-state.js';
+import {
+  appendNavigationDocument,
+  backNavigation,
+  buildNavigationWikiLink,
+  cdNavigation,
+  createNavigationDocument,
+  createNavigationNote,
+  findNavigationEntries,
+  formatNavigationContext,
+  formatNavigationEntries,
+  formatNavigationHead,
+  formatNavigationLinks,
+  formatNavigationMeta,
+  formatNavigationPlaces,
+  formatNavigationPwd,
+  formatNavigationSearchResults,
+  formatNavigationState,
+  formatNavigationTags,
+  grepNavigationContent,
+  listNavigationBacklinks,
+  listNavigationEntries,
+  listNavigationLinks,
+  listNavigationPlaces,
+  listNavigationTagged,
+  listNavigationTags,
+  openNavigationDocument,
+  panelNavigationDocument,
+  readNavigationDocument,
+  renameNavigationDocument,
+  type NavigationPlace,
+} from './navigation.js';
 import {
   formatIdeasIntro,
   formatRunList,
@@ -125,7 +161,7 @@ const SPINNER = ['\u280b', '\u2819', '\u2839', '\u2838', '\u283c', '\u2834', '\u
 let spinnerIdx = 0;
 
 /** Creates a spinner that animates independently of data callbacks. */
-function createSpinner(renderLine: () => string): { update: () => void; stop: () => void } {
+function createSpinner(renderLine: () => string, options: { onSigint?: () => void } = {}): { update: () => void; stop: () => void } {
   let line = '';
   let stopped = false;
   const tick = () => {
@@ -144,6 +180,10 @@ function createSpinner(renderLine: () => string): { update: () => void; stop: ()
   // Graceful interrupt — stop spinner, show friendly message
   const onSigint = () => {
     stop();
+    if (options.onSigint) {
+      options.onSigint();
+      return;
+    }
     console.log('\n  Interrupted. Your data is safe \u2014 progress has been saved.');
     console.log('  Run the same command again to pick up where you left off.\n');
     process.exit(0);
@@ -175,10 +215,16 @@ const FRIENDLY_STOP_REASONS: Record<string, string> = {
   'max pages reached': 'Paused after reaching page limit. Run again to continue.',
   'rate limited': 'Paused by X rate limiting.',
   'target additions reached': 'Reached target bookmark count.',
+  'interrupted': 'Interrupted by user.',
 };
 
-function friendlyStopReason(raw?: string): string {
+function friendlyStopReason(raw?: string, addedCount: number = 0): string {
   if (!raw) return 'Sync complete.';
+  if (raw === 'caught up to newest stored bookmark') {
+    return addedCount > 0
+      ? 'Sync complete \u2014 caught up to previously stored bookmarks.'
+      : 'All caught up \u2014 no new bookmarks since last sync.';
+  }
   return FRIENDLY_STOP_REASONS[raw] ?? `Sync complete \u2014 ${raw}`;
 }
 
@@ -205,8 +251,9 @@ function printMediaFetchSummary(result: MediaFetchManifest): void {
   console.log(`  ✓ Manifest: ${bookmarkMediaManifestPath()}`);
 }
 
-async function runMediaFetchWithProgress(options: { limit?: number; maxBytes?: number; skipProfileImages?: boolean } = {}): Promise<MediaFetchManifest> {
+async function runMediaFetchWithProgress(options: { limit?: number; maxBytes?: number; skipProfileImages?: boolean; retryFailed?: boolean } = {}): Promise<MediaFetchManifest> {
   const startTime = Date.now();
+  const controller = new AbortController();
   let lastMedia: MediaFetchProgress = {
     candidateBookmarks: 0,
     processed: 0,
@@ -217,11 +264,18 @@ async function runMediaFetchWithProgress(options: { limit?: number; maxBytes?: n
   const spinner = createSpinner(() => {
     const elapsed = Math.round((Date.now() - startTime) / 1000);
     return `Fetching media...  ${lastMedia.processed} processed  │  ${lastMedia.downloaded} downloaded  │  ${elapsed}s`;
+  }, {
+    onSigint: () => {
+      controller.abort();
+      console.log('\n  Interrupted. Saving media progress...\n');
+    },
   });
   const result = await runWithSpinner(spinner, () => fetchBookmarkMediaBatch({
     limit: options.limit,
     maxBytes: options.maxBytes,
     skipProfileImages: options.skipProfileImages,
+    retryFailed: options.retryFailed,
+    signal: controller.signal,
     onProgress: (progress: MediaFetchProgress) => {
       lastMedia = progress;
       spinner.update();
@@ -229,6 +283,9 @@ async function runMediaFetchWithProgress(options: { limit?: number; maxBytes?: n
   }));
   console.log('');
   printMediaFetchSummary(result);
+  if (controller.signal.aborted) {
+    console.log('  Interrupted. Progress has been saved; run the same command again to continue.\n');
+  }
   return result;
 }
 
@@ -257,6 +314,32 @@ function warnIfEmpty(totalBookmarks: number): void {
 
 function printJson(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
+}
+
+export function shouldInferStdinFromStats(stats: Pick<fs.Stats, 'isFIFO' | 'isFile'>): boolean {
+  return stats.isFIFO() || stats.isFile();
+}
+
+function hasPipedStdin(): boolean {
+  try {
+    return shouldInferStdinFromStats(fs.fstatSync(0));
+  } catch {
+    return false;
+  }
+}
+
+function formatMarkdownLink(label: string, href: string): string {
+  const safeLabel = label.replace(/]/g, '\\]');
+  const safeHref = href.replace(/\)/g, '%29');
+  return `[${safeLabel}](${safeHref})`;
+}
+
+function parseNavigationPlace(value: string): NavigationPlace {
+  const place = value.toLowerCase();
+  if (listNavigationPlaces().some((candidate) => candidate.name === place)) {
+    return place as NavigationPlace;
+  }
+  throw new Error(`Unknown Field Theory place: ${value}`);
 }
 
 // ── Update checker ────────────────────────────────────────────────────────
@@ -424,7 +507,12 @@ function isInternalWorkerCommand(command: Command): boolean {
 function shouldSkipCommandChrome(command: Command): boolean {
   if (isInternalWorkerCommand(command)) return true;
   if (command.opts().json) return true;
-  if (command.name() === 'path' || command.name() === 'paths') return true;
+  if (command.parent?.name() === 'current') return true;
+  if ([
+    'path', 'paths', 'current', 'recent', 'state', 'ls', 'tree', 'find', 'grep', 'cat',
+    'head', 'meta', 'pwd', 'context', 'open', 'tab', 'reveal', 'link', 'links',
+    'backlinks', 'tags', 'tagged', 'new', 'append', 'note', 'rename', 'cd', 'back',
+  ].includes(command.name())) return true;
   if (command.name() === 'show' && command.parent?.name() === 'skill') return true;
   return false;
 }
@@ -655,6 +743,14 @@ function safe(fn: (...args: any[]) => Promise<void>): (...args: any[]) => Promis
       process.exitCode = 1;
     }
   };
+}
+
+function parsePositiveInteger(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new InvalidArgumentError('value must be a positive integer');
+  }
+  return parsed;
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
@@ -911,6 +1007,7 @@ export function buildCli() {
           }
         } else {
           const startTime = Date.now();
+          const controller = new AbortController();
           let lastSync: SyncProgress = { page: 0, totalFetched: 0, newAdded: 0, running: true, done: false };
           const spinner = createSpinner(() => {
             const elapsed = Math.round((Date.now() - startTime) / 1000);
@@ -918,6 +1015,11 @@ export function buildCli() {
               return `${lastSync.stopReason}  \u2502  ${lastSync.newAdded} new  \u2502  ${elapsed}s`;
             }
             return `Syncing bookmarks...  ${lastSync.newAdded} new  \u2502  page ${lastSync.page}  \u2502  ${elapsed}s`;
+          }, {
+            onSigint: () => {
+              controller.abort();
+              console.log('\n  Interrupted. Saving sync progress...\n');
+            },
           });
           const { csrfToken, cookieHeader } = parseCookieOption(options.cookies);
 
@@ -955,6 +1057,7 @@ export function buildCli() {
             chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
             chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
             firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+            signal: controller.signal,
             onProgress: (status: SyncProgress) => {
               lastSync = status;
               spinner.update();
@@ -962,7 +1065,7 @@ export function buildCli() {
           }));
 
           console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
-          console.log(`  ${friendlyStopReason(result.stopReason)}`);
+          console.log(`  ${friendlyStopReason(result.stopReason, result.added)}`);
           if (result.stopReason === 'rate limited') {
             const retryAfter = formatRetryAfter(result.retryAfterSec);
             if (retryAfter) {
@@ -978,6 +1081,11 @@ export function buildCli() {
             console.log(`  ${result.bookmarkedAtMissing} bookmarks missing a reliable bookmark date`);
           }
           console.log(`  \u2713 Data: ${dataDir()}\n`);
+
+          if (result.stopReason === 'interrupted') {
+            console.log('  Interrupted. Progress has been saved; run ft sync --continue to resume.\n');
+            return;
+          }
 
           warnIfEmpty(result.totalBookmarks);
 
@@ -1490,6 +1598,452 @@ export function buildCli() {
     .description('Print the data directory path')
     .action(() => { console.log(dataDir()); });
 
+  program
+    .command('recent')
+    .description('Show the current repo files an agent can use for "that file" references')
+    .option('--repo <path>', 'Repo path to inspect (default: cwd)')
+    .option('--limit <n>', 'Number of recent files to show', parsePositiveInteger, 10)
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const context = getAgentContext(options.repo ?? process.cwd(), options.limit);
+      if (options.json) {
+        printJson(context);
+        return;
+      }
+      process.stdout.write(formatAgentContext(context));
+    }));
+
+  program
+    .command('ls')
+    .description('List Field Theory places or files inside one place')
+    .argument('[place]', 'Field Theory place such as library, commands, briefs, scratchpad, wikis, debates, recent, or current')
+    .option('--limit <n>', 'Max files', parsePositiveInteger)
+    .option('--json', 'JSON output')
+    .action(safe(async (place: string | undefined, options) => {
+      if (!place) {
+        const places = listNavigationPlaces();
+        if (options.json) printJson(places);
+        else process.stdout.write(formatNavigationPlaces());
+        return;
+      }
+      const parsedPlace = parseNavigationPlace(place);
+      if (parsedPlace === 'recent') {
+        const context = getAgentContext(process.cwd(), options.limit ?? 10);
+        if (options.json) printJson(context);
+        else process.stdout.write(formatAgentContext(context));
+        return;
+      }
+      if (parsedPlace === 'current') {
+        const summary = readCurrentDocumentSummary();
+        if (options.json) printJson(summary);
+        else process.stdout.write(formatCurrentDocumentSummary(summary));
+        return;
+      }
+      const entries = listNavigationEntries(parsedPlace, options.limit);
+      if (options.json) printJson(entries);
+      else process.stdout.write(formatNavigationEntries(entries));
+    }));
+
+  program
+    .command('tree')
+    .description('Show a compact Field Theory Library tree')
+    .option('--limit <n>', 'Max files', parsePositiveInteger, 80)
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const entries = listNavigationEntries('library', options.limit);
+      if (options.json) printJson(entries.map((entry) => entry.relPath));
+      else process.stdout.write(entries.length ? `${entries.map((entry) => entry.relPath).join('\n')}\n` : '(none)\n');
+    }));
+
+  program
+    .command('find')
+    .description('Search Field Theory document titles and paths')
+    .argument('<query>', 'Title or filename query')
+    .option('--limit <n>', 'Max results', parsePositiveInteger, 20)
+    .option('--json', 'JSON output')
+    .action(safe(async (query: string, options) => {
+      const entries = findNavigationEntries(query, options.limit);
+      if (options.json) printJson(entries);
+      else process.stdout.write(formatNavigationEntries(entries));
+    }));
+
+  program
+    .command('grep')
+    .description('Search inside Field Theory markdown content')
+    .argument('<query>', 'Content query')
+    .option('--limit <n>', 'Max results', parsePositiveInteger, 20)
+    .option('--json', 'JSON output')
+    .action(safe(async (query: string, options) => {
+      const entries = grepNavigationContent(query, options.limit);
+      if (options.json) printJson(entries);
+      else process.stdout.write(formatNavigationSearchResults(entries));
+    }));
+
+  program
+    .command('cat')
+    .description('Print a Field Theory Library or command document')
+    .argument('<file>', 'Relative or absolute markdown path')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const doc = await readNavigationDocument(targetPath);
+      if (options.json) printJson(doc);
+      else process.stdout.write(doc.content.endsWith('\n') ? doc.content : `${doc.content}\n`);
+    }));
+
+  program
+    .command('head')
+    .description('Print the first lines of a Field Theory Library or command document')
+    .argument('<file>', 'Relative or absolute markdown path')
+    .option('--lines <n>', 'Number of lines', parsePositiveInteger, 40)
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const doc = await readNavigationDocument(targetPath);
+      if (options.json) printJson({ ...doc, content: formatNavigationHead(doc.content, options.lines) });
+      else process.stdout.write(formatNavigationHead(doc.content, options.lines));
+    }));
+
+  program
+    .command('meta')
+    .description('Show metadata for a Field Theory Library or command document')
+    .argument('<file>', 'Relative or absolute markdown path')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const doc = await readNavigationDocument(targetPath);
+      const { content: _content, ...entry } = doc;
+      if (options.json) printJson(entry);
+      else process.stdout.write(formatNavigationMeta(entry));
+    }));
+
+  program
+    .command('open')
+    .description('Open a Field Theory Library document in the app')
+    .argument('[file]', 'Relative or absolute markdown path, title, or filename')
+    .option('--query <query>', 'Find one matching document and open it')
+    .option('--no-launch', 'Print target without launching the app')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string | undefined, options) => {
+      if (!targetPath && !options.query) throw new Error('Pass a file/title or --query.');
+      const result = await openNavigationDocument(targetPath ?? '', {
+        launch: options.launch !== false,
+        query: options.query ? String(options.query) : undefined,
+      });
+      if (options.json) {
+        printJson(result);
+        return;
+      }
+      console.log(result.url ?? result.path);
+    }));
+
+  program
+    .command('panel')
+    .description('Print a Field Theory panel link for a Library or command document')
+    .argument('[file]', 'Relative or absolute markdown path, title, or filename')
+    .option('--query <query>', 'Find one matching document and link it')
+    .option('--open', 'Open the panel link in the Field Theory app')
+    .option('--url', 'Print the raw URL instead of a Markdown hyperlink')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string | undefined, options) => {
+      const result = await panelNavigationDocument(targetPath ?? '', {
+        launch: options.open === true,
+        query: options.query ? String(options.query) : undefined,
+      });
+      if (options.json) {
+        printJson(result);
+        return;
+      }
+      const href = result.url ?? result.path;
+      console.log(options.url ? href : formatMarkdownLink('Open in Field Theory panel', href));
+    }));
+
+  const codexCommand = program
+    .command('codex')
+    .description('Codex-facing Field Theory helpers');
+
+  codexCommand
+    .command('panel')
+    .description('Print a Field Theory panel link for Codex')
+    .argument('[file]', 'Relative or absolute markdown path, title, or filename')
+    .option('--query <query>', 'Find one matching document and link it')
+    .option('--url', 'Print the raw URL instead of a Markdown hyperlink')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string | undefined, options) => {
+      const result = await panelNavigationDocument(targetPath ?? '', {
+        launch: false,
+        query: options.query ? String(options.query) : undefined,
+      });
+      if (options.json) {
+        printJson(result);
+        return;
+      }
+      const href = result.url ?? result.path;
+      console.log(options.url ? href : formatMarkdownLink('Open in Field Theory panel', href));
+    }));
+
+  program
+    .command('tab')
+    .description('Open a Field Theory Library document as a tab when the app supports it')
+    .argument('<file>', 'Relative or absolute markdown path, title, or filename')
+    .option('--no-launch', 'Print target without launching the app')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const result = await openNavigationDocument(targetPath, { launch: options.launch !== false, action: 'tab' });
+      if (options.json) printJson(result);
+      else console.log(result.url ?? result.path);
+    }));
+
+  program
+    .command('reveal')
+    .description('Reveal a Field Theory Library document in app navigation when the app supports it')
+    .argument('<file>', 'Relative or absolute markdown path, title, or filename')
+    .option('--no-launch', 'Print target without launching the app')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const result = await openNavigationDocument(targetPath, { launch: options.launch !== false, action: 'reveal' });
+      if (options.json) printJson(result);
+      else console.log(result.url ?? result.path);
+    }));
+
+  program
+    .command('pwd')
+    .description('Show the current Field Theory location')
+    .action(safe(async () => {
+      process.stdout.write(formatNavigationPwd());
+    }));
+
+  program
+    .command('context')
+    .description('Show current Field Theory document plus recent repo files')
+    .option('--repo <path>', 'Repo path to inspect (default: cwd)')
+    .option('--limit <n>', 'Number of recent files to show', parsePositiveInteger, 8)
+    .action(safe(async (options) => {
+      process.stdout.write(formatNavigationContext(options.repo ?? process.cwd(), options.limit));
+    }));
+
+  program
+    .command('link')
+    .description('Print the canonical wiki link for a Field Theory document or command')
+    .argument('<target>', 'Relative markdown path, title, command name, or filename')
+    .option('--alias <text>', 'Display text for the wikilink')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const result = buildNavigationWikiLink(targetPath, options.alias ? String(options.alias) : undefined);
+      if (options.json) printJson(result);
+      else console.log(result.link);
+    }));
+
+  program
+    .command('links')
+    .description('List wiki-style links from a Field Theory document')
+    .argument('<file>', 'Relative markdown path, title, or filename')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const links = listNavigationLinks(targetPath);
+      if (options.json) printJson(links);
+      else process.stdout.write(formatNavigationLinks(links));
+    }));
+
+  program
+    .command('backlinks')
+    .description('List documents that link to a Field Theory document')
+    .argument('<file>', 'Relative markdown path, title, or filename')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const entries = listNavigationBacklinks(targetPath);
+      if (options.json) printJson(entries);
+      else process.stdout.write(formatNavigationEntries(entries));
+    }));
+
+  program
+    .command('tags')
+    .description('List tags found in Field Theory markdown')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const tags = listNavigationTags();
+      if (options.json) printJson(tags);
+      else process.stdout.write(formatNavigationTags(tags));
+    }));
+
+  program
+    .command('tagged')
+    .description('List Field Theory documents with a tag')
+    .argument('<tag>', 'Tag name, with or without #')
+    .option('--json', 'JSON output')
+    .action(safe(async (tag: string, options) => {
+      const entries = listNavigationTagged(tag);
+      if (options.json) printJson(entries);
+      else process.stdout.write(formatNavigationEntries(entries));
+    }));
+
+  program
+    .command('new')
+    .description('Create a Field Theory document')
+    .argument('<type>', 'brief, command, scratchpad, wiki, or debate')
+    .argument('<title>', 'Document title')
+    .option('--stdin', 'Read markdown content from stdin')
+    .option('--file <path>', 'Read markdown content from a file')
+    .option('--json', 'JSON output')
+    .action(safe(async (type: string, title: string, options) => {
+      const entry = await createNavigationDocument(type, title, {
+        stdin: Boolean(options.stdin),
+        file: options.file ? String(options.file) : undefined,
+      });
+      if (options.json) printJson(entry);
+      else console.log(`Created: ${entry.path}`);
+    }));
+
+  program
+    .command('append')
+    .description('Append text to a Field Theory document')
+    .argument('<file>', 'Relative markdown path, title, or filename')
+    .argument('[text]', 'Text to append')
+    .option('--content <text>', 'Text to append')
+    .option('--stdin', 'Read markdown content from stdin')
+    .option('--file <path>', 'Read markdown content from a file')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, textArg: string | undefined, options) => {
+      const content = options.content ? String(options.content) : textArg;
+      const entry = await appendNavigationDocument(targetPath, {
+        stdin: Boolean(options.stdin),
+        file: options.file ? String(options.file) : undefined,
+        content,
+      });
+      if (options.json) printJson(entry);
+      else console.log(`Appended: ${entry.path}`);
+    }));
+
+  program
+    .command('note')
+    .description('Append a quick note to today’s Scratchpad file')
+    .argument('<text>', 'Note text')
+    .option('--title <title>', 'Scratchpad title when creating today’s file')
+    .option('--json', 'JSON output')
+    .action(safe(async (text: string, options) => {
+      const entry = await createNavigationNote(text, options.title ? String(options.title) : undefined);
+      if (options.json) printJson(entry);
+      else console.log(`Noted: ${entry.path}`);
+    }));
+
+  program
+    .command('rename')
+    .description('Rename a Field Theory document using Field Theory places')
+    .argument('<file>', 'Relative markdown path, title, or filename')
+    .argument('<title>', 'New title')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, title: string, options) => {
+      const entry = await renameNavigationDocument(targetPath, title);
+      if (options.json) printJson(entry);
+      else console.log(`Renamed: ${entry.path}`);
+    }));
+
+  program
+    .command('cd')
+    .description('Move the CLI Field Theory location state')
+    .argument('<ft-path>', 'Field Theory place, relative path, title, or filename')
+    .option('--json', 'JSON output')
+    .action(safe(async (targetPath: string, options) => {
+      const state = cdNavigation(targetPath);
+      if (options.json) printJson(state);
+      else process.stdout.write(formatNavigationState(state));
+    }));
+
+  program
+    .command('back')
+    .description('Move back through the CLI Field Theory location state')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const state = backNavigation();
+      if (options.json) printJson(state);
+      else process.stdout.write(formatNavigationState(state));
+    }));
+
+  const currentCommand = program
+    .command('current')
+    .description('Show the active Field Theory document attached to the Mac app terminal')
+    .option('--manifest <path>', 'Read a specific context manifest')
+    .option('--content-only', 'Print only the active document markdown/content')
+    .option('--include-content', 'Deprecated: active document content is included in --json output by default')
+    .option('--summary', 'Omit active document content from --json output')
+    .option('--debug-paths', 'Include raw manifest/source/cache paths in --json output')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      if (options.contentOnly) {
+        process.stdout.write(readCurrentDocumentContext(options.manifest).content);
+        return;
+      }
+      const context = options.json && !options.summary
+        ? readCurrentDocumentContext(options.manifest)
+        : readCurrentDocumentSummary(options.manifest);
+      if (options.json) {
+        printJson(options.debugPaths ? context : currentDocumentJson(context));
+        return;
+      }
+      process.stdout.write(formatCurrentDocumentSummary(context));
+    }));
+
+  currentCommand
+    .command('update')
+    .description('Update the active Field Theory Library document with stdin or file content')
+    .argument('[unexpected...]', 'Unexpected positional content; pipe Markdown on stdin instead')
+    .option('--manifest <path>', 'Read a specific context manifest')
+    .option('--stdin', 'Read markdown content from stdin')
+    .option('--file <path>', 'Read markdown content from a file')
+    .option('--expected-sha256 <hash>', 'Only update if the current source file hash matches')
+    .option('--force', 'Overwrite without checking an expected hash')
+    .option('--allow-empty', 'Allow intentionally clearing the current document')
+    .option('--json', 'JSON output')
+    .action(safe(async (unexpectedArgs: string[], options, command) => {
+      if (unexpectedArgs.length > 0) {
+        throw new Error('ft current update does not accept document content as command arguments. Pipe the complete edited Markdown to stdin, then retry with ft current update --stdin --expected-sha256 <version.sha256>.');
+      }
+      const stdin = Boolean(options.stdin || (!options.file && hasPipedStdin()));
+      if (!stdin && !options.file) throw new Error('Pipe complete Markdown to stdin or pass --stdin/--file for update content.');
+      if (options.stdin && options.file) throw new Error('Pass only one of --stdin or --file for update content.');
+      const parentOptions = command.parent?.opts() ?? {};
+      const manifest = options.manifest || parentOptions.manifest;
+      const context = readCurrentDocumentContext(manifest);
+      const targetPath = context.activeDocument.path;
+      if (!targetPath) throw new Error('Active Field Theory context has no source path to update.');
+      if (!isEditableCurrentSourcePath(targetPath)) {
+        throw new Error('Active Field Theory context source is not an editable Field Theory Markdown file.');
+      }
+      const updateOptions = {
+        expectedSha256: options.expectedSha256 ? String(options.expectedSha256) : undefined,
+        force: Boolean(options.force),
+        allowEmpty: Boolean(options.allowEmpty),
+      };
+      const input = {
+        stdin,
+        file: options.file ? String(options.file) : undefined,
+      };
+      const doc = isPathInside(canonicalLibraryDir(), targetPath)
+        ? await updateLibraryDocument(targetPath, { ...input, ...updateOptions })
+        : await updateMarkdownFile(targetPath, await readContentInput(input), updateOptions);
+      if (options.json || parentOptions.json) {
+        printJson(doc);
+        return;
+      }
+      console.log(`Updated: ${doc.path}`);
+      console.log(`sha256: ${doc.version.sha256}`);
+    }));
+
+  program
+    .command('state')
+    .description('Show repo workflow state in one read-only table')
+    .option('--repo <path>', 'Repo path to inspect (default: cwd)')
+    .option('--no-fetch', 'Skip fetching remote refs before reading state')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const state = getWorkflowState({
+        repo: options.repo,
+        fetch: options.fetch !== false,
+      });
+      if (options.json) {
+        printJson(state);
+        return;
+      }
+      process.stdout.write(formatWorkflowState(state));
+    }));
+
   registerCompanionCommands(program, safe);
 
   // ── sample ──────────────────────────────────────────────────────────────
@@ -1523,6 +2077,7 @@ export function buildCli() {
     .option('--limit <n>', 'Max pending bookmarks to process (default: all)', (v: string) => Number(v))
     .option('--max-bytes <n>', 'Per-asset byte limit (default: 200 MB)', (v: string) => Number(v), DEFAULT_MEDIA_MAX_BYTES)
     .option('--skip-profile-images', 'Skip downloading author profile images')
+    .option('--retry-failed', 'Retry failed media entries without waiting for backoff')
     .action(safe(async (options) => {
       if (!requireData()) return;
       await runMediaFetchWithProgress({
@@ -1531,6 +2086,7 @@ export function buildCli() {
           ? options.maxBytes
           : DEFAULT_MEDIA_MAX_BYTES,
         skipProfileImages: Boolean(options.skipProfileImages),
+        retryFailed: Boolean(options.retryFailed),
       });
     }));
 
@@ -2793,8 +3349,10 @@ export function buildCli() {
   skill
     .command('install')
     .description('Install skill for detected agents (Claude Code, Codex)')
-    .action(safe(async () => {
-      const results = await installSkill();
+    .option('--force', 'Overwrite existing skill files without prompting')
+    .option('-y, --yes', 'Alias for --force')
+    .action(safe(async (options: { force?: boolean; yes?: boolean }) => {
+      const results = await installSkill({ force: Boolean(options.force || options.yes) });
       if (results.length === 0) {
         console.log('  No agents detected. Use `ft skill show` to copy manually.');
         return;

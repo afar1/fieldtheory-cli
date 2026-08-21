@@ -985,6 +985,55 @@ test('syncBookmarksGraphQL: rate limit stops cleanly and saves cursor for contin
   }, existing);
 });
 
+test('syncBookmarksGraphQL: abort stops at boundary and saves cursor for continue', async () => {
+  const page1 = makeGraphQLResponse([
+    makeTweetResult({
+      rest_id: '222',
+      legacy: {
+        id_str: '222',
+        full_text: 'Abortable bookmark',
+        created_at: 'Tue Mar 12 12:00:00 +0000 2026',
+      },
+    }),
+  ], 'cursor-after-abort');
+
+  await withIsolatedGapFillDataDir(async () => {
+    const originalFetch = globalThis.fetch;
+    const controller = new AbortController();
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return new Response(JSON.stringify(page1), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    try {
+      const result = await syncBookmarksGraphQL({
+        incremental: false,
+        csrfToken: 'ct0',
+        cookieHeader: 'ct0=ct0; auth_token=auth',
+        delayMs: 0,
+        signal: controller.signal,
+        onProgress: (progress) => {
+          if (progress.page === 1) controller.abort();
+        },
+      });
+
+      assert.equal(fetchCalls, 1);
+      assert.equal(result.pages, 1);
+      assert.equal(result.stopReason, 'interrupted');
+
+      const state = JSON.parse(await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks-backfill-state.json'), 'utf8'));
+      assert.equal(state.stopReason, 'interrupted');
+      assert.equal(state.lastCursor, 'cursor-after-abort');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }, []);
+});
+
 test('syncGaps: permanent quoted-tweet failure stamps quotedTweetFailedAt so reruns skip it', async () => {
   const deadQuoted: BookmarkRecord = {
     id: '222',

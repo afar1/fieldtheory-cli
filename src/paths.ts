@@ -15,6 +15,10 @@ export function fieldTheoryDir(): string {
   return path.join(os.homedir(), '.fieldtheory');
 }
 
+export function browserHelperStatePath(): string {
+  return process.env.FT_BROWSER_HELPER_STATE_PATH ?? path.join(fieldTheoryDir(), 'browser-helper.json');
+}
+
 export function legacyDataDir(): string {
   return path.join(os.homedir(), '.ft-bookmarks');
 }
@@ -28,7 +32,23 @@ export function canonicalLibraryDir(): string {
 }
 
 export function canonicalCommandsDir(): string {
-  return process.env.FT_COMMANDS_DIR ?? path.join(fieldTheoryDir(), 'commands');
+  return process.env.FT_COMMANDS_DIR ?? path.join(canonicalLibraryDir(), 'Commands');
+}
+
+export function runtimeContextSessionsDir(): string {
+  return path.join(fieldTheoryDir(), '.codex-context', 'sessions');
+}
+
+export function runtimeContextSessionStatePath(): string {
+  return path.join(fieldTheoryDir(), '.codex-context', 'session-state.json');
+}
+
+export function legacyCodexContextSessionsDir(): string {
+  return path.join(canonicalLibraryDir(), 'Codex Context', 'sessions');
+}
+
+export function codexContextSessionsDir(): string {
+  return legacyCodexContextSessionsDir();
 }
 
 export function libraryDir(): string {
@@ -42,7 +62,13 @@ export function libraryDir(): string {
 }
 
 export function commandsDir(): string {
-  return canonicalCommandsDir();
+  const override = process.env.FT_COMMANDS_DIR;
+  if (override) return override;
+  const canonical = path.join(canonicalLibraryDir(), 'Commands');
+  if (process.env.FT_LIBRARY_DIR) return canonical;
+  const legacy = path.join(fieldTheoryDir(), 'commands');
+  if (fs.existsSync(canonical) || !fs.existsSync(legacy)) return canonical;
+  return legacy;
 }
 
 /**

@@ -1,9 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { canonicalLibraryDir } from './paths.js';
+import { canonicalLibraryDir, codexContextSessionsDir } from './paths.js';
 import {
   createMarkdownFile,
   DocumentVersion,
+  isPathInside,
   moveToTrash,
   readContentInput,
   readMarkdownDocument,
@@ -41,6 +42,14 @@ export interface LibraryWriteInput {
 export interface LibraryUpdateInput extends LibraryWriteInput {
   expectedSha256?: string;
   force?: boolean;
+  allowEmpty?: boolean;
+}
+
+export interface LibraryListOptions {
+  limit?: number;
+  includeRelPathPrefixes?: string[];
+  excludeDirs?: string[];
+  includeInternal?: boolean;
 }
 
 function libraryRoot(): string {
@@ -53,35 +62,77 @@ function titleFromContent(filePath: string, content: string): string {
   return path.basename(filePath, path.extname(filePath));
 }
 
-function summaryForFile(filePath: string): LibraryDocumentSummary {
-  const content = fs.readFileSync(filePath, 'utf-8');
+function summaryForFile(filePath: string, content?: string): LibraryDocumentSummary {
+  const fileContent = content ?? fs.readFileSync(filePath, 'utf-8');
   const stats = fs.statSync(filePath);
   return {
     path: filePath,
     relPath: relativeMarkdownPath(libraryRoot(), filePath),
-    title: titleFromContent(filePath, content),
+    title: titleFromContent(filePath, fileContent),
     updatedAt: new Date(stats.mtimeMs).toISOString(),
     size: stats.size,
   };
 }
 
-function walkMarkdownFiles(dirPath: string): string[] {
+function defaultExcludedDirs(): string[] {
+  return [codexContextSessionsDir()];
+}
+
+function normalizedRelPathPrefix(prefix: string): string {
+  return prefix.replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+function excludedDirsFor(options: LibraryListOptions): string[] {
+  const explicit = options.excludeDirs ?? [];
+  return options.includeInternal ? explicit : [...defaultExcludedDirs(), ...explicit];
+}
+
+function shouldSkipDir(dirPath: string, excludedDirs: string[]): boolean {
+  const resolved = path.resolve(dirPath);
+  return excludedDirs.some((excludedDir) => {
+    const excluded = path.resolve(excludedDir);
+    return resolved === excluded || isPathInside(excluded, resolved);
+  });
+}
+
+function matchesRelPathPrefix(filePath: string, root: string, prefixes: string[] | undefined): boolean {
+  if (!prefixes || prefixes.length === 0) return true;
+  const relPath = relativeMarkdownPath(root, filePath);
+  return prefixes.some((prefix) => relPath.startsWith(prefix));
+}
+
+function walkMarkdownFiles(dirPath: string, options: LibraryListOptions = {}): string[] {
   const files: string[] = [];
   if (!fs.existsSync(dirPath)) return files;
+  const root = path.resolve(dirPath);
+  const includePrefixes = options.includeRelPathPrefixes?.map(normalizedRelPathPrefix);
+  const excludedDirs = excludedDirsFor(options);
+  const limit = options.limit && options.limit > 0 ? options.limit : undefined;
 
   function walk(current: string): void {
-    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+    if (limit !== undefined && files.length >= limit) return;
+    const entries = fs.readdirSync(current, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    for (const entry of entries) {
+      if (limit !== undefined && files.length >= limit) break;
       const absPath = path.join(current, entry.name);
       if (entry.isDirectory()) {
+        if (entry.name.startsWith('.') || shouldSkipDir(absPath, excludedDirs)) continue;
         walk(absPath);
-      } else if (entry.isFile() && /\.(md|markdown)$/i.test(entry.name)) {
+      } else if (
+        entry.isFile()
+        && !entry.name.startsWith('.')
+        && /\.(md|markdown)$/i.test(entry.name)
+        && matchesRelPathPrefix(absPath, root, includePrefixes)
+      ) {
         files.push(absPath);
       }
     }
   }
 
   walk(dirPath);
-  return files.sort();
+  return files;
 }
 
 function snippetFor(content: string, query: string): string {
@@ -105,21 +156,20 @@ function defaultContent(targetPath: string, input: LibraryWriteInput): string {
   return `# ${input.title.trim() || path.basename(targetPath, path.extname(targetPath))}\n`;
 }
 
-export function listLibraryDocuments(options: { limit?: number } = {}): LibraryDocumentSummary[] {
-  const docs = walkMarkdownFiles(libraryRoot()).map((filePath) => summaryForFile(filePath));
-  return docs.slice(0, options.limit ?? docs.length);
+export function listLibraryDocuments(options: LibraryListOptions = {}): LibraryDocumentSummary[] {
+  return walkMarkdownFiles(libraryRoot(), options).map((filePath) => summaryForFile(filePath));
 }
 
-export function searchLibraryDocuments(query: string, options: { limit?: number } = {}): LibrarySearchResult[] {
+export function searchLibraryDocuments(query: string, options: LibraryListOptions = {}): LibrarySearchResult[] {
   const needle = query.trim();
   if (!needle) return [];
 
   const results: LibrarySearchResult[] = [];
-  for (const filePath of walkMarkdownFiles(libraryRoot())) {
+  for (const filePath of walkMarkdownFiles(libraryRoot(), { ...options, limit: undefined })) {
     const content = fs.readFileSync(filePath, 'utf-8');
     if (!content.toLowerCase().includes(needle.toLowerCase())) continue;
     results.push({
-      ...summaryForFile(filePath),
+      ...summaryForFile(filePath, content),
       snippet: snippetFor(content, needle),
     });
     if (results.length >= (options.limit ?? 20)) break;
@@ -150,6 +200,7 @@ export async function updateLibraryDocument(target: string, input: LibraryUpdate
   await updateMarkdownFile(filePath, content, {
     expectedSha256: input.expectedSha256,
     force: input.force,
+    allowEmpty: input.allowEmpty,
   });
   return showLibraryDocument(filePath);
 }

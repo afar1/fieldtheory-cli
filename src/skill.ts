@@ -15,11 +15,12 @@ const BODY = `
 
 Use the Field Theory CLI to inspect and work with the user's local context.
 
-Field Theory has three main local surfaces:
+Field Theory has four main local surfaces:
 
 - bookmarks: raw synced X/Twitter bookmark data
 - library: readable markdown knowledge and authored notes
-- commands: portable markdown actions in \`~/.fieldtheory/commands\`
+- commands: portable markdown actions in \`~/.fieldtheory/library/Commands\`
+- current document: the active Field Theory document attached to the app terminal
 
 ## When to trigger
 
@@ -35,11 +36,30 @@ Field Theory has three main local surfaces:
 ## Search Workflow
 
 1. Check paths and status when setup matters: \`ft paths --json\`, \`ft status --json\`
-2. Search durable notes first when prior project knowledge matters: \`ft library search <query> --json\`
-3. Search bookmarks when reading history or saved X/Twitter posts matter: \`ft search <query> --json\`
-4. Inspect exact files or bookmarks with \`ft library show <path> --json\`, \`ft show <id> --json\`, or \`ft commands show <name> --json\`
-5. Create or update durable Library notes and portable commands only when the user asks for a saved artifact
-6. Open useful Library pages in the Mac app with \`ft library open <path>\`
+2. When the user asks what Field Theory document they are looking at, run \`ft current --json\`; the JSON includes the document body, source path, editability, hash, content mode, and line-number mapping when available
+3. Check repo workflow state when branch/worktree/PR shape matters: \`ft state --json\`
+4. When the user says "that file" or "the recent file", inspect current repo recency with \`ft recent --json\`
+5. Search durable notes first when prior project knowledge matters: \`ft library search <query> --json\`
+6. Search bookmarks when reading history or saved X/Twitter posts matter: \`ft search <query> --json\`
+7. Inspect exact files or bookmarks with \`ft library show <path> --json\`, \`ft show <id> --json\`, or \`ft commands show <name> --json\`
+8. Create or update durable Library notes and portable commands only when the user asks for a saved artifact
+9. Open useful Library pages in the Mac app with \`ft library open <path>\`
+
+## Current Document Editing Workflow
+
+When the user asks you to edit the current Field Theory document, there is one supported path: read it through \`ft current\`, edit the Markdown normally, and write the complete edited Markdown back through \`ft current update\`.
+
+1. Read the document, content, and hash: \`ft current --json\`
+2. Edit the returned \`content\` as normal Markdown.
+3. Send the complete edited Markdown back on stdin: \`ft current update --stdin --expected-sha256 <version.sha256>\`
+
+After a successful update, use the newly printed \`sha256\` as the expected hash for the next edit to the same document. If the update says the file changed on disk, run \`ft current --json\` again, merge the user's requested change into the returned \`content\`, then retry once with the new \`version.sha256\`.
+
+Never run \`ft current update --stdin\` by itself. It must receive the full edited document content on stdin. For multiline edits, pipe the content on stdin; do not pass Markdown as command arguments.
+
+Do not use ad hoc \`sed -i\`, \`awk > file\`, \`cat\` against \`sourcePath\`, the Codex \`apply_patch\` tool, direct filesystem writes, context-cache files, temp-file rewrites, or invented commands such as \`ft edit\` for Field Theory document edits.
+
+When the user asks about a line number in the current document, read \`lineNumbers\` from \`ft current --json\` before answering. If \`lineNumbers.activeLineKind\` is \`renderedVisual\`, the user is referring to visible rendered rows; answer from \`lineNumbers.lines[].visibleLine\` and use \`sourceLine\` only as the Markdown source mapping. Do not answer visible-line questions by splitting \`content\` on newlines unless \`lineNumbers.activeLineKind\` is \`source\` or no line map is available.
 
 ## Possible Roadmap Workflow
 
@@ -57,7 +77,8 @@ Use this shape:
 \`\`\`bash
 ft seeds search "<bookmark topic>" --days 180 --limit 8 --frame impact-effort --create
 ft possible run --seed <seed-id> --repos <repo-a> <repo-b> <repo-c> --frame impact-effort --nodes 7 --model opus --effort medium
-ft possible grid latest
+ft possible grid latest          # latest run or batch
+ft possible grid latest-batch    # latest multi-repo batch
 ft possible dots latest
 ft possible prompt <node-id>
 \`\`\`
@@ -69,6 +90,8 @@ ft possible run --seed <seed-id> --repos <repo-a> <repo-b> --nodes 7 --model opu
 ft possible jobs
 ft possible job <job-id> --log
 \`\`\`
+
+LLM-backed commands default to the user's logged-in Claude Code/Codex CLI account. Only use API/provider billing env vars when the user explicitly sets \`FT_ENGINE_AUTH_MODE=api\`.
 
 For nightly roadmap generation on macOS:
 
@@ -86,6 +109,11 @@ If the user says "debate", use the existing \`ft possible\` pipeline as generate
 \`\`\`bash
 ft paths --json                # Canonical bookmarks, library, commands paths
 ft status --json               # Bookmark/classification status plus paths
+ft current --json              # Read current Markdown plus sourcePath, contentMode, lineNumbers, editable, and version.sha256
+ft current --summary --json    # Active Field Theory document metadata without the full body
+ft current update --stdin --expected-sha256 <sha>   # Replace the actual current source file with stdin
+ft state --json                # Repo workflow state: root, workers, PRs, cleanup, next step
+ft recent --json               # Current repo last-modified file and recent files for agent references
 
 ft search <query>              # Full-text BM25 search ("exact phrase", AND, OR, NOT)
 ft list --category <cat>       # tool, technique, research, opinion, launch, security, commerce
@@ -98,7 +126,8 @@ ft show <id>                   # Full detail for one bookmark
 ft seeds search <query> --create
 ft repos add <path>
 ft possible run --seed <id> --repos <paths...>
-ft possible grid latest
+ft possible grid latest          # latest run or batch
+ft possible grid latest-batch    # latest multi-repo batch
 ft possible dots latest
 ft possible prompt <node-id>
 ft possible nightly install --time 02:00 --defaults
@@ -127,6 +156,7 @@ Combine filters: \`ft list --category tool --domain ai --limit 10\`
 - Ground roadmap work in actual bookmark-backed seeds
 - Lead roadmap reports with the plotted grid and concrete next actions, not just prose
 - For updates, use \`--expected-sha256\` from a prior \`show --json\` result or pass \`--force\` only when explicitly appropriate
+- For current-document edits, use \`ft current --json\` followed by \`ft current update --stdin --expected-sha256 <sha>\`; treat \`sourcePath\` as identity/debugging context, not an invitation to bypass the update command
 - In local app development, set \`FT_APP_DEV_DIR\` before \`ft library open\` so the CLI targets the Field Theory dev checkout instead of a generic Electron URL handler
 - Deletes move local files to Trash; the Mac app owns Library sync and remote tombstones
 `;
@@ -173,7 +203,11 @@ export interface SkillResult {
   action: 'installed' | 'updated' | 'up-to-date' | 'removed';
 }
 
-export async function installSkill(): Promise<SkillResult[]> {
+export interface InstallSkillOptions {
+  force?: boolean;
+}
+
+export async function installSkill(options: InstallSkillOptions = {}): Promise<SkillResult[]> {
   const detected = detectAgents();
   const targets = detected.filter((a) => a.detected);
 
@@ -202,19 +236,21 @@ export async function installSkill(): Promise<SkillResult[]> {
         continue;
       }
 
-      const answer = await promptText(`  ${agent.name} skill already exists. Overwrite? (y/n/compare) `);
-      if (answer.kind !== 'answer') continue;
-      const val = answer.value.toLowerCase();
+      if (!options.force) {
+        const answer = await promptText(`  ${agent.name} skill already exists. Overwrite? (y/n/compare) `);
+        if (answer.kind !== 'answer') continue;
+        const val = answer.value.toLowerCase();
 
-      if (val === 'compare' || val === 'c') {
-        console.log(`\n  ── Installed (${agent.installPath}) ──`);
-        console.log(existing);
-        console.log(`  ── New ──`);
-        console.log(content);
-        const confirm = await promptText(`  Overwrite with new version? (y/n) `);
-        if (confirm.kind !== 'answer' || confirm.value.toLowerCase() !== 'y') continue;
-      } else if (val !== 'y') {
-        continue;
+        if (val === 'compare' || val === 'c') {
+          console.log(`\n  ── Installed (${agent.installPath}) ──`);
+          console.log(existing);
+          console.log(`  ── New ──`);
+          console.log(content);
+          const confirm = await promptText(`  Overwrite with new version? (y/n) `);
+          if (confirm.kind !== 'answer' || confirm.value.toLowerCase() !== 'y') continue;
+        } else if (val !== 'y') {
+          continue;
+        }
       }
     }
 
