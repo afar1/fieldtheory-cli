@@ -40,10 +40,14 @@ const KNOWN_ENGINES: Record<string, EngineConfig> = {
       p,
     ],
   },
+  opencode: {
+    bin: 'opencode',
+    args: (p) => ['-p', p],
+  },
 };
 
 /** Order used when auto-detecting. */
-const PREFERENCE_ORDER = ['claude', 'codex'];
+const PREFERENCE_ORDER = ['claude', 'codex', 'opencode'];
 
 // ── Detection ──────────────────────────────────────────────────────────
 
@@ -91,13 +95,13 @@ async function askYesNo(question: string): Promise<boolean> {
   const result = await promptText(question);
   if (result.kind === 'interrupt') {
     throw new PromptCancelledError(
-      'Cancelled — no engine selected. Pick one with `ft model <engine>`, or pass `--engine claude` / `--engine codex`.',
+      'Cancelled — no engine selected. Pick one with `ft model <engine>`, or pass `--engine claude` / `--engine codex` / `--engine opencode`.',
       130,
     );
   }
   if (result.kind === 'close') {
     throw new PromptCancelledError(
-      'No engine selected. Pick one with `ft model <engine>`, or pass `--engine claude` / `--engine codex`.',
+      'No engine selected. Pick one with `ft model <audence>`, or pass `--engine claude` / `--engine codex` / `--engine opencode`.',
       0,
     );
   }
