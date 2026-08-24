@@ -113,6 +113,16 @@ function mediaCandidates(item: any): BookmarkMediaObject[] {
   }];
 }
 
+function instagramContentType(item: any): BookmarkRecord['contentType'] {
+  if (item.product_type === 'clips' || item.product_type === 'reels') return 'reel';
+  switch (Number(item.media_type)) {
+    case 1: return 'photo';
+    case 2: return 'video';
+    case 8: return 'carousel';
+    default: return undefined;
+  }
+}
+
 function normalizeInstagramItem(raw: any, syncedAt: string): BookmarkRecord | null {
   const item = raw?.media ?? raw;
   const idValue = item?.pk ?? item?.id;
@@ -121,17 +131,9 @@ function normalizeInstagramItem(raw: any, syncedAt: string): BookmarkRecord | nu
   if (!/^\d+$/.test(id) && !/^[A-Za-z0-9_-]+$/.test(id)) return null;
 
   const mediaType = Number(item.media_type);
-  const isReel = item.product_type === 'clips' || item.product_type === 'reels';
-  const contentType: BookmarkRecord['contentType'] = isReel
-    ? 'reel'
-    : mediaType === 8
-      ? 'carousel'
-      : mediaType === 2
-        ? 'video'
-        : mediaType === 1
-          ? 'photo'
-          : undefined;
+  const contentType = instagramContentType(item);
   if (!contentType) return null;
+  const isReel = contentType === 'reel';
 
   const url = canonicalInstagramUrl(item.code, isReel);
   if (!url || !isAllowedHost(url, ['instagram.com'])) return null;
