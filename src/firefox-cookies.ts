@@ -283,3 +283,34 @@ export function extractFirefoxXCookies(profileDir?: string): ChromeCookieResult 
 
   return { csrfToken: cleanCt0, cookieHeader: cookieParts.join('; ') };
 }
+
+/** Fixed-domain Instagram session extraction for the Saved connector. */
+export function extractFirefoxInstagramCookies(profileDir?: string): ChromeCookieResult {
+  const dir = profileDir ?? detectFirefoxProfileDir();
+  const dbPath = join(dir, 'cookies.sqlite');
+  ensureFirefoxCookieBackendAvailable();
+  const cookies = queryFirefoxCookies(
+    dbPath,
+    '.instagram.com',
+    ['sessionid', 'csrftoken', 'ds_user_id', 'mid', 'rur'],
+  );
+  const cookieMap = new Map(cookies.map((cookie) => [cookie.name, cookie.value.trim()]));
+  const csrfToken = cookieMap.get('csrftoken');
+  const sessionId = cookieMap.get('sessionid');
+  if (!csrfToken || !sessionId) {
+    throw new Error(
+      'No active Instagram session found in Firefox.\n' +
+      'Open instagram.com in Firefox, log in, and retry.'
+    );
+  }
+  const orderedNames = ['sessionid', 'csrftoken', 'ds_user_id', 'mid', 'rur'];
+  const parts = orderedNames.flatMap((name) => {
+    const value = cookieMap.get(name);
+    if (!value) return [];
+    if (!/^[\x21-\x7E]+$/.test(value)) {
+      throw new Error(`Firefox Instagram ${name} cookie appears invalid.`);
+    }
+    return [`${name}=${value}`];
+  });
+  return { csrfToken, cookieHeader: parts.join('; ') };
+}

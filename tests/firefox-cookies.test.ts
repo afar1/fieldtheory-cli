@@ -4,7 +4,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createDb, saveDb } from '../src/db.js';
-import { extractFirefoxXCookies, ensureFirefoxCookieBackendAvailable } from '../src/firefox-cookies.js';
+import {
+  extractFirefoxInstagramCookies,
+  extractFirefoxXCookies,
+  ensureFirefoxCookieBackendAvailable,
+} from '../src/firefox-cookies.js';
 
 async function createFirefoxProfile(cookies: Array<{ host: string; name: string; value: string }>): Promise<string> {
   const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-firefox-profile-'));
@@ -71,6 +75,24 @@ test('extractFirefoxXCookies falls back to twitter.com cookies when x.com is abs
     assert.equal(cookies.csrfToken, 'legacy-csrf-token');
     assert.match(cookies.cookieHeader, /ct0=legacy-csrf-token/);
     assert.match(cookies.cookieHeader, /auth_token=legacy-auth-token/);
+  } finally {
+    fs.rmSync(profileDir, { recursive: true, force: true });
+  }
+});
+
+test('extractFirefoxInstagramCookies reads only the fixed Instagram session cookie set', async () => {
+  const profileDir = await createFirefoxProfile([
+    { host: '.instagram.com', name: 'sessionid', value: 'ig-session' },
+    { host: '.instagram.com', name: 'csrftoken', value: 'ig-csrf' },
+    { host: '.instagram.com', name: 'ds_user_id', value: '123' },
+    { host: '.example.com', name: 'sessionid', value: 'wrong-domain' },
+  ]);
+  try {
+    const cookies = extractFirefoxInstagramCookies(profileDir);
+    assert.equal(cookies.csrfToken, 'ig-csrf');
+    assert.match(cookies.cookieHeader, /sessionid=ig-session/);
+    assert.match(cookies.cookieHeader, /csrftoken=ig-csrf/);
+    assert.doesNotMatch(cookies.cookieHeader, /wrong-domain/);
   } finally {
     fs.rmSync(profileDir, { recursive: true, force: true });
   }

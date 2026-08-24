@@ -42,6 +42,13 @@ ft stats
 
 On first run, `ft sync` extracts your X session from your browser and downloads your bookmarks into `~/.fieldtheory/bookmarks/`.
 
+`ft sync instagram` is an experimental, read-only connector for the account's
+**All Saved** feed. It includes saved photos, carousels, videos, and Reels, but
+not likes, viewing history, Stories, collection membership, or media downloads.
+Instagram does not offer a supported live Saved API, so endpoint changes or an
+account challenge can pause the importer. Re-running resumes an interrupted
+first backfill; later runs start with the newest Saved items.
+
 ## Commands
 
 ### Sync
@@ -49,6 +56,7 @@ On first run, `ft sync` extracts your X session from your browser and downloads 
 | Command | Description |
 |---------|-------------|
 | `ft sync` | Download and sync bookmarks, then fetch any missing media (photos, video posters, capped videos). No API required. |
+| `ft sync instagram` | **Experimental:** archive metadata for Instagram Saved posts and Reels using your local browser session |
 | `ft sync --no-media` | Sync bookmarks only; skip the media download pass |
 | `ft sync --skip-profile-images` | Sync bookmarks and post media but skip author profile images |
 | `ft sync --rebuild` | Full re-crawl of all bookmarks |
@@ -211,6 +219,8 @@ Data is stored locally under `~/.fieldtheory/`:
   bookmarks.jsonl         # raw bookmark cache (one per line)
   bookmarks.db            # SQLite FTS5 search index
   bookmarks-meta.json     # sync metadata
+  instagram-saved.jsonl   # Instagram Saved metadata cache
+  instagram-saved-state.json # Instagram pagination/checkpoint state
   oauth-token.json        # OAuth token (if using API mode, chmod 600)
 
 ~/.fieldtheory/library/
@@ -292,9 +302,17 @@ Session sync extracts cookies from your browser's local database. Use `ft sync -
 
 ## Security
 
-**Your data stays local.** No telemetry, no analytics, nothing phoned home. The CLI only makes network requests to X's API during sync.
+**Your data stays local.** No telemetry and no analytics. Sync only makes
+read-only requests to the selected source; cached metadata and search data stay
+under the local Field Theory data root.
 
 **Chrome session sync** reads cookies from Chrome's local database, uses them for the sync request, and discards them. Cookies are never stored separately.
+
+**Instagram Saved sync is experimental.** It reads only the Instagram session
+cookies required for the Saved request, keeps them in memory, refuses redirects,
+and stops without retrying when Instagram reports a rate limit or challenge.
+Using private web endpoints may trigger account security checks; stop using the
+connector if Instagram presents a challenge and complete it directly in your browser.
 
 **OAuth tokens** are stored with `chmod 600` (owner-only). Treat `~/.fieldtheory/bookmarks/oauth-token.json` like a password.
 
