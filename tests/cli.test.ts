@@ -3,7 +3,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { compareVersions, runWithSpinner, buildCli, parseCookieOption, shouldInferStdinFromStats } from '../src/cli.js';
+import {
+  compareVersions,
+  runWithSpinner,
+  buildCli,
+  parseCookieOption,
+  resolveSyncSource,
+  shouldInferStdinFromStats,
+} from '../src/cli.js';
 import { dataDir } from '../src/paths.js';
 import { skillWithFrontmatter } from '../src/skill.js';
 
@@ -878,6 +885,17 @@ test('ft sync: media is on by default and exposes --no-media', () => {
   assert.ok(mediaOption, 'a media option must be registered');
   assert.equal(mediaOption.negate, true, 'the media option must be --no-media (negated)');
   assert.equal(mediaOption.long, '--no-media');
+});
+
+test('ft sync keeps the no-argument X target and registers explicit Instagram selection', () => {
+  assert.equal(resolveSyncSource(undefined), 'x');
+  assert.equal(resolveSyncSource('instagram'), 'instagram');
+  assert.throws(() => resolveSyncSource('linkedin'), /Unknown sync source/);
+
+  const sync = buildCli().commands.find((command: any) => command.name() === 'sync');
+  assert.ok(sync);
+  assert.equal(sync.registeredArguments.length, 1);
+  assert.equal(sync.registeredArguments[0]?.required, false);
 });
 
 test('ft wiki: description mentions engine prerequisite', () => {

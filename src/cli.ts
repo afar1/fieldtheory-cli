@@ -5,6 +5,7 @@ import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service
 import { runTwitterOAuthFlow } from './xauth.js';
 import { syncBookmarksGraphQL, syncGaps, syncBookmarkFolders } from './graphql-bookmarks.js';
 import type { SyncProgress, GapFillProgress, FolderSyncProgress } from './graphql-bookmarks.js';
+import { syncInstagramSaved } from './instagram-bookmarks.js';
 import type { BookmarkFolder, QuotedTweetSnapshot } from './types.js';
 import { DEFAULT_MEDIA_MAX_BYTES, fetchBookmarkMediaBatch } from './bookmark-media.js';
 import type { MediaFetchManifest, MediaFetchProgress } from './bookmark-media.js';
@@ -300,6 +301,12 @@ export function parseCookieOption(cookies: unknown): { csrfToken?: string; cooki
   const parts = [`ct0=${csrfToken}`];
   if (authToken) parts.push(`auth_token=${authToken}`);
   return { csrfToken, cookieHeader: parts.join('; ') };
+}
+
+export function resolveSyncSource(source: string | undefined): 'x' | 'instagram' {
+  if (source == null || source === '' || source.toLowerCase() === 'x') return 'x';
+  if (source.toLowerCase() === 'instagram') return 'instagram';
+  throw new Error(`Unknown sync source: ${source}. Use "ft sync" for X or "ft sync instagram".`);
 }
 
 function warnIfEmpty(totalBookmarks: number): void {
@@ -826,7 +833,8 @@ export function buildCli() {
 
   program
     .command('sync')
-    .description('Sync bookmarks from X into your local database')
+    .description('Sync X bookmarks, or explicitly select Instagram Saved')
+    .argument('[source]', 'Optional source: instagram (no argument keeps the existing X sync)')
     .option('--api', 'Use OAuth v2 API instead of Chrome session', false)
     .option('--rebuild', 'Full re-crawl of all bookmarks', false)
     .option('--continue', 'Resume a previous sync that was interrupted or hit the page limit', false)
@@ -848,7 +856,41 @@ export function buildCli() {
     .option('--folders', 'Also sync bookmark folder tags (mirrors X\u2019s current folder state)', false)
     .option('--folder <name>', 'Sync only this folder (case-insensitive, supports unambiguous prefix)')
     .addOption(engineOption())
-    .action(async (options) => {
+    .action(async (source: string | undefined, options) => {
+      let syncSource: 'x' | 'instagram';
+      try {
+        syncSource = resolveSyncSource(source);
+      } catch (error) {
+        console.error(`  Error: ${(error as Error).message}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      if (syncSource === 'instagram') {
+        ensureDataDir();
+        try {
+          process.stderr.write('  Syncing Instagram Saved posts and Reels (experimental)...\n');
+          const result = await syncInstagramSaved({
+            maxPages: options.maxPages != null ? Number(options.maxPages) : undefined,
+            delayMs: Number(options.delayMs) || 600,
+            maxMinutes: Number(options.maxMinutes) || 30,
+            browser: options.browser ? String(options.browser) : undefined,
+            chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+            chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+            firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+          });
+          console.log(`\n  ${result.complete ? '\u2713' : '\u26a0'} ${result.added} new Instagram Saved items (${result.totalBookmarks} total)`);
+          console.log(`  ${result.complete ? 'Complete' : 'Incomplete'}: ${result.stopReason}`);
+          console.log(`  \u2713 Data: ${dataDir()}\n`);
+          await rebuildIndex();
+          if (!result.complete) process.exitCode = 1;
+        } catch (error) {
+          console.error(`\n  Instagram sync error: ${(error as Error).message}\n`);
+          process.exitCode = 1;
+        }
+        return;
+      }
+
       const firstRun = isFirstRun();
       if (firstRun) showSyncWelcome();
       ensureDataDir();
