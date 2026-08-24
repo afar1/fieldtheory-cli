@@ -48,6 +48,8 @@ not likes, viewing history, Stories, collection membership, or media downloads.
 Instagram does not offer a supported live Saved API, so endpoint changes or an
 account challenge can pause the importer. Re-running resumes an interrupted
 first backfill; later runs start with the newest Saved items.
+Use `ft sync instagram --rebuild` to discard a stale pagination cursor and
+restart the crawl from the newest Saved page without deleting the local archive.
 
 ## Commands
 

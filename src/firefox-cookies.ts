@@ -285,7 +285,7 @@ export function extractFirefoxXCookies(profileDir?: string): ChromeCookieResult 
 }
 
 /** Fixed-domain Instagram session extraction for the Saved connector. */
-export function extractFirefoxInstagramCookies(profileDir?: string): ChromeCookieResult {
+function extractFirefoxInstagramCookiesUnchecked(profileDir?: string): ChromeCookieResult {
   const dir = profileDir ?? detectFirefoxProfileDir();
   const dbPath = join(dir, 'cookies.sqlite');
   ensureFirefoxCookieBackendAvailable();
@@ -304,13 +304,32 @@ export function extractFirefoxInstagramCookies(profileDir?: string): ChromeCooki
     );
   }
   const orderedNames = ['sessionid', 'csrftoken', 'ds_user_id', 'mid', 'rur'];
+  const requiredNames = new Set(['sessionid', 'csrftoken']);
   const parts = orderedNames.flatMap((name) => {
     const value = cookieMap.get(name);
     if (!value) return [];
     if (!/^[\x21-\x7E]+$/.test(value)) {
-      throw new Error(`Firefox Instagram ${name} cookie appears invalid.`);
+      if (requiredNames.has(name)) {
+        throw new Error(`Firefox Instagram ${name} cookie appears invalid.`);
+      }
+      return [];
     }
     return [`${name}=${value}`];
   });
   return { csrfToken, cookieHeader: parts.join('; ') };
+}
+
+export function extractFirefoxInstagramCookies(profileDir?: string): ChromeCookieResult {
+  try {
+    return extractFirefoxInstagramCookiesUnchecked(profileDir);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const rewritten = message
+      .replace(/log into x\.com/g, 'log into instagram.com')
+      .replace(/(?:Or p|P)ass cookies manually:\s*ft sync --cookies <ct0> <auth_token>/g,
+        'Log into instagram.com in that Firefox profile, then run ft sync instagram');
+    throw new Error(/instagram/i.test(rewritten)
+      ? rewritten
+      : `${rewritten}\nLog into instagram.com in that Firefox profile, then run ft sync instagram.`);
+  }
 }

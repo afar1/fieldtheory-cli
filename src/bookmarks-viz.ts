@@ -1,6 +1,5 @@
-import { openDb } from './db.js';
+import { openBookmarksDb } from './bookmarks-db.js';
 import { parseTimestampMs, toIsoDate, toIsoMonth, toMonthDayLabel, toUtcHour, toWeekdayShort, toYearLabel } from './date-utils.js';
-import { twitterBookmarksIndexPath } from './paths.js';
 
 // ── ANSI helpers ─────────────────────────────────────────────────────────────
 
@@ -271,15 +270,15 @@ function aggregateTimelineData(rows: TimelineAggregateRow[]): {
 }
 
 async function queryVizData(): Promise<VizData> {
-  const db = await openDb(twitterBookmarksIndexPath());
+  const db = await openBookmarksDb();
 
   try {
-    const total = db.exec('SELECT COUNT(*) FROM bookmarks')[0]?.values[0]?.[0] as number;
-    const authors = db.exec('SELECT COUNT(DISTINCT author_handle) FROM bookmarks')[0]?.values[0]?.[0] as number;
+    const total = db.exec("SELECT COUNT(*) FROM bookmarks WHERE source = 'x'")[0]?.values[0]?.[0] as number;
+    const authors = db.exec("SELECT COUNT(DISTINCT author_handle) FROM bookmarks WHERE source = 'x'")[0]?.values[0]?.[0] as number;
     const timelineRows = db.exec(
       `SELECT author_handle, posted_at, synced_at
        FROM bookmarks
-       WHERE posted_at IS NOT NULL OR synced_at IS NOT NULL OR author_handle IS NOT NULL`
+       WHERE source = 'x' AND (posted_at IS NOT NULL OR synced_at IS NOT NULL OR author_handle IS NOT NULL)`
     );
     const timelineData = aggregateTimelineData(
       (timelineRows[0]?.values ?? []).map((row) => ({
@@ -291,13 +290,13 @@ async function queryVizData(): Promise<VizData> {
 
     const topAuthorsRows = db.exec(
       `SELECT author_handle, COUNT(*) as c FROM bookmarks
-       WHERE author_handle IS NOT NULL
+       WHERE source = 'x' AND author_handle IS NOT NULL
        GROUP BY author_handle ORDER BY c DESC LIMIT 20`
     );
 
     // Domains from links_json
     const domainRows = db.exec(
-      `SELECT links_json FROM bookmarks WHERE links_json IS NOT NULL AND links_json != '[]'`
+      `SELECT links_json FROM bookmarks WHERE source = 'x' AND links_json IS NOT NULL AND links_json != '[]'`
     );
     const domainCounts = new Map<string, number>();
     for (const row of domainRows[0]?.values ?? []) {
@@ -320,23 +319,23 @@ async function queryVizData(): Promise<VizData> {
       .map(([domain, count]) => ({ domain, count }));
 
     const mediaStats = {
-      withMedia: db.exec('SELECT COUNT(*) FROM bookmarks WHERE media_count > 0')[0]?.values[0]?.[0] as number,
-      withLinks: db.exec('SELECT COUNT(*) FROM bookmarks WHERE link_count > 0')[0]?.values[0]?.[0] as number,
+      withMedia: db.exec("SELECT COUNT(*) FROM bookmarks WHERE source = 'x' AND media_count > 0")[0]?.values[0]?.[0] as number,
+      withLinks: db.exec("SELECT COUNT(*) FROM bookmarks WHERE source = 'x' AND link_count > 0")[0]?.values[0]?.[0] as number,
       total,
     };
 
     const langRows = db.exec(
-      `SELECT language, COUNT(*) as c FROM bookmarks WHERE language IS NOT NULL
+      `SELECT language, COUNT(*) as c FROM bookmarks WHERE source = 'x' AND language IS NOT NULL
        GROUP BY language ORDER BY c DESC LIMIT 8`
     );
 
-    const avgLen = db.exec('SELECT AVG(length(text)) FROM bookmarks')[0]?.values[0]?.[0] as number;
+    const avgLen = db.exec("SELECT AVG(length(text)) FROM bookmarks WHERE source = 'x'")[0]?.values[0]?.[0] as number;
 
     // Time capsules: oldest posts, one per year to spread the range
     const capsuleRows = db.exec(
       `SELECT author_handle, text, tweet_id, posted_at, substr(posted_at, -4) as yr
        FROM bookmarks
-       WHERE posted_at IS NOT NULL
+       WHERE source = 'x' AND posted_at IS NOT NULL
        AND CAST(substr(posted_at, -4) AS INTEGER) < 2023
        GROUP BY substr(posted_at, -4)
        ORDER BY posted_at ASC
@@ -355,10 +354,10 @@ async function queryVizData(): Promise<VizData> {
        FROM bookmarks b
        JOIN (
          SELECT author_handle FROM bookmarks
-         WHERE author_handle IS NOT NULL
+         WHERE source = 'x' AND author_handle IS NOT NULL
          GROUP BY author_handle HAVING COUNT(*) = 1
        ) singles ON b.author_handle = singles.author_handle
-       WHERE length(b.text) > 250
+       WHERE b.source = 'x' AND length(b.text) > 250
        ORDER BY length(b.text) DESC
        LIMIT 8`
     );
@@ -374,7 +373,7 @@ async function queryVizData(): Promise<VizData> {
     try {
       const catRows = db.exec(
         `SELECT primary_category, COUNT(*) as c FROM bookmarks
-         WHERE primary_category IS NOT NULL AND primary_category != 'unclassified'
+         WHERE source = 'x' AND primary_category IS NOT NULL AND primary_category != 'unclassified'
          GROUP BY primary_category ORDER BY c DESC LIMIT 15`
       );
       categories = (catRows[0]?.values ?? []).map((r) => ({
@@ -388,7 +387,7 @@ async function queryVizData(): Promise<VizData> {
     try {
       const domRows = db.exec(
         `SELECT primary_domain, COUNT(*) as c FROM bookmarks
-         WHERE primary_domain IS NOT NULL AND primary_domain != ''
+         WHERE source = 'x' AND primary_domain IS NOT NULL AND primary_domain != ''
          GROUP BY primary_domain ORDER BY c DESC LIMIT 15`
       );
       domains = (domRows[0]?.values ?? []).map((r) => ({

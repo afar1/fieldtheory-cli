@@ -514,7 +514,7 @@ export function extractChromeXCookies(
  * Read only the fixed cookie set required by Instagram Saved ingestion.
  * The domain and names are intentionally not caller-configurable.
  */
-export function extractChromeInstagramCookies(
+function extractChromeInstagramCookiesUnchecked(
   chromeUserDataDir: string,
   profileDirectory = 'Default',
   browser: BrowserDef | undefined = undefined,
@@ -550,15 +550,20 @@ export function extractChromeInstagramCookies(
     ['sessionid', 'csrftoken', 'ds_user_id', 'mid', 'rur'],
     br,
   );
+  const requiredNames = new Set(['sessionid', 'csrftoken']);
   const decrypted = new Map<string, string>();
   for (const cookie of result.cookies) {
-    if (cookie.encrypted_value_hex) {
-      const encrypted = Buffer.from(cookie.encrypted_value_hex, 'hex');
-      decrypted.set(cookie.name, isWindows
-        ? decryptWindowsCookie(encrypted, key)
-        : decryptCookieValue(encrypted, key, result.dbVersion, v11Key));
-    } else if (cookie.value) {
-      decrypted.set(cookie.name, cookie.value);
+    try {
+      if (cookie.encrypted_value_hex) {
+        const encrypted = Buffer.from(cookie.encrypted_value_hex, 'hex');
+        decrypted.set(cookie.name, isWindows
+          ? decryptWindowsCookie(encrypted, key)
+          : decryptCookieValue(encrypted, key, result.dbVersion, v11Key));
+      } else if (cookie.value) {
+        decrypted.set(cookie.name, cookie.value);
+      }
+    } catch (error) {
+      if (requiredNames.has(cookie.name)) throw error;
     }
   }
 
@@ -575,11 +580,42 @@ export function extractChromeInstagramCookies(
   const cookieHeader = orderedNames
     .flatMap((name) => {
       const value = decrypted.get(name);
-      return value ? [`${name}=${sanitizeCookieValue(name, value, br)}`] : [];
+      if (!value) return [];
+      try {
+        return [`${name}=${sanitizeCookieValue(name, value, br)}`];
+      } catch (error) {
+        if (requiredNames.has(name)) throw error;
+        return [];
+      }
     })
     .join('; ');
   return {
     csrfToken: sanitizeCookieValue('csrftoken', csrfToken, br),
     cookieHeader,
   };
+}
+
+function instagramCookieGuidance(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  const rewritten = message
+    .replace(/profile logged into X/g, 'profile logged into Instagram')
+    .replace(/log into x\.com/g, 'log into instagram.com')
+    .replace(/run ft sync again/g, 'run ft sync instagram again')
+    .replace(/(?:Or p|P)ass cookies manually:\s*ft sync --cookies <ct0> <auth_token>/g,
+      'Log into instagram.com in that browser profile, then run ft sync instagram');
+  return new Error(/instagram/i.test(rewritten)
+    ? rewritten
+    : `${rewritten}\nLog into instagram.com in that browser profile, then run ft sync instagram.`);
+}
+
+export function extractChromeInstagramCookies(
+  chromeUserDataDir: string,
+  profileDirectory = 'Default',
+  browser: BrowserDef | undefined = undefined,
+): ChromeCookieResult {
+  try {
+    return extractChromeInstagramCookiesUnchecked(chromeUserDataDir, profileDirectory, browser);
+  } catch (error) {
+    throw instagramCookieGuidance(error);
+  }
 }

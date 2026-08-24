@@ -51,6 +51,19 @@ test('parseInstagramSavedResponse normalizes photo, carousel, video, and Reel me
   assert.equal(page.nextCursor, undefined);
 });
 
+test('parseInstagramSavedResponse rejects a partially unknown page instead of dropping an item', () => {
+  assert.throws(
+    () => parseInstagramSavedResponse({
+      items: [
+        { pk: 'valid', code: 'ValidFixture', media_type: 1, user: { username: 'fixture' } },
+        { pk: 'unknown', code: 'UnknownFixture', media_type: 99, user: { username: 'fixture' } },
+      ],
+      more_available: false,
+    }),
+    /response shape changed/,
+  );
+});
+
 test('syncInstagramSaved completes a first backfill and never persists session secrets', async () => {
   await isolatedRun(async (dir) => {
     const fixture = JSON.parse(await readFile(FIXTURE_PATH, 'utf8'));
@@ -113,7 +126,7 @@ test('syncInstagramSaved resumes an interrupted first backfill from its checkpoi
 test('later sync starts at newest, stops at a known id, and retains omitted cached records', async () => {
   await isolatedRun(async (dir) => {
     await writeFile(path.join(dir, 'instagram-saved.jsonl'), [
-      JSON.stringify({ id: 'old-1', tweetId: 'old-1', source: 'instagram', contentType: 'photo', url: 'https://www.instagram.com/p/OldOne/', text: 'old one', syncedAt: '2026-01-01T00:00:00Z' }),
+      JSON.stringify({ id: 'old-1', tweetId: 'old-1', source: 'instagram', contentType: 'photo', url: 'https://www.instagram.com/p/OldOne/', text: 'old one', authorName: 'Archived Name', postedAt: '2025-12-31T00:00:00Z', syncedAt: '2026-01-01T00:00:00Z' }),
       JSON.stringify({ id: 'old-2', tweetId: 'old-2', source: 'instagram', contentType: 'photo', url: 'https://www.instagram.com/p/OldTwo/', text: 'old two', syncedAt: '2026-01-01T00:00:00Z' }),
     ].join('\n') + '\n');
     await writeFile(path.join(dir, 'instagram-saved-state.json'), JSON.stringify({
@@ -142,7 +155,69 @@ test('later sync starts at newest, stops at a known id, and retains omitted cach
     assert.equal(result.stopReason, 'caught up to saved archive');
     assert.equal(result.added, 1);
     assert.equal(result.totalBookmarks, 3, 'old-2 remains even though remote page omitted it');
-    assert.match(await readFile(path.join(dir, 'instagram-saved.jsonl'), 'utf8'), /old-2/);
+    const saved = (await readFile(path.join(dir, 'instagram-saved.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    assert.ok(saved.some((record) => record.id === 'old-2'));
+    const refreshed = saved.find((record) => record.id === 'old-1');
+    assert.equal(refreshed.authorName, 'Archived Name');
+    assert.equal(refreshed.postedAt, '2025-12-31T00:00:00Z');
+  });
+});
+
+test('an interrupted incremental run resumes with stop-on-known behavior intact', async () => {
+  await isolatedRun(async (dir) => {
+    await writeFile(path.join(dir, 'instagram-saved.jsonl'), JSON.stringify({
+      id: 'known', tweetId: 'known', source: 'instagram', contentType: 'photo',
+      url: 'https://www.instagram.com/p/Known/', text: 'known', syncedAt: '2026-01-01T00:00:00Z',
+    }) + '\n');
+    await writeFile(path.join(dir, 'instagram-saved-state.json'), JSON.stringify({
+      provider: 'instagram', schemaVersion: 1, complete: true, totalRuns: 1,
+    }));
+
+    const first = await syncInstagramSaved({
+      session: SESSION,
+      maxPages: 1,
+      fetchImpl: async () => jsonResponse({
+        items: [{ pk: 'new', code: 'New', media_type: 1, user: { username: 'fixture' } }],
+        more_available: true,
+        next_max_id: 'incremental-cursor',
+      }),
+    });
+    assert.equal(first.complete, false);
+
+    const second = await syncInstagramSaved({
+      session: SESSION,
+      fetchImpl: async (input) => {
+        assert.equal(new URL(String(input)).searchParams.get('max_id'), 'incremental-cursor');
+        return jsonResponse({
+          items: [{ pk: 'known', code: 'Known', media_type: 1, user: { username: 'fixture' } }],
+          more_available: true,
+          next_max_id: 'must-not-be-used',
+        });
+      },
+    });
+    assert.equal(second.complete, true);
+    assert.equal(second.stopReason, 'caught up to saved archive');
+  });
+});
+
+test('rebuild restarts from the newest page instead of a stale backfill cursor', async () => {
+  await isolatedRun(async (dir) => {
+    await writeFile(path.join(dir, 'instagram-saved-state.json'), JSON.stringify({
+      provider: 'instagram', schemaVersion: 1, complete: false, totalRuns: 1,
+      lastCursor: 'stale-cursor', mode: 'backfill',
+    }));
+    const result = await syncInstagramSaved({
+      session: SESSION,
+      rebuild: true,
+      fetchImpl: async (input) => {
+        assert.equal(new URL(String(input)).searchParams.has('max_id'), false);
+        return jsonResponse({ items: [], more_available: false });
+      },
+    });
+    assert.equal(result.complete, true);
   });
 });
 
@@ -175,6 +250,26 @@ test('remote safety failures preserve the prior cache and report an incomplete r
   }
 });
 
+test('a stalled Instagram request stops at its request budget and preserves the prior cache', async () => {
+  await isolatedRun(async (dir) => {
+    const cachePath = path.join(dir, 'instagram-saved.jsonl');
+    const original = JSON.stringify({ id: 'safe', tweetId: 'safe', source: 'instagram', url: 'https://www.instagram.com/p/Safe/', text: 'safe', syncedAt: '2026-01-01T00:00:00Z' }) + '\n';
+    await writeFile(cachePath, original);
+
+    const result = await syncInstagramSaved({
+      session: SESSION,
+      requestTimeoutMs: 5,
+      fetchImpl: async (_input, init) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      }),
+    });
+
+    assert.equal(result.complete, false);
+    assert.equal(result.stopReason, 'request timed out');
+    assert.equal(await readFile(cachePath, 'utf8'), original);
+  });
+});
+
 test('session acquisition failure leaves cache and checkpoint untouched', async () => {
   await isolatedRun(async (dir) => {
     const cachePath = path.join(dir, 'instagram-saved.jsonl');
@@ -188,5 +283,26 @@ test('session acquisition failure leaves cache and checkpoint untouched', async 
     );
     assert.equal(await readFile(cachePath, 'utf8'), 'archive\n');
     assert.equal(await readFile(statePath, 'utf8'), 'checkpoint\n');
+  });
+});
+
+test('a malformed local cache stops before network access and is never overwritten', async () => {
+  await isolatedRun(async (dir) => {
+    const cachePath = path.join(dir, 'instagram-saved.jsonl');
+    await writeFile(cachePath, '{malformed archive\n');
+    let fetched = false;
+
+    await assert.rejects(
+      syncInstagramSaved({
+        session: SESSION,
+        fetchImpl: async () => {
+          fetched = true;
+          return jsonResponse({ items: [], more_available: false });
+        },
+      }),
+      /cache is unreadable or malformed.*No changes were written/,
+    );
+    assert.equal(fetched, false);
+    assert.equal(await readFile(cachePath, 'utf8'), '{malformed archive\n');
   });
 });

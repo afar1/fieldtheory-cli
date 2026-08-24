@@ -778,9 +778,9 @@ export function buildCli() {
 
   const program = new Command();
 
-  async function rebuildIndex(): Promise<number> {
+  async function rebuildIndex(reportSource: 'x' | 'all' = 'x'): Promise<number> {
     process.stderr.write('  Building search index...\n');
-    const idx = await buildIndex();
+    const idx = await buildIndex({ reportSource });
     process.stderr.write(`  \u2713 ${idx.recordCount} bookmarks indexed (${idx.newRecords} new)\n`);
     return idx.newRecords;
   }
@@ -874,6 +874,7 @@ export function buildCli() {
             maxPages: options.maxPages != null ? Number(options.maxPages) : undefined,
             delayMs: Number(options.delayMs) || 600,
             maxMinutes: Number(options.maxMinutes) || 30,
+            rebuild: Boolean(options.rebuild),
             browser: options.browser ? String(options.browser) : undefined,
             chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
             chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
@@ -881,8 +882,11 @@ export function buildCli() {
           });
           console.log(`\n  ${result.complete ? '\u2713' : '\u26a0'} ${result.added} new Instagram Saved items (${result.totalBookmarks} total)`);
           console.log(`  ${result.complete ? 'Complete' : 'Incomplete'}: ${result.stopReason}`);
+          if (!result.complete) {
+            console.log('  Retry to resume, or use ft sync instagram --rebuild to restart from the newest Saved page.');
+          }
           console.log(`  \u2713 Data: ${dataDir()}\n`);
-          await rebuildIndex();
+          await rebuildIndex('all');
           if (!result.complete) process.exitCode = 1;
         } catch (error) {
           console.error(`\n  Instagram sync error: ${(error as Error).message}\n`);
@@ -1297,6 +1301,7 @@ export function buildCli() {
       }
 
       const items = await listBookmarks({
+        source: 'all',
         query: options.query ? String(options.query) : undefined,
         author: options.author ? String(options.author) : undefined,
         after: options.after ? String(options.after) : undefined,

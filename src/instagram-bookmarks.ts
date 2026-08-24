@@ -1,7 +1,8 @@
+import { readFile } from 'node:fs/promises';
 import { loadChromeSessionConfig } from './config.js';
 import { extractChromeInstagramCookies } from './chrome-cookies.js';
 import { extractFirefoxInstagramCookies } from './firefox-cookies.js';
-import { ensureDir, pathExists, readJson, readJsonLines, writeJson, writeJsonLines } from './fs.js';
+import { ensureDir, pathExists, readJson, writeJson, writeJsonLines } from './fs.js';
 import { dataDir, instagramSavedCachePath, instagramSavedStatePath } from './paths.js';
 import type { BookmarkMediaObject, BookmarkMediaVariant, BookmarkRecord } from './types.js';
 
@@ -9,6 +10,7 @@ const INSTAGRAM_SAVED_ENDPOINT = 'https://www.instagram.com/api/v1/feed/saved/po
 const INSTAGRAM_APP_ID = '936619743392459';
 const DEFAULT_DELAY_MS = 600;
 const DEFAULT_MAX_MINUTES = 30;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 export interface InstagramSession {
   csrfToken: string;
@@ -47,6 +49,7 @@ interface InstagramSyncState {
   lastRunAt?: string;
   lastCursor?: string;
   stopReason?: string;
+  mode?: 'backfill' | 'incremental';
 }
 
 export interface InstagramSyncOptions {
@@ -59,6 +62,8 @@ export interface InstagramSyncOptions {
   maxPages?: number;
   delayMs?: number;
   maxMinutes?: number;
+  requestTimeoutMs?: number;
+  rebuild?: boolean;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
@@ -179,12 +184,11 @@ export function parseInstagramSavedResponse(json: any, syncedAt = new Date().toI
   if (!json || typeof json !== 'object' || !Array.isArray(json.items)) {
     throw new InstagramStopError('response shape changed');
   }
-  const records = json.items
-    .map((item: any) => normalizeInstagramItem(item, syncedAt))
-    .filter((record: BookmarkRecord | null): record is BookmarkRecord => record !== null);
-  if (json.items.length > 0 && records.length === 0) {
+  const normalized = json.items.map((item: any) => normalizeInstagramItem(item, syncedAt));
+  if (normalized.some((record: BookmarkRecord | null) => record === null)) {
     throw new InstagramStopError('response shape changed');
   }
+  const records = normalized as BookmarkRecord[];
   const moreAvailable = json.more_available === true;
   const nextCursor = typeof json.next_max_id === 'string' && json.next_max_id
     ? json.next_max_id
@@ -228,10 +232,12 @@ async function fetchSavedPage(
   cursor: string | undefined,
   fetchImpl: typeof fetch,
   syncedAt: string,
+  signal: AbortSignal,
 ): Promise<InstagramSavedPage> {
   const response = await fetchImpl(buildSavedUrl(cursor), {
     method: 'GET',
     redirect: 'manual',
+    signal,
     headers: {
       accept: '*/*',
       cookie: session.cookieHeader,
@@ -273,6 +279,11 @@ function mergeRecords(existing: BookmarkRecord[], incoming: BookmarkRecord[]): {
       ...previous,
       ...record,
       text: record.text || previous.text,
+      authorHandle: record.authorHandle ?? previous.authorHandle,
+      authorName: record.authorName ?? previous.authorName,
+      authorProfileImageUrl: record.authorProfileImageUrl ?? previous.authorProfileImageUrl,
+      postedAt: record.postedAt ?? previous.postedAt,
+      bookmarkedAt: record.bookmarkedAt ?? previous.bookmarkedAt,
       mediaObjects: record.mediaObjects?.length ? record.mediaObjects : previous.mediaObjects,
       media: record.media?.length ? record.media : previous.media,
     } : record);
@@ -283,6 +294,33 @@ function mergeRecords(existing: BookmarkRecord[], incoming: BookmarkRecord[]): {
   return { records, added };
 }
 
+async function readInstagramCache(cachePath: string): Promise<BookmarkRecord[]> {
+  if (!await pathExists(cachePath)) return [];
+  try {
+    const raw = await readFile(cachePath, 'utf8');
+    if (!raw.trim()) return [];
+    return raw
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const record = JSON.parse(line) as Partial<BookmarkRecord>;
+        if (!record ||
+            typeof record !== 'object' ||
+            typeof record.id !== 'string' ||
+            typeof record.tweetId !== 'string' ||
+            typeof record.url !== 'string' ||
+            typeof record.text !== 'string' ||
+            typeof record.syncedAt !== 'string') {
+          throw new Error('invalid record');
+        }
+        return record as BookmarkRecord;
+      });
+  } catch {
+    throw new Error(`Instagram cache is unreadable or malformed at ${cachePath}. No changes were written.`);
+  }
+}
+
 export async function syncInstagramSaved(options: InstagramSyncOptions = {}): Promise<InstagramSyncResult> {
   // Acquire credentials before creating directories or writing any state.
   const session = acquireSession(options);
@@ -291,19 +329,26 @@ export async function syncInstagramSaved(options: InstagramSyncOptions = {}): Pr
   const delayMs = Math.max(options.fetchImpl ? 0 : DEFAULT_DELAY_MS, options.delayMs ?? DEFAULT_DELAY_MS);
   const maxPages = options.maxPages ?? Infinity;
   const maxMinutes = options.maxMinutes ?? DEFAULT_MAX_MINUTES;
+  const requestTimeoutMs = Math.max(1, options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
   const now = options.now ?? (() => new Date());
   const cachePath = instagramSavedCachePath();
   const statePath = instagramSavedStatePath();
 
-  const existing = await readJsonLines<BookmarkRecord>(cachePath);
+  const existing = await readInstagramCache(cachePath);
   let records = existing;
   const knownIds = new Set(existing.map((record) => record.id));
   const previousState = await pathExists(statePath)
     ? await readJson<InstagramSyncState>(statePath)
     : undefined;
-  const resumingBackfill = Boolean(previousState && !previousState.complete && previousState.lastCursor);
-  let cursor = resumingBackfill ? previousState?.lastCursor : undefined;
-  const incremental = Boolean(previousState?.complete || (existing.length > 0 && !resumingBackfill));
+  const resuming = Boolean(!options.rebuild && previousState && !previousState.complete && previousState.lastCursor);
+  const resumingIncremental = Boolean(resuming && previousState?.mode === 'incremental');
+  let cursor = resuming ? previousState?.lastCursor : undefined;
+  const incremental = Boolean(!options.rebuild && (
+    previousState?.complete ||
+    resumingIncremental ||
+    (existing.length > 0 && !resuming)
+  ));
+  const runMode: InstagramSyncState['mode'] = incremental ? 'incremental' : 'backfill';
   const started = Date.now();
   let page = 0;
   let totalFetched = 0;
@@ -322,12 +367,33 @@ export async function syncInstagramSaved(options: InstagramSyncOptions = {}): Pr
     }
 
     let result: InstagramSavedPage;
+    const requestController = new AbortController();
+    const abortRequest = () => requestController.abort();
+    options.signal?.addEventListener('abort', abortRequest, { once: true });
+    const remainingRuntimeMs = Math.max(1, maxMinutes * 60_000 - (Date.now() - started));
+    const requestBudgetMs = Math.min(requestTimeoutMs, remainingRuntimeMs);
+    const requestTimer = setTimeout(abortRequest, requestBudgetMs);
     try {
-      result = await fetchSavedPage(session, cursor, fetchImpl, now().toISOString());
+      result = await fetchSavedPage(
+        session,
+        cursor,
+        fetchImpl,
+        now().toISOString(),
+        requestController.signal,
+      );
     } catch (error) {
+      if (requestController.signal.aborted) {
+        if (options.signal?.aborted) stopReason = 'interrupted';
+        else if (requestBudgetMs === remainingRuntimeMs) stopReason = 'max runtime reached';
+        else stopReason = 'request timed out';
+        break;
+      }
       if (!(error instanceof InstagramStopError)) throw error;
       stopReason = error.stopReason;
       break;
+    } finally {
+      clearTimeout(requestTimer);
+      options.signal?.removeEventListener('abort', abortRequest);
     }
 
     page += 1;
@@ -348,6 +414,7 @@ export async function syncInstagramSaved(options: InstagramSyncOptions = {}): Pr
       lastRunAt: now().toISOString(),
       lastCursor: cursor,
       stopReason: 'in progress',
+      mode: runMode,
     } satisfies InstagramSyncState);
 
     options.onProgress?.({
@@ -382,6 +449,7 @@ export async function syncInstagramSaved(options: InstagramSyncOptions = {}): Pr
       lastRunAt: now().toISOString(),
       lastCursor: complete ? undefined : cursor,
       stopReason,
+      mode: runMode,
     } satisfies InstagramSyncState);
   }
 

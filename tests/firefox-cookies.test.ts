@@ -85,6 +85,7 @@ test('extractFirefoxInstagramCookies reads only the fixed Instagram session cook
     { host: '.instagram.com', name: 'sessionid', value: 'ig-session' },
     { host: '.instagram.com', name: 'csrftoken', value: 'ig-csrf' },
     { host: '.instagram.com', name: 'ds_user_id', value: '123' },
+    { host: '.instagram.com', name: 'rur', value: 'bad\noptional' },
     { host: '.example.com', name: 'sessionid', value: 'wrong-domain' },
   ]);
   try {
@@ -92,10 +93,23 @@ test('extractFirefoxInstagramCookies reads only the fixed Instagram session cook
     assert.equal(cookies.csrfToken, 'ig-csrf');
     assert.match(cookies.cookieHeader, /sessionid=ig-session/);
     assert.match(cookies.cookieHeader, /csrftoken=ig-csrf/);
+    assert.doesNotMatch(cookies.cookieHeader, /bad|rur=/);
     assert.doesNotMatch(cookies.cookieHeader, /wrong-domain/);
   } finally {
     fs.rmSync(profileDir, { recursive: true, force: true });
   }
+});
+
+test('extractFirefoxInstagramCookies rewrites shared X recovery guidance for Instagram', () => {
+  assert.throws(
+    () => extractFirefoxInstagramCookies('/definitely/missing/firefox-profile'),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.doesNotMatch(error.message, /ft sync --cookies|x\.com/);
+      assert.match(error.message, /Instagram|instagram/);
+      return true;
+    },
+  );
 });
 
 test('ensureFirefoxCookieBackendAvailable: rejects unsupported Windows runtime clearly', () => {

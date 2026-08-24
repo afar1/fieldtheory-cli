@@ -7,9 +7,12 @@ import path from 'node:path';
 import { buildIndex } from '../src/bookmarks-db.js';
 import { renderViz } from '../src/bookmarks-viz.js';
 
-async function withVizDataDir(records: any[], fn: () => Promise<void>): Promise<void> {
+async function withVizDataDir(records: any[], fn: () => Promise<void>, instagramRecords: any[] = []): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), 'ft-viz-test-'));
   await writeFile(path.join(dir, 'bookmarks.jsonl'), records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  if (instagramRecords.length > 0) {
+    await writeFile(path.join(dir, 'instagram-saved.jsonl'), instagramRecords.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  }
 
   const saved = process.env.FT_DATA_DIR;
   process.env.FT_DATA_DIR = dir;
@@ -82,4 +85,24 @@ test('renderViz uses publication timing instead of fabricated bookmark timing', 
     assert.doesNotMatch(output, /when you reach for the bookmark button/);
     assert.doesNotMatch(output, /000Z/);
   });
+});
+
+test('renderViz remains X-only when the shared index contains Instagram records', async () => {
+  const xRecord = {
+    id: 'x-only', tweetId: 'x-only', url: 'https://x.com/x_author/status/x-only',
+    text: 'X visualization fixture', authorHandle: 'x_author', postedAt: '2026-01-01T00:00:00Z',
+    syncedAt: '2026-01-02T00:00:00Z', links: [], tags: [], ingestedVia: 'graphql',
+  };
+  const instagramRecord = {
+    id: '999999999999999999', tweetId: '999999999999999999', source: 'instagram',
+    url: 'https://www.instagram.com/p/VizFixture/', text: 'Instagram visualization sentinel',
+    authorHandle: 'ig_viz_sentinel', postedAt: '2026-01-01T00:00:00Z', syncedAt: '2026-01-02T00:00:00Z',
+  };
+
+  await withVizDataDir([xRecord], async () => {
+    await buildIndex({ force: true, reportSource: 'all' });
+    const output = await renderViz();
+    assert.match(output, /1 bookmarks/);
+    assert.doesNotMatch(output, /ig_viz_sentinel|999999999999999999|Instagram visualization sentinel/);
+  }, [instagramRecord]);
 });

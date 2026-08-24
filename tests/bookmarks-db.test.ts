@@ -152,13 +152,17 @@ test('buildIndex keeps X and Instagram ids distinct and exposes source metadata'
       instagram.map((record) => JSON.stringify(record)).join('\n') + '\n',
     );
 
-    const built = await buildIndex();
+    const built = await buildIndex({ reportSource: 'all' });
     assert.equal(built.recordCount, 5);
+    const xReport = await buildIndex();
+    assert.equal(xReport.recordCount, 3, 'X sync/index reporting remains scoped to X');
+    assert.equal(xReport.newRecords, 0);
 
     const xCollision = await getBookmarkById('1');
     const instagramCollision = await getBookmarkById('instagram:1');
     assert.equal(xCollision?.source, 'x');
-    assert.equal(xCollision?.nativeId, '1');
+    assert.equal(Object.hasOwn(xCollision ?? {}, 'nativeId'), false, 'X structured output gains only source');
+    assert.equal(Object.hasOwn(xCollision ?? {}, 'canonicalUrl'), false, 'X structured output keeps its prior URL shape');
     assert.equal(instagramCollision?.source, 'instagram');
     assert.equal(instagramCollision?.contentType, 'reel');
     assert.equal(instagramCollision?.canonicalUrl, 'https://www.instagram.com/reel/CollisionFixture/');
@@ -170,9 +174,14 @@ test('buildIndex keeps X and Instagram ids distinct and exposes source metadata'
     assert.equal(results[0]?.source, 'instagram');
     assert.equal(results[0]?.canonicalUrl, 'https://www.instagram.com/p/SearchFixture/');
 
-    const listed = await listBookmarks({ author: 'ig_fixture', limit: 10 });
+    const listed = await listBookmarks({ source: 'all', author: 'ig_fixture', limit: 10 });
     assert.equal(listed[0]?.id, 'instagram:1');
     assert.equal(listed[0]?.source, 'instagram');
+
+    const legacyList = await listBookmarks({ limit: 10 });
+    assert.equal(legacyList.some((item) => item.source === 'instagram'), false, 'non-query callers remain X-only');
+    assert.equal((await getStats()).totalBookmarks, 3, 'legacy stats remain X-only');
+    assert.equal((await getClassificationProgress()).total, 3, 'classification scope remains X-only');
   });
 });
 
