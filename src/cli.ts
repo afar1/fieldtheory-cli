@@ -34,7 +34,7 @@ import { exportBookmarks } from './md-export.js';
 import { renderViz } from './bookmarks-viz.js';
 import { listBrowserIds } from './browsers.js';
 import { configureHttpProxyFromEnv } from './http-proxy.js';
-import { canonicalLibraryDir, dataDir, ensureDataDir, isFirstRun, migrateLegacyIdeasData, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir, bookmarkMediaDir, bookmarkMediaManifestPath } from './paths.js';
+import { canonicalLibraryDir, dataDir, ensureDataDir, instagramSavedCachePath, isFirstRun, migrateLegacyIdeasData, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir, bookmarkMediaDir, bookmarkMediaManifestPath } from './paths.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import { registerCompanionCommands } from './companion-cli.js';
@@ -623,9 +623,23 @@ function requireData(): boolean {
   return true;
 }
 
+export function hasAnyBookmarkData(): boolean {
+  return !isFirstRun() || fs.existsSync(instagramSavedCachePath());
+}
+
+function requireAnyBookmarkData(): boolean {
+  if (hasAnyBookmarkData()) return true;
+  console.log(`
+  No bookmarks synced yet.
+
+  Run ft sync for X bookmarks or ft sync instagram for Instagram Saved.
+`);
+  process.exitCode = 1;
+  return false;
+}
+
 /** Check that the search index exists. Returns true if it does. */
 function requireIndex(): boolean {
-  if (!requireData()) return false;
   if (!fs.existsSync(twitterBookmarksIndexPath())) {
     console.log(`
   Search index not built yet.
@@ -1590,9 +1604,9 @@ export function buildCli() {
     .description('Rebuild the SQLite search index from the JSONL cache')
     .option('--force', 'Drop and rebuild from scratch (loses classifications)')
     .action(safe(async (options) => {
-      if (!requireData()) return;
+      if (!requireAnyBookmarkData()) return;
       process.stderr.write('Building search index...\n');
-      const result = await buildIndex({ force: Boolean(options.force) });
+      const result = await buildIndex({ force: Boolean(options.force), reportSource: 'all' });
       console.log(`Indexed ${result.recordCount} bookmarks (${result.newRecords} new) \u2192 ${result.dbPath}`);
     }));
 
