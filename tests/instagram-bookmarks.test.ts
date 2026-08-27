@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -200,6 +200,65 @@ test('an interrupted incremental run resumes with stop-on-known behavior intact'
     });
     assert.equal(second.complete, true);
     assert.equal(second.stopReason, 'caught up to saved archive');
+  });
+});
+
+test('recovers an incremental page committed before its checkpoint state', async () => {
+  await isolatedRun(async (dir) => {
+    const cachePath = path.join(dir, 'instagram-saved.jsonl');
+    const statePath = path.join(dir, 'instagram-saved-state.json');
+    const stateTempPath = `${statePath}.tmp`;
+    await writeFile(cachePath, JSON.stringify({
+      id: 'known', tweetId: 'known', source: 'instagram', contentType: 'photo',
+      url: 'https://www.instagram.com/p/Known/', text: 'known', syncedAt: '2026-01-01T00:00:00Z',
+    }) + '\n');
+    await writeFile(statePath, JSON.stringify({
+      provider: 'instagram', schemaVersion: 1, complete: true, totalRuns: 1,
+    }));
+
+    // Make the durable state writer fail after the cache has already committed.
+    await mkdir(stateTempPath);
+    await assert.rejects(
+      syncInstagramSaved({
+        session: SESSION,
+        maxPages: 1,
+        fetchImpl: async () => jsonResponse({
+          items: [{ pk: 'new-1', code: 'NewOne', media_type: 1, user: { username: 'fixture' } }],
+          more_available: true,
+          next_max_id: 'page-2',
+        }),
+      }),
+      /EISDIR|illegal operation on a directory/i,
+    );
+    await rm(stateTempPath, { recursive: true });
+
+    const cursors: Array<string | undefined> = [];
+    const result = await syncInstagramSaved({
+      session: SESSION,
+      delayMs: 0,
+      fetchImpl: async (input) => {
+        const cursor = new URL(String(input)).searchParams.get('max_id') ?? undefined;
+        cursors.push(cursor);
+        if (cursor === 'page-2') {
+          return jsonResponse({
+            items: [{ pk: 'new-2', code: 'NewTwo', media_type: 1, user: { username: 'fixture' } }],
+            more_available: true,
+            next_max_id: 'archive-boundary',
+          });
+        }
+        assert.equal(cursor, 'archive-boundary');
+        return jsonResponse({
+          items: [{ pk: 'known', code: 'Known', media_type: 1, user: { username: 'fixture' } }],
+          more_available: true,
+          next_max_id: 'unused',
+        });
+      },
+    });
+
+    assert.deepEqual(cursors, ['page-2', 'archive-boundary']);
+    assert.equal(result.complete, true);
+    assert.equal(result.stopReason, 'caught up to saved archive');
+    assert.equal(result.totalBookmarks, 3);
   });
 });
 

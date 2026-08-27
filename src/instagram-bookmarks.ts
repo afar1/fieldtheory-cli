@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { loadChromeSessionConfig } from './config.js';
 import { extractChromeInstagramCookies } from './chrome-cookies.js';
 import { extractFirefoxInstagramCookies } from './firefox-cookies.js';
@@ -50,6 +50,13 @@ interface InstagramSyncState {
   lastCursor?: string;
   stopReason?: string;
   mode?: 'backfill' | 'incremental';
+}
+
+interface InstagramSyncJournal {
+  provider: 'instagram';
+  schemaVersion: 1;
+  records: BookmarkRecord[];
+  state: InstagramSyncState;
 }
 
 export interface InstagramSyncOptions {
@@ -294,6 +301,16 @@ function mergeRecords(existing: BookmarkRecord[], incoming: BookmarkRecord[]): {
   return { records, added };
 }
 
+function isInstagramCacheRecord(record: Partial<BookmarkRecord> | null): record is BookmarkRecord {
+  return Boolean(record &&
+    typeof record === 'object' &&
+    typeof record.id === 'string' &&
+    typeof record.tweetId === 'string' &&
+    typeof record.url === 'string' &&
+    typeof record.text === 'string' &&
+    typeof record.syncedAt === 'string');
+}
+
 async function readInstagramCache(cachePath: string): Promise<BookmarkRecord[]> {
   if (!await pathExists(cachePath)) return [];
   try {
@@ -305,20 +322,45 @@ async function readInstagramCache(cachePath: string): Promise<BookmarkRecord[]> 
       .filter(Boolean)
       .map((line) => {
         const record = JSON.parse(line) as Partial<BookmarkRecord>;
-        if (!record ||
-            typeof record !== 'object' ||
-            typeof record.id !== 'string' ||
-            typeof record.tweetId !== 'string' ||
-            typeof record.url !== 'string' ||
-            typeof record.text !== 'string' ||
-            typeof record.syncedAt !== 'string') {
+        if (!isInstagramCacheRecord(record)) {
           throw new Error('invalid record');
         }
-        return record as BookmarkRecord;
+        return record;
       });
   } catch {
     throw new Error(`Instagram cache is unreadable or malformed at ${cachePath}. No changes were written.`);
   }
+}
+
+async function recoverInstagramJournal(
+  cachePath: string,
+  statePath: string,
+  journalPath: string,
+): Promise<void> {
+  if (!await pathExists(journalPath)) return;
+
+  let journal: InstagramSyncJournal;
+  try {
+    journal = await readJson<InstagramSyncJournal>(journalPath);
+    if (journal?.provider !== 'instagram' ||
+        journal.schemaVersion !== 1 ||
+        !Array.isArray(journal.records) ||
+        !journal.records.every((record) => isInstagramCacheRecord(record)) ||
+        journal.state?.provider !== 'instagram' ||
+        journal.state.schemaVersion !== 1 ||
+        typeof journal.state.complete !== 'boolean' ||
+        typeof journal.state.totalRuns !== 'number') {
+      throw new Error('invalid journal');
+    }
+  } catch {
+    throw new Error(`Instagram checkpoint journal is unreadable or malformed at ${journalPath}. No changes were written.`);
+  }
+
+  const existing = await readInstagramCache(cachePath);
+  const recovered = mergeRecords(existing, journal.records);
+  await writeJsonLines(cachePath, recovered.records);
+  await writeJson(statePath, journal.state);
+  await rm(journalPath, { force: true });
 }
 
 export async function syncInstagramSaved(options: InstagramSyncOptions = {}): Promise<InstagramSyncResult> {
@@ -333,7 +375,9 @@ export async function syncInstagramSaved(options: InstagramSyncOptions = {}): Pr
   const now = options.now ?? (() => new Date());
   const cachePath = instagramSavedCachePath();
   const statePath = instagramSavedStatePath();
+  const journalPath = `${statePath}.journal`;
 
+  await recoverInstagramJournal(cachePath, statePath, journalPath);
   const existing = await readInstagramCache(cachePath);
   let records = existing;
   const knownIds = new Set(existing.map((record) => record.id));
@@ -404,18 +448,36 @@ export async function syncInstagramSaved(options: InstagramSyncOptions = {}): Pr
     totalAdded += merged.added;
     cursor = result.nextCursor;
 
-    await ensureDir(dataDir());
-    await writeJsonLines(cachePath, records);
-    await writeJson(statePath, {
+    let checkpointComplete = false;
+    let checkpointStopReason = 'in progress';
+    if (reachedKnown) {
+      checkpointComplete = true;
+      checkpointStopReason = 'caught up to saved archive';
+    } else if (!cursor) {
+      checkpointComplete = true;
+      checkpointStopReason = 'end of saved collection';
+    }
+    const checkpointState: InstagramSyncState = {
       provider: 'instagram',
       schemaVersion: 1,
-      complete: false,
-      totalRuns: previousState?.totalRuns ?? 0,
+      complete: checkpointComplete,
+      totalRuns: (previousState?.totalRuns ?? 0) + (checkpointComplete ? 1 : 0),
       lastRunAt: now().toISOString(),
-      lastCursor: cursor,
-      stopReason: 'in progress',
+      lastCursor: checkpointComplete ? undefined : cursor,
+      stopReason: checkpointStopReason,
       mode: runMode,
-    } satisfies InstagramSyncState);
+    };
+
+    await ensureDir(dataDir());
+    await writeJson(journalPath, {
+      provider: 'instagram',
+      schemaVersion: 1,
+      records: result.records,
+      state: checkpointState,
+    } satisfies InstagramSyncJournal);
+    await writeJsonLines(cachePath, records);
+    await writeJson(statePath, checkpointState);
+    await rm(journalPath, { force: true });
 
     options.onProgress?.({
       page,
