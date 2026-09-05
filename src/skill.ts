@@ -24,7 +24,7 @@ Field Theory has four main local surfaces:
 
 ## When to trigger
 
-- User mentions Field Theory, the Library, wiki pages, portable commands, or reusable workflows
+- User mentions Field Theory, the Library, wiki pages, portable commands
 - User mentions bookmarks, saved tweets, or X/Twitter content they saved
 - User asks to find something they bookmarked ("find that tweet about...")
 - User asks a question their bookmarks could answer ("what AI tools have I been looking at?")
@@ -37,13 +37,12 @@ Field Theory has four main local surfaces:
 
 1. Check paths and status when setup matters: \`ft paths --json\`, \`ft status --json\`
 2. When the user asks what Field Theory document they are looking at, run \`ft current --json\`; the JSON includes the document body, source path, editability, hash, content mode, and line-number mapping when available
-3. Check repo workflow state when branch/worktree/PR shape matters: \`ft state --json\`
-4. When the user says "that file" or "the recent file", inspect current repo recency with \`ft recent --json\`
-5. Search durable notes first when prior project knowledge matters: \`ft library search <query> --json\`
-6. Search bookmarks when reading history or saved X/Twitter posts matter: \`ft search <query> --json\`
-7. Inspect exact files or bookmarks with \`ft library show <path> --json\`, \`ft show <id> --json\`, or \`ft commands show <name> --json\`
-8. Create or update durable Library notes and portable commands only when the user asks for a saved artifact
-9. Open useful Library pages in the Mac app with \`ft library open <path>\`
+3. When the user says "that file" or "the recent file", inspect current repo recency with \`ft recent --json\`
+4. Search durable notes first when prior project knowledge matters: \`ft library search <query> --json\`
+5. Search bookmarks when reading history or saved X/Twitter posts matter: \`ft search <query> --json\`
+6. Inspect exact files or bookmarks with \`ft library show <path> --json\`, \`ft show <id> --json\`, or \`ft commands show <name> --json\`
+7. Create or update durable Library notes and portable commands only when the user asks for a saved artifact
+8. Open useful Library pages in the Mac app with \`ft library open <path>\`
 
 ## Current Document Editing Workflow
 
@@ -112,7 +111,6 @@ ft status --json               # Bookmark/classification status plus paths
 ft current --json              # Read current Markdown plus sourcePath, contentMode, lineNumbers, editable, and version.sha256
 ft current --summary --json    # Active Field Theory document metadata without the full body
 ft current update --stdin --expected-sha256 <sha>   # Replace the actual current source file with stdin
-ft state --json                # Repo workflow state: root, workers, PRs, cleanup, next step
 ft recent --json               # Current repo last-modified file and recent files for agent references
 
 ft search <query>              # Full-text BM25 search ("exact phrase", AND, OR, NOT)

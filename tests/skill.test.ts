@@ -6,6 +6,10 @@ import path from 'node:path';
 import { skillWithFrontmatter, skillBody, installSkill } from '../src/skill.js';
 
 describe('skill content', () => {
+  it('does not route repository work through FT state', () => {
+    assert.doesNotMatch(skillWithFrontmatter(), /ft state|repo workflow state|reusable workflows/);
+  });
+
   it('skillWithFrontmatter includes YAML frontmatter', () => {
     const content = skillWithFrontmatter();
     assert.ok(content.startsWith('---\n'));
