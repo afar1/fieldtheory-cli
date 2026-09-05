@@ -837,22 +837,8 @@ test('ft current reports missing context without a stack trace', async () => {
   }
 });
 
-test('ft state prints a read-only repo workflow table', async () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-state-'));
-  try {
-    const output = await captureStdout(async () => {
-      await buildCli().parseAsync(['node', 'ft', 'state', '--repo', tmpDir, '--no-fetch']);
-    });
-    assert.match(output, /^FT state/);
-    assert.match(output, /FT state/);
-    assert.match(output, /Included In Root/);
-    assert.match(output, /In Origin\?/);
-    assert.match(output, /Root/);
-    assert.match(output, /not a git repo/);
-    assert.match(output, /Verdict: not a repo\./);
-  } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
+test('repo workflow state is not a CLI command', () => {
+  assert.equal(buildCli().commands.some((command) => command.name() === 'state'), false);
 });
 
 test('ft install app command is registered', () => {

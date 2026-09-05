@@ -42,7 +42,6 @@ import { formatAgentContext, getAgentContext } from './agent-context.js';
 import { currentDocumentJson, formatCurrentDocumentSummary, isEditableCurrentSourcePath, readCurrentDocumentContext, readCurrentDocumentSummary } from './current.js';
 import { isPathInside, readContentInput, updateMarkdownFile } from './document-ops.js';
 import { updateLibraryDocument } from './library.js';
-import { formatWorkflowState, getWorkflowState } from './workflow-state.js';
 import {
   appendNavigationDocument,
   backNavigation,
@@ -2011,24 +2010,6 @@ export function buildCli() {
       }
       console.log(`Updated: ${doc.path}`);
       console.log(`sha256: ${doc.version.sha256}`);
-    }));
-
-  program
-    .command('state')
-    .description('Show repo workflow state in one read-only table')
-    .option('--repo <path>', 'Repo path to inspect (default: cwd)')
-    .option('--no-fetch', 'Skip fetching remote refs before reading state')
-    .option('--json', 'JSON output')
-    .action(safe(async (options) => {
-      const state = getWorkflowState({
-        repo: options.repo,
-        fetch: options.fetch !== false,
-      });
-      if (options.json) {
-        printJson(state);
-        return;
-      }
-      process.stdout.write(formatWorkflowState(state));
     }));
 
   registerCompanionCommands(program, safe);
