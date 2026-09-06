@@ -289,6 +289,27 @@ const STDERR_TAIL_BYTES = 4096;     // clipped tail shown in errors/logs
 const STDERR_HARD_CAP   = 64 * 1024; // hard ceiling on in-memory stderr buffering
 const SIGKILL_GRACE_MS  = 2_000;     // grace period between SIGTERM and SIGKILL
 
+/** Optional global multiplier applied to every engine-call timeout.
+ *  Set FT_TIMEOUT_MULTIPLIER to scale the per-call deadlines uniformly when
+ *  the configured engine has heavy startup overhead (MCP servers, session
+ *  hooks, high reasoning effort) and the default budgets fire before the
+ *  child has responded. Applies to caller-supplied opts.timeout and to the
+ *  DEFAULT_TIMEOUT fallback. Non-numeric or non-positive values are ignored.
+ *  Read on every call so tests and one-off env overrides take effect without
+ *  re-importing the module. */
+function timeoutMultiplier(): number {
+  const raw = process.env.FT_TIMEOUT_MULTIPLIER;
+  if (raw === undefined || raw === '') return 1;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  return n;
+}
+
+function resolveTimeout(callerTimeout: number | undefined): number {
+  const base = callerTimeout ?? DEFAULT_TIMEOUT;
+  return Math.round(base * timeoutMultiplier());
+}
+
 /** Clip the tail of a buffer to a byte budget — engines put the "what went
  *  wrong" line at the end of stderr. */
 function tailString(buf: Buffer, bytes: number): string {
@@ -358,7 +379,7 @@ function buildMessage(
  */
 export function invokeEngine(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): string {
   const { bin, args } = engine.config;
-  const timeout   = opts.timeout   ?? DEFAULT_TIMEOUT;
+  const timeout   = resolveTimeout(opts.timeout);
   const maxBuffer = opts.maxBuffer ?? DEFAULT_MAXBUF;
 
   const result = spawnSync(bin, args(prompt, engine), {
@@ -425,7 +446,7 @@ export function invokeEngine(engine: ResolvedEngine, prompt: string, opts: Invok
  */
 export function invokeEngineAsync(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): Promise<string> {
   const { bin, args } = engine.config;
-  const timeout   = opts.timeout   ?? DEFAULT_TIMEOUT;
+  const timeout   = resolveTimeout(opts.timeout);
   const maxBuffer = opts.maxBuffer ?? DEFAULT_MAXBUF;
 
   return new Promise((resolve, reject) => {
