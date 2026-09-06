@@ -150,6 +150,85 @@ test('fetchBookmarkMediaBatch downloads quoted tweet media targets', async () =>
   }
 });
 
+test('fetchBookmarkMediaBatch downloads thread reply media targets', async () => {
+  const replyPhotoUrl = 'https://pbs.twimg.com/media/reply-photo.jpg';
+  const replyPosterUrl = 'https://pbs.twimg.com/amplify_video_thumb/reply.jpg';
+  const replyVideoUrl = 'https://video.twimg.com/ext_tw_video/reply.mp4';
+  const replyProfileUrl = 'https://pbs.twimg.com/profile_images/789/reply_normal.jpg';
+  const contextPhotoUrl = 'https://pbs.twimg.com/media/context-photo.jpg';
+  const records = [{
+    id: '1',
+    tweetId: '1',
+    url: 'https://x.com/alice/status/1',
+    text: 'thread media test',
+    authorHandle: 'alice',
+    authorName: 'Alice',
+    syncedAt: '2026-04-09T00:00:00.000Z',
+    mediaObjects: [],
+    threadContext: [{
+      id: '90',
+      url: 'https://x.com/alice/status/90',
+      text: 'context with media',
+      authorHandle: 'alice',
+      mediaObjects: [{ type: 'photo', url: contextPhotoUrl }],
+    }],
+    threadBelow: [{
+      id: '101',
+      url: 'https://x.com/alice/status/101',
+      text: 'reply with media',
+      authorHandle: 'alice',
+      authorName: 'Alice',
+      authorProfileImageUrl: replyProfileUrl,
+      mediaObjects: [
+        { type: 'photo', url: replyPhotoUrl },
+        { type: 'video', url: replyPosterUrl, videoVariants: [{ url: replyVideoUrl, bitrate: 832000 }] },
+      ],
+    }],
+    links: [],
+    tags: [],
+    ingestedVia: 'graphql',
+  }];
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = String(input instanceof Request ? input.url : input);
+    const method = init?.method ?? 'GET';
+    const contentType = url.endsWith('.mp4') ? 'video/mp4' : 'image/jpeg';
+    if (method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': '4', 'content-type': contentType },
+      });
+    }
+    return new Response(Uint8Array.from([1, 2, 3, 4]), {
+      status: 200,
+      headers: { 'content-type': contentType },
+    });
+  };
+
+  try {
+    await withMediaDataDir(records, async () => {
+      const manifest = await fetchBookmarkMediaBatch({ limit: 10, maxBytes: 1024 });
+      const downloaded = manifest.entries
+        .filter((entry) => entry.status === 'downloaded')
+        .map((entry) => ({ bookmarkId: entry.bookmarkId, tweetId: entry.tweetId, sourceUrl: entry.sourceUrl }))
+        .sort((a, b) => a.sourceUrl.localeCompare(b.sourceUrl));
+
+      const expected = [
+        { bookmarkId: '1', tweetId: '90', sourceUrl: contextPhotoUrl },
+        { bookmarkId: '1', tweetId: '101', sourceUrl: replyPosterUrl },
+        { bookmarkId: '1', tweetId: '101', sourceUrl: replyPhotoUrl },
+        { bookmarkId: '1', tweetId: '101', sourceUrl: replyProfileUrl.replace('_normal.', '_400x400.') },
+        { bookmarkId: '1', tweetId: '101', sourceUrl: replyVideoUrl },
+      ].sort((a, b) => a.sourceUrl.localeCompare(b.sourceUrl));
+      assert.deepEqual(downloaded, expected);
+      assert.ok(downloaded.every((entry) => entry.tweetId !== '1'));
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('fetchBookmarkMediaBatch downloads shared profile images only once across bookmarks', async () => {
   const profileUrl = 'https://pbs.twimg.com/profile_images/123/avatar_normal.jpg';
   const fullProfileUrl = profileUrl.replace('_normal.', '_400x400.');

@@ -3,11 +3,11 @@ import { openDb, saveDb } from './db.js';
 import { parseTimestampMs, toIsoDate } from './date-utils.js';
 import { readJsonLines } from './fs.js';
 import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js';
-import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
+import type { BookmarkRecord, QuotedTweetSnapshot, ThreadTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 8;
 
 export interface SearchResult {
   id: string;
@@ -51,6 +51,10 @@ export interface BookmarkTimelineItem {
   enrichedAt?: string | null;
   quotedStatusId?: string | null;
   quotedTweet?: QuotedTweetSnapshot | null;
+  threadContext: ThreadTweetSnapshot[];
+  threadBelow: ThreadTweetSnapshot[];
+  threadExpandedAt?: string | null;
+  threadExpansionFailedAt?: string | null;
   mediaCount: number;
   linkCount: number;
   likeCount?: number | null;
@@ -101,6 +105,21 @@ function parseQuotedTweet(value: unknown): QuotedTweetSnapshot | null {
     return parsed as QuotedTweetSnapshot;
   } catch {
     return null;
+  }
+}
+
+function parseThreadTweets(value: unknown): ThreadTweetSnapshot[] {
+  if (typeof value !== 'string' || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value) as Array<Partial<ThreadTweetSnapshot>>;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is ThreadTweetSnapshot =>
+      typeof entry?.id === 'string' &&
+      typeof entry?.text === 'string' &&
+      typeof entry?.url === 'string'
+    );
+  } catch {
+    return [];
   }
 }
 
@@ -171,6 +190,10 @@ function mapTimelineRow(row: unknown[]): BookmarkTimelineItem {
     enrichedAt: (row[29] as string) ?? null,
     quotedStatusId: (row[30] as string) ?? null,
     quotedTweet: parseQuotedTweet(row[31]),
+    threadContext: parseThreadTweets(row[32]),
+    threadBelow: parseThreadTweets(row[33]),
+    threadExpandedAt: (row[34] as string) ?? null,
+    threadExpansionFailedAt: (row[35] as string) ?? null,
   };
 }
 
@@ -271,7 +294,12 @@ function initSchema(db: Database): void {
     article_site TEXT,
     enriched_at TEXT,
     folder_ids TEXT,
-    folder_names TEXT
+    folder_names TEXT,
+    thread_context_json TEXT,
+    thread_below_json TEXT,
+    thread_expanded_at TEXT,
+    thread_expansion_failed_at TEXT,
+    thread_text TEXT
   )`);
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_author ON bookmarks(author_handle)`);
@@ -285,6 +313,7 @@ function initSchema(db: Database): void {
     author_handle,
     author_name,
     article_text,
+    thread_text,
     content=bookmarks,
     content_rowid=rowid,
     tokenize='porter unicode61'
@@ -318,6 +347,46 @@ function ftsHasColumn(db: Database, column: string): boolean {
   }
 }
 
+function buildThreadSearchText(context: ThreadTweetSnapshot[] = [], below: ThreadTweetSnapshot[] = []): string | null {
+  const parts: string[] = [];
+  for (const tweet of [...context, ...below]) {
+    if (tweet.text) parts.push(tweet.text);
+    for (const link of tweet.links ?? []) parts.push(link);
+  }
+
+  const text = [...new Set(parts)]
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join('\n');
+  return text.length > 0 ? text : null;
+}
+
+function buildThreadSearchTextFromJson(contextJson: unknown, belowJson: unknown): string | null {
+  return buildThreadSearchText(parseThreadTweets(contextJson), parseThreadTweets(belowJson));
+}
+
+function backfillThreadSearchText(db: Database): void {
+  const rows = db.exec(
+    `SELECT id, thread_context_json, thread_below_json
+     FROM bookmarks
+     WHERE thread_text IS NULL OR thread_text = ''`
+  );
+  const values = rows[0]?.values ?? [];
+  if (values.length === 0) return;
+
+  const stmt = db.prepare('UPDATE bookmarks SET thread_text = ? WHERE id = ?');
+  try {
+    for (const row of values) {
+      stmt.run([
+        buildThreadSearchTextFromJson(row[1], row[2]),
+        row[0],
+      ]);
+    }
+  } finally {
+    stmt.free();
+  }
+}
+
 function ensureMigrations(db: Database): void {
   // Ensure meta table exists (may not on a fresh/empty DB)
   db.run('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)');
@@ -345,13 +414,23 @@ function ensureMigrations(db: Database): void {
 
     ensureColumn(db, 'bookmarks', 'folder_ids', 'TEXT');
     ensureColumn(db, 'bookmarks', 'folder_names', 'TEXT');
+    ensureColumn(db, 'bookmarks', 'thread_context_json', 'TEXT');
+    ensureColumn(db, 'bookmarks', 'thread_below_json', 'TEXT');
+    ensureColumn(db, 'bookmarks', 'thread_expanded_at', 'TEXT');
+    ensureColumn(db, 'bookmarks', 'thread_expansion_failed_at', 'TEXT');
+    const hadThreadText = columnExists(db, 'bookmarks', 'thread_text');
+    ensureColumn(db, 'bookmarks', 'thread_text', 'TEXT');
 
-    // FTS rebuild: only if the FTS table is missing the article_text column.
+    // FTS rebuild: only if the FTS table is missing an indexed content column.
     // Check via a zero-row SELECT so we don't rebuild unnecessarily.
-    if (!ftsHasColumn(db, 'article_text')) {
+    const ftsNeedsRebuild = !ftsHasColumn(db, 'article_text') || !ftsHasColumn(db, 'thread_text');
+    if (!hadThreadText || ftsNeedsRebuild) {
+      backfillThreadSearchText(db);
+    }
+    if (ftsNeedsRebuild) {
       db.run('DROP TABLE IF EXISTS bookmarks_fts');
       db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
-        text, author_handle, author_name, article_text,
+        text, author_handle, author_name, article_text, thread_text,
         content=bookmarks, content_rowid=rowid,
         tokenize='porter unicode61'
       )`);
@@ -375,11 +454,29 @@ interface PreservedBookmarkFields {
   enrichedAt: string | null;
   folderIds: string | null;
   folderNames: string | null;
+  threadContextJson: string | null;
+  threadBelowJson: string | null;
+  threadExpandedAt: string | null;
+  threadExpansionFailedAt: string | null;
+  threadText: string | null;
 }
 
 function serializeJsonArray(values: string[] | undefined | null): string | null {
   if (!values || values.length === 0) return null;
   return JSON.stringify(values);
+}
+
+function serializeThreadTweets(values: ThreadTweetSnapshot[] | undefined): string | null {
+  if (values === undefined) return null;
+  return JSON.stringify(values);
+}
+
+function recordThreadSearchText(r: BookmarkRecord, preserved?: PreservedBookmarkFields): string | null {
+  if (r.threadContext !== undefined || r.threadBelow !== undefined) {
+    return buildThreadSearchText(r.threadContext ?? [], r.threadBelow ?? []);
+  }
+  return preserved?.threadText
+    ?? buildThreadSearchTextFromJson(preserved?.threadContextJson, preserved?.threadBelowJson);
 }
 
 function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBookmarkFields): void {
@@ -390,7 +487,7 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
   const githubUrls = [...new Set([...githubMatches.map((m) => `https://${m}`), ...githubFromLinks])];
 
   db.run(
-    `INSERT OR REPLACE INTO bookmarks VALUES (${Array(37).fill('?').join(',')})`,
+    `INSERT OR REPLACE INTO bookmarks VALUES (${Array(42).fill('?').join(',')})`,
     [
       r.id,
       r.tweetId,
@@ -429,6 +526,11 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
       preserved?.enrichedAt ?? null,
       serializeJsonArray(r.folderIds) ?? preserved?.folderIds ?? null,
       serializeJsonArray(r.folderNames) ?? preserved?.folderNames ?? null,
+      serializeThreadTweets(r.threadContext) ?? preserved?.threadContextJson ?? null,
+      serializeThreadTweets(r.threadBelow) ?? preserved?.threadBelowJson ?? null,
+      r.threadExpandedAt ?? preserved?.threadExpandedAt ?? null,
+      r.threadExpansionFailedAt ?? preserved?.threadExpansionFailedAt ?? null,
+      recordThreadSearchText(r, preserved),
     ]
   );
 }
@@ -459,7 +561,8 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
       const rows = db.exec(
         `SELECT id, categories, primary_category, github_urls, domains, primary_domain,
                 quoted_tweet_json, article_title, article_text, article_site, enriched_at,
-                folder_ids, folder_names
+                folder_ids, folder_names, thread_context_json, thread_below_json,
+                thread_expanded_at, thread_expansion_failed_at, thread_text
          FROM bookmarks`
       );
       for (const r of (rows[0]?.values ?? [])) {
@@ -476,6 +579,11 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
           enrichedAt: (r[10] as string) ?? null,
           folderIds: (r[11] as string) ?? null,
           folderNames: (r[12] as string) ?? null,
+          threadContextJson: (r[13] as string) ?? null,
+          threadBelowJson: (r[14] as string) ?? null,
+          threadExpandedAt: (r[15] as string) ?? null,
+          threadExpansionFailedAt: (r[16] as string) ?? null,
+          threadText: (r[17] as string) ?? null,
         });
       }
     } catch { /* table may be empty */ }
@@ -567,7 +675,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
 
     // If we have an FTS query, use bm25 for ranking; otherwise sort by posted_at
     const orderBy = options.query
-      ? `ORDER BY bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0) ASC`
+      ? `ORDER BY bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0, 2.0) ASC`
       : `ORDER BY b.posted_at DESC`;
 
     // For FTS ranking we need to join with the FTS table for bm25
@@ -575,7 +683,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
     if (options.query) {
       sql = `
         SELECT b.id, b.url, b.text, b.author_handle, b.author_name, b.posted_at,
-               bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0) as score
+               bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0, 2.0) as score
         FROM bookmarks b
         JOIN bookmarks_fts ON bookmarks_fts.rowid = b.rowid
         ${where}
@@ -664,7 +772,11 @@ export async function listBookmarks(
         b.synced_at,
         b.enriched_at,
         b.quoted_status_id,
-        b.quoted_tweet_json
+        b.quoted_tweet_json,
+        b.thread_context_json,
+        b.thread_below_json,
+        b.thread_expanded_at,
+        b.thread_expansion_failed_at
       FROM bookmarks b
       ${where}
       ${bookmarkSortClause(filters.sort)}
@@ -732,7 +844,11 @@ export async function exportBookmarksForSyncSeed(): Promise<BookmarkRecord[]> {
         b.view_count,
         b.links_json,
         b.folder_ids,
-        b.folder_names
+        b.folder_names,
+        b.thread_context_json,
+        b.thread_below_json,
+        b.thread_expanded_at,
+        b.thread_expansion_failed_at
       FROM bookmarks b
       ${bookmarkSortClause('desc')}
     `;
@@ -765,6 +881,10 @@ export async function exportBookmarksForSyncSeed(): Promise<BookmarkRecord[]> {
       links: parseJsonArray(row[20]),
       folderIds: parseJsonArray(row[21]),
       folderNames: parseJsonArray(row[22]),
+      threadContext: parseThreadTweets(row[23]),
+      threadBelow: parseThreadTweets(row[24]),
+      threadExpandedAt: (row[25] as string) ?? undefined,
+      threadExpansionFailedAt: (row[26] as string) ?? undefined,
       tags: [],
       ingestedVia: 'graphql',
     }));
@@ -812,7 +932,11 @@ export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem 
         b.synced_at,
         b.enriched_at,
         b.quoted_status_id,
-        b.quoted_tweet_json
+        b.quoted_tweet_json,
+        b.thread_context_json,
+        b.thread_below_json,
+        b.thread_expanded_at,
+        b.thread_expansion_failed_at
       FROM bookmarks b
       WHERE b.id = ?
       LIMIT 1`,
@@ -1172,18 +1296,31 @@ export async function updateQuotedTweets(
 }
 
 export async function updateBookmarkText(
-  records: Array<{ id: string; text: string }>,
+  records: Array<{ id: string; text: string; links?: string[] }>,
 ): Promise<void> {
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
   ensureMigrations(db);
 
   try {
-    const stmt = db.prepare('UPDATE bookmarks SET text = ? WHERE id = ?');
+    const textOnlyStmt = db.prepare('UPDATE bookmarks SET text = ? WHERE id = ?');
+    const textAndLinksStmt = db.prepare(
+      'UPDATE bookmarks SET text = ?, link_count = ?, links_json = ? WHERE id = ?'
+    );
     for (const record of records) {
-      stmt.run([record.text, record.id]);
+      if (record.links === undefined) {
+        textOnlyStmt.run([record.text, record.id]);
+      } else {
+        textAndLinksStmt.run([
+          record.text,
+          record.links.length,
+          record.links.length ? JSON.stringify(record.links) : null,
+          record.id,
+        ]);
+      }
     }
-    stmt.free();
+    textOnlyStmt.free();
+    textAndLinksStmt.free();
     // Rebuild FTS to reflect updated text
     db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
     saveDb(db, dbPath);
@@ -1214,6 +1351,50 @@ export async function updateArticleContent(
     const now = new Date().toISOString();
     for (const record of records) {
       stmt.run([record.articleTitle, record.articleText, record.articleSite ?? null, now, record.id]);
+    }
+    stmt.free();
+    db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
+    saveDb(db, dbPath);
+  } finally {
+    db.close();
+  }
+}
+
+export interface ThreadUpdate {
+  id: string;
+  threadContext?: ThreadTweetSnapshot[];
+  threadBelow?: ThreadTweetSnapshot[];
+  threadExpandedAt?: string;
+  threadExpansionFailedAt?: string;
+}
+
+export async function updateThreadData(records: ThreadUpdate[]): Promise<void> {
+  if (!records.length) return;
+  const dbPath = twitterBookmarksIndexPath();
+  const db = await openDb(dbPath);
+  ensureMigrations(db);
+
+  try {
+    const tableExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'");
+    if (tableExists.length === 0 || tableExists[0].values.length === 0) return;
+    const stmt = db.prepare(
+      `UPDATE bookmarks
+       SET thread_context_json = ?,
+           thread_below_json = ?,
+           thread_expanded_at = ?,
+           thread_expansion_failed_at = ?,
+           thread_text = ?
+       WHERE id = ?`
+    );
+    for (const record of records) {
+      stmt.run([
+        record.threadContext === undefined ? null : JSON.stringify(record.threadContext),
+        record.threadBelow === undefined ? null : JSON.stringify(record.threadBelow),
+        record.threadExpandedAt ?? null,
+        record.threadExpansionFailedAt ?? null,
+        buildThreadSearchText(record.threadContext ?? [], record.threadBelow ?? []),
+        record.id,
+      ]);
     }
     stmt.free();
     db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");

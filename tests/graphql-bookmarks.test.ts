@@ -10,7 +10,9 @@ import {
   parseBookmarksResponse,
   parseFolderTimelineResponse,
   parseTweetArticleByRestId,
+  parseTweetDetailResponse,
   parseTweetResultByRestId,
+  fetchTweetDetailViaGraphQL,
   sanitizeBookmarkedAt,
   scoreRecord,
   mergeBookmarkRecord,
@@ -20,8 +22,10 @@ import {
   formatSyncResult,
   syncBookmarksGraphQL,
   syncGaps,
+  syncThreads,
+  extractSameAuthorThreadBelow,
 } from '../src/graphql-bookmarks.js';
-import { buildIndex, getBookmarkById } from '../src/bookmarks-db.js';
+import { buildIndex, getBookmarkById, searchBookmarks } from '../src/bookmarks-db.js';
 import { resolveFolder, formatFolderMirrorStats } from '../src/cli.js';
 import type { BookmarkFolder, BookmarkRecord } from '../src/types.js';
 
@@ -118,6 +122,32 @@ function makeGraphQLResponse(tweetResults: any[], bottomCursor?: string) {
   };
 }
 
+function makeTweetDetailResponse(tweetResults: any[], bottomCursor?: string) {
+  const entries = tweetResults.map((tr) => ({
+    entryId: `tweet-${tr.legacy?.id_str ?? tr.rest_id}`,
+    content: {
+      itemContent: {
+        tweet_results: { result: tr },
+      },
+    },
+  }));
+  if (bottomCursor) {
+    entries.push({
+      entryId: 'cursor-bottom-thread',
+      content: { value: bottomCursor } as any,
+    });
+  }
+  return {
+    data: {
+      threaded_conversation_with_injections_v2: {
+        instructions: [
+          { type: 'TimelineAddEntries', entries },
+        ],
+      },
+    },
+  };
+}
+
 function makeRecord(overrides: Partial<BookmarkRecord> = {}): BookmarkRecord {
   return {
     id: '100',
@@ -193,7 +223,7 @@ test('convertTweetToRecord: extracts links, filtering out t.co', () => {
   assert.equal(result.links![0], 'https://example.com/article');
 });
 
-test('convertTweetToRecord: expands t.co links in visible text using display_url', () => {
+test('convertTweetToRecord: expands t.co links in visible text using expanded_url', () => {
   const result = convertTweetToRecord(makeTweetResult({
     legacy: {
       full_text: 'Check this: https://t.co/abc and this: https://t.co/def',
@@ -206,7 +236,34 @@ test('convertTweetToRecord: expands t.co links in visible text using display_url
     },
   }), NOW)!;
 
-  assert.equal(result.text, 'Check this: example.com/foo and this: tools.exec.security');
+  assert.equal(result.text, 'Check this: https://example.com/article and this: https://tools.exec.security');
+  assert.deepEqual(result.links, ['https://example.com/article', 'https://tools.exec.security']);
+});
+
+test('convertTweetToRecord: extracts note_tweet entity_set links', () => {
+  const result = convertTweetToRecord(makeTweetResult({
+    legacy: {
+      full_text: 'Preview https://t.co/note',
+      entities: { urls: [] },
+    },
+    tweet: {
+      note_tweet: {
+        note_tweet_results: {
+          result: {
+            text: 'Full note body with a link: https://t.co/note',
+            entity_set: {
+              urls: [
+                { expanded_url: 'https://example.com/full-note', url: 'https://t.co/note', display_url: 'example.com/full-note' },
+              ],
+            },
+          },
+        },
+      },
+    },
+  }), NOW)!;
+
+  assert.equal(result.text, 'Full note body with a link: https://example.com/full-note');
+  assert.deepEqual(result.links, ['https://example.com/full-note']);
 });
 
 test('convertTweetToRecord: handles location as object', () => {
@@ -381,6 +438,119 @@ test('convertTweetToRecord: handles missing quoted tweet gracefully', () => {
   assert.equal(result.quotedTweet, undefined);
 });
 
+test('parseTweetDetailResponse: extracts tweets from timeline items and modules', () => {
+  const root = makeTweetResult({
+    legacy: { id_str: '100', full_text: 'Launch post', conversation_id_str: '100' },
+  });
+  const reply = makeTweetResult({
+    rest_id: '101',
+    legacy: {
+      id_str: '101',
+      full_text: 'Link below: https://example.com',
+      conversation_id_str: '100',
+      in_reply_to_status_id_str: '100',
+    },
+  });
+  const moduleResp = {
+    data: {
+      threaded_conversation_with_injections_v2: {
+        instructions: [{
+          type: 'TimelineAddEntries',
+          entries: [{
+            entryId: 'conversationthread-100',
+            content: {
+              displayType: 'VerticalConversation',
+              clientEventInfo: {
+                details: {
+                  conversationDetails: {
+                    conversationSection: 'HighQuality',
+                  },
+                },
+              },
+              items: [
+                { item: { itemContent: { tweet_results: { result: root } } } },
+                { item: { itemContent: { tweet_results: { result: reply } } } },
+              ],
+            },
+          }, {
+            entryId: 'cursor-bottom-100',
+            content: { value: 'cursor-next' },
+          }],
+        }],
+      },
+    },
+  };
+
+  const parsed = parseTweetDetailResponse(moduleResp);
+  assert.equal(parsed.tweets.length, 2);
+  assert.equal(parsed.tweets[1].id, '101');
+  assert.equal(parsed.tweets[1].inReplyToStatusId, '100');
+  assert.equal(parsed.tweets[1].conversationDisplayType, 'VerticalConversation');
+  assert.equal(parsed.tweets[1].conversationSection, 'HighQuality');
+  assert.equal(parsed.tweets[1].conversationRootId, '100');
+  assert.equal(parsed.tweets[1].conversationItemIndex, 1);
+  assert.equal(parsed.nextCursor, 'cursor-next');
+});
+
+test('extractSameAuthorThreadBelow: keeps same-author continuations and excludes public replies', () => {
+  const root = makeTweetResult({
+    legacy: { id_str: '100', full_text: 'Launch post', conversation_id_str: '100' },
+  });
+  const sameAuthorReply = makeTweetResult({
+    rest_id: '101',
+    legacy: {
+      id_str: '101',
+      full_text: 'Here is the link',
+      conversation_id_str: '100',
+      in_reply_to_status_id_str: '100',
+    },
+  });
+  const publicReply = makeTweetResult({
+    rest_id: '102',
+    legacy: {
+      id_str: '102',
+      full_text: 'random public reply',
+      conversation_id_str: '100',
+      in_reply_to_status_id_str: '100',
+    },
+    userResult: {
+      rest_id: '1111',
+      core: { screen_name: 'other', name: 'Other User' },
+    },
+  });
+  const authorSocialReply = makeTweetResult({
+    rest_id: '104',
+    legacy: {
+      id_str: '104',
+      full_text: '@other thanks!',
+      conversation_id_str: '100',
+      in_reply_to_status_id_str: '102',
+    },
+  });
+  const secondContinuation = makeTweetResult({
+    rest_id: '103',
+    legacy: {
+      id_str: '103',
+      full_text: 'More detail',
+      conversation_id_str: '100',
+      in_reply_to_status_id_str: '101',
+    },
+  });
+
+  const parsed = parseTweetDetailResponse(makeTweetDetailResponse([
+    root,
+    sameAuthorReply,
+    publicReply,
+    authorSocialReply,
+    secondContinuation,
+  ]));
+  const below = extractSameAuthorThreadBelow(parsed.tweets, '100', 'testuser');
+
+  assert.deepEqual(below.map((tweet) => tweet.id), ['101', '103']);
+  assert.ok(below.every((tweet) => tweet.authorHandle === 'testuser'));
+  assert.ok(below.every((tweet) => tweet.threadRole === 'post-thread'));
+});
+
 test('convertTweetToRecord: quoted tweet prefers note_tweet body over legacy full_text', () => {
   const tr = makeTweetResult({
     legacy: { quoted_status_id_str: '8888888' },
@@ -420,6 +590,82 @@ test('convertTweetToRecord: quoted tweet prefers note_tweet body over legacy ful
     result.quotedTweet!.text,
     'Full long-form quoted body that would be truncated in legacy.full_text',
   );
+});
+
+test('parseTweetDetailResponse: expands thread tweet t.co links and stores links', () => {
+  const reply = makeTweetResult({
+    legacy: {
+      id_str: '101',
+      full_text: 'Reply link below: https://t.co/reply',
+      entities: {
+        urls: [
+          { expanded_url: 'https://example.com/reply', url: 'https://t.co/reply', display_url: 'example.com/reply' },
+        ],
+      },
+    },
+  });
+  const parsed = parseTweetDetailResponse(makeTweetDetailResponse([reply]));
+
+  assert.equal(parsed.tweets.length, 1);
+  assert.equal(parsed.tweets[0].text, 'Reply link below: https://example.com/reply');
+  assert.deepEqual(parsed.tweets[0].links, ['https://example.com/reply']);
+});
+
+test('fetchTweetDetailViaGraphQL: treats recognized empty timelines as permanent empty', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    data: {
+      threaded_conversation_with_injections_v2: {
+        instructions: [{ type: 'TimelineAddEntries', entries: [] }],
+      },
+    },
+  }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })) as typeof fetch;
+
+  try {
+    const result = await fetchTweetDetailViaGraphQL('100', 'ct0', 'ct0=ct0; auth_token=auth', { delayMs: 0 });
+    assert.equal(result.status, 'empty');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchTweetDetailViaGraphQL: keeps unparseable tweet timelines transient', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    data: {
+      threaded_conversation_with_injections_v2: {
+        instructions: [{
+          type: 'TimelineAddEntries',
+          entries: [{
+            entryId: 'tweet-100',
+            content: {
+              itemContent: {
+                tweet_results: {
+                  result: {
+                    __typename: 'Tweet',
+                    rest_id: '100',
+                  },
+                },
+              },
+            },
+          }],
+        }],
+      },
+    },
+  }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })) as typeof fetch;
+
+  try {
+    const result = await fetchTweetDetailViaGraphQL('100', 'ct0', 'ct0=ct0; auth_token=auth', { delayMs: 0 });
+    assert.equal(result.status, 'error');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('parseBookmarksResponse: captures full note_tweet body from live bookmarks-feed fixture', () => {
@@ -635,6 +881,286 @@ async function withIsolatedGapFillDataDir(
     else delete process.env.FT_CHROME_USER_DATA_DIR;
   }
 }
+
+test('syncThreads: writes parent context and same-author continuations to JSONL and DB', async () => {
+  const bookmark = makeRecord({
+    id: '100',
+    tweetId: '100',
+    url: 'https://x.com/testuser/status/100',
+    text: 'Launch post',
+    authorHandle: 'testuser',
+    postedAt: '2026-04-01T00:00:00.000Z',
+    inReplyToStatusId: '99',
+  });
+  const parent = {
+    id: '99',
+    text: 'Parent context',
+    authorHandle: 'testuser',
+    url: 'https://x.com/testuser/status/99',
+  };
+  const reply = {
+    id: '101',
+    text: 'Here is the actual link: https://example.com',
+    authorHandle: 'testuser',
+    inReplyToStatusId: '100',
+    url: 'https://x.com/testuser/status/101',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    const result = await syncThreads({
+      threadFetcher: async () => ({ context: [parent], below: [reply], status: 'ok' }),
+      delayMs: 0,
+    });
+
+    assert.equal(result.contextFilled, 1);
+    assert.equal(result.belowFilled, 1);
+    assert.equal(result.failed, 0);
+
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+    assert.equal(stored.threadContext[0].text, 'Parent context');
+    assert.match(stored.threadBelow[0].text, /actual link/);
+    assert.ok(stored.threadExpandedAt);
+
+    const refreshed = await getBookmarkById('100');
+    assert.equal(refreshed?.threadContext[0]?.id, '99');
+    assert.equal(refreshed?.threadBelow[0]?.id, '101');
+
+    const searchResults = await searchBookmarks({ query: 'actual', limit: 10 });
+    assert.ok(searchResults.some((result) => result.id === '100'));
+  }, [bookmark]);
+});
+
+test('syncThreads: empty TweetDetail preserves fetched parent context as a complete check', async () => {
+  const bookmark = makeRecord({
+    id: '100',
+    tweetId: '100',
+    url: 'https://x.com/testuser/status/100',
+    text: 'Launch post',
+    authorHandle: 'testuser',
+    postedAt: '2026-04-01T00:00:00.000Z',
+    inReplyToStatusId: '99',
+  });
+  const parent = makeTweetResult({
+    tweet: { rest_id: '99' },
+    legacy: {
+      id_str: '99',
+      full_text: 'Parent context from the original announcement',
+      conversation_id_str: '99',
+      in_reply_to_status_id_str: undefined,
+    },
+  });
+  const emptyDetail = {
+    data: {
+      threaded_conversation_with_injections_v2: {
+        instructions: [
+          { type: 'TimelineAddEntries', entries: [] },
+        ],
+      },
+    },
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    const originalFetch = globalThis.fetch;
+    let resultCalls = 0;
+    let detailCalls = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/TweetResultByRestId?')) {
+        resultCalls += 1;
+        return new Response(JSON.stringify({ data: { tweetResult: { result: parent } } }));
+      }
+      if (url.includes('/TweetDetail?')) {
+        detailCalls += 1;
+        return new Response(JSON.stringify(emptyDetail));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    try {
+      const result = await syncThreads({
+        csrfToken: 'ct0',
+        cookieHeader: 'ct0=ct0; auth_token=auth',
+        delayMs: 0,
+      });
+
+      assert.equal(result.contextFilled, 1);
+      assert.equal(result.belowFilled, 0);
+      assert.equal(result.emptyChecked, 0);
+      assert.equal(result.failed, 0);
+      assert.equal(resultCalls, 1);
+      assert.equal(detailCalls, 1);
+
+      const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+      const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+      assert.equal(stored.threadContext[0].text, 'Parent context from the original announcement');
+      assert.deepEqual(stored.threadBelow, []);
+      assert.ok(stored.threadExpandedAt);
+      assert.equal(stored.threadExpansionFailedAt, undefined);
+
+      const refreshed = await getBookmarkById('100');
+      assert.equal(refreshed?.threadContext[0]?.id, '99');
+      assert.deepEqual(refreshed?.threadBelow, []);
+      assert.ok(refreshed?.threadExpandedAt);
+      assert.equal(refreshed?.threadExpansionFailedAt, null);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }, [bookmark]);
+});
+
+test('syncThreads: rechecks recent empty threads but skips old checked empties', async () => {
+  const recentChecked = makeRecord({
+    id: '200',
+    tweetId: '200',
+    url: 'https://x.com/testuser/status/200',
+    text: 'Recent launch',
+    authorHandle: 'testuser',
+    postedAt: new Date(Date.now() - 24 * 60 * 60_000).toISOString(),
+    threadContext: [],
+    threadBelow: [],
+    threadExpandedAt: new Date(Date.now() - 7 * 60 * 60_000).toISOString(),
+  });
+  const oldChecked = makeRecord({
+    id: '300',
+    tweetId: '300',
+    url: 'https://x.com/testuser/status/300',
+    text: 'Old launch',
+    authorHandle: 'testuser',
+    postedAt: '2026-01-01T00:00:00.000Z',
+    threadContext: [],
+    threadBelow: [],
+    threadExpandedAt: '2026-01-01T02:00:00.000Z',
+  });
+
+  await withIsolatedGapFillDataDir(async () => {
+    let calls = 0;
+    const result = await syncThreads({
+      threadFetcher: async (record) => {
+        calls += 1;
+        assert.equal(record.id, '200');
+        return { context: [], below: [], status: 'ok' };
+      },
+      delayMs: 0,
+    });
+
+    assert.equal(calls, 1);
+    assert.equal(result.emptyChecked, 1);
+    assert.equal(result.total, 1);
+  }, [recentChecked, oldChecked]);
+});
+
+test('syncThreads: permanent focal failure stamps threadExpansionFailedAt', async () => {
+  const bookmark = makeRecord({
+    id: '400',
+    tweetId: '400',
+    url: 'https://x.com/testuser/status/400',
+    text: 'Gone',
+    authorHandle: 'testuser',
+  });
+
+  await withIsolatedGapFillDataDir(async () => {
+    const result = await syncThreads({
+      threadFetcher: async () => ({ context: [], below: [], status: 'not_found' }),
+      delayMs: 0,
+    });
+
+    assert.equal(result.failed, 1);
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+    assert.ok(stored.threadExpansionFailedAt);
+  }, [bookmark]);
+});
+
+test('syncThreads: transient failures abort without stamping permanent failure', async () => {
+  const first = makeRecord({
+    id: '500',
+    tweetId: '500',
+    url: 'https://x.com/testuser/status/500',
+    text: 'Good thread',
+    authorHandle: 'testuser',
+  });
+  const second = makeRecord({
+    id: '600',
+    tweetId: '600',
+    url: 'https://x.com/testuser/status/600',
+    text: 'Rate limited thread',
+    authorHandle: 'testuser',
+  });
+  const reply = {
+    id: '501',
+    text: 'Continuation',
+    authorHandle: 'testuser',
+    url: 'https://x.com/testuser/status/501',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    let calls = 0;
+    await assert.rejects(
+      () => syncThreads({
+        threadFetcher: async () => {
+          calls += 1;
+          if (calls === 1) return { context: [], below: [reply], status: 'ok' };
+          return { context: [], below: [], status: 'rate_limited' };
+        },
+        delayMs: 0,
+      }),
+      /rate limiting/,
+    );
+
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const rows = jsonl.trim().split('\n').map((line) => JSON.parse(line));
+    const storedFirst = rows.find((row) => row.id === '500');
+    const storedSecond = rows.find((row) => row.id === '600');
+    assert.equal(storedFirst.threadBelow[0].id, '501');
+    assert.ok(storedFirst.threadExpandedAt);
+    assert.equal(storedSecond.threadExpansionFailedAt, undefined);
+    assert.equal(calls, 2);
+  }, [first, second]);
+});
+
+test('syncThreads: transient failure checkpoints partial thread data without stamping permanent failure', async () => {
+  const bookmark = makeRecord({
+    id: '700',
+    tweetId: '700',
+    url: 'https://x.com/testuser/status/700',
+    text: 'Rate limited after parent context',
+    authorHandle: 'testuser',
+  });
+  const parent = {
+    id: '699',
+    text: 'Fetched parent before rate limit',
+    authorHandle: 'testuser',
+    url: 'https://x.com/testuser/status/699',
+  };
+
+  await withIsolatedGapFillDataDir(async () => {
+    await buildIndex();
+    await assert.rejects(
+      () => syncThreads({
+        threadFetcher: async () => ({ context: [parent], below: [], status: 'rate_limited' }),
+        delayMs: 0,
+      }),
+      /rate limiting/,
+    );
+
+    const jsonl = await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8');
+    const stored = JSON.parse(jsonl.trim().split('\n').pop()!);
+    assert.equal(stored.threadContext[0].text, 'Fetched parent before rate limit');
+    assert.equal(stored.threadBelow, undefined);
+    assert.equal(stored.threadExpandedAt, undefined);
+    assert.equal(stored.threadExpansionFailedAt, undefined);
+
+    const refreshed = await getBookmarkById('700');
+    assert.equal(refreshed?.threadContext[0]?.id, '699');
+    assert.deepEqual(refreshed?.threadBelow, []);
+    assert.equal(refreshed?.threadExpandedAt, null);
+    assert.equal(refreshed?.threadExpansionFailedAt, null);
+  }, [bookmark]);
+});
 
 test('syncGaps: expands truncated note_tweet and stamps textExpandedAt', async () => {
   const fixture = loadFixture('tweet-result-by-rest-id-note-tweet.json');
