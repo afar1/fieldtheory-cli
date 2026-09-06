@@ -5,6 +5,8 @@ import type { spawnSync, SpawnSyncReturns } from 'node:child_process';
 import {
   buildWindowsDpapiScript,
   decryptCookieValue,
+  linuxKWalletLookups,
+  linuxSecretToolLookups,
   runWindowsDpapi,
   windowsPowerShellCandidates,
 } from '../src/chrome-cookies.js';
@@ -69,6 +71,60 @@ test('decryptCookieValue: uses correct PBKDF2 parameters (1003 iterations, sha1,
   const { encrypted } = encryptLikeChrome('test-value', password);
   const result = decryptCookieValue(encrypted, key);
   assert.equal(result, 'test-value');
+});
+
+test('linuxSecretToolLookups: includes Chrome application and KDE portal schema lookups', () => {
+  const lookups = linuxSecretToolLookups({
+    id: 'chrome',
+    displayName: 'Google Chrome',
+    cookieBackend: 'chromium',
+    keychainEntries: [],
+  });
+
+  assert.deepEqual(lookups.map((lookup) => lookup.args), [
+    ['application', 'chrome'],
+    ['xdg:schema', 'chrome_libsecret_os_crypt_password_v2'],
+  ]);
+});
+
+test('linuxSecretToolLookups: includes Edge application aliases before KDE schema fallback', () => {
+  const lookups = linuxSecretToolLookups({
+    id: 'edge',
+    displayName: 'Microsoft Edge',
+    cookieBackend: 'chromium',
+    keychainEntries: [],
+  });
+
+  assert.deepEqual(lookups.map((lookup) => lookup.args), [
+    ['application', 'microsoft-edge'],
+    ['application', 'edge'],
+    ['xdg:schema', 'chrome_libsecret_os_crypt_password_v2'],
+  ]);
+});
+
+test('linuxKWalletLookups: includes Chrome Safe Storage in the KDE wallet', () => {
+  const lookups = linuxKWalletLookups({
+    id: 'chrome',
+    displayName: 'Google Chrome',
+    cookieBackend: 'chromium',
+    keychainEntries: [],
+  });
+
+  assert.deepEqual(lookups.map(({ wallet, folder, entry }) => ({ wallet, folder, entry })), [
+    { wallet: 'kdewallet', folder: 'Chrome Keys', entry: 'Chrome Safe Storage' },
+    { wallet: 'kdewallet', folder: 'Chrome', entry: 'Chrome Safe Storage' },
+  ]);
+});
+
+test('linuxKWalletLookups: honors FT_KWALLET_NAME', () => {
+  const lookups = linuxKWalletLookups({
+    id: 'chrome',
+    displayName: 'Google Chrome',
+    cookieBackend: 'chromium',
+    keychainEntries: [],
+  }, { FT_KWALLET_NAME: 'custom-wallet' } as NodeJS.ProcessEnv);
+
+  assert.equal(lookups[0]?.wallet, 'custom-wallet');
 });
 
 test('buildWindowsDpapiScript: probes assemblies before calling ProtectedData', () => {
