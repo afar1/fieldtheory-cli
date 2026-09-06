@@ -1,8 +1,10 @@
 import type { Database } from 'sql.js';
 import { openDb, saveDb } from './db.js';
 import { parseTimestampMs, toIsoDate } from './date-utils.js';
-import { readJsonLines } from './fs.js';
-import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js';
+import { unlink } from 'node:fs/promises';
+import { readJsonLines, writeJsonLines, readJson, writeJson, pathExists } from './fs.js';
+import { twitterBookmarksCachePath, twitterBookmarksIndexPath, bookmarkMediaManifestPath } from './paths.js';
+import type { MediaFetchManifest } from './bookmark-media.js';
 import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
@@ -681,6 +683,56 @@ export async function listBookmarks(
   }
 }
 
+export async function getFilterSuggestions(
+  field: 'author' | 'category' | 'domain',
+  prefix: string = '',
+  limit: number = 20,
+): Promise<string[]> {
+  const columnMap = {
+    author: 'author_handle',
+    category: 'primary_category',
+    domain: 'primary_domain',
+  } as const;
+  const col = columnMap[field];
+  const dbPath = twitterBookmarksIndexPath();
+  const db = await openDb(dbPath);
+  ensureMigrations(db);
+
+  try {
+    let sql: string;
+    let params: Array<string | number>;
+
+    if (prefix) {
+      sql = `
+        SELECT ${col}, COUNT(*) AS cnt
+        FROM bookmarks
+        WHERE ${col} IS NOT NULL AND ${col} != ''
+          AND ${col} LIKE ? COLLATE NOCASE
+        GROUP BY ${col}
+        ORDER BY cnt DESC
+        LIMIT ?
+      `;
+      params = [`${prefix}%`, limit];
+    } else {
+      sql = `
+        SELECT ${col}, COUNT(*) AS cnt
+        FROM bookmarks
+        WHERE ${col} IS NOT NULL AND ${col} != ''
+        GROUP BY ${col}
+        ORDER BY cnt DESC
+        LIMIT ?
+      `;
+      params = [limit];
+    }
+
+    const rows = db.exec(sql, params);
+    if (!rows.length) return [];
+    return rows[0].values.map((row) => row[0] as string);
+  } finally {
+    db.close();
+  }
+}
+
 export async function countBookmarks(
   filters: BookmarkTimelineFilters = {},
 ): Promise<number> {
@@ -823,6 +875,56 @@ export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem 
   } finally {
     db.close();
   }
+}
+
+/**
+ * Delete a bookmark by id from both the SQLite index and the JSONL cache.
+ * Returns the deleted bookmark's URL (for opening the tweet on Twitter) or
+ * null when no matching record was found.
+ */
+export async function deleteBookmark(id: string): Promise<{ url: string } | null> {
+  const dbPath = twitterBookmarksIndexPath();
+  const cachePath = twitterBookmarksCachePath();
+
+  const db = await openDb(dbPath);
+  ensureMigrations(db);
+
+  let url: string | null = null;
+  try {
+    const rows = db.exec('SELECT url FROM bookmarks WHERE id = ? LIMIT 1', [id]);
+    url = (rows[0]?.values?.[0]?.[0] as string) ?? null;
+    if (!url) return null;
+
+    db.run('DELETE FROM bookmarks WHERE id = ?', [id]);
+    // FTS5 content table is auto-updated via triggers set up in initSchema
+    db.run(`INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')`);
+    saveDb(db, dbPath);
+  } finally {
+    db.close();
+  }
+
+  // Remove from the JSONL cache so it won't re-appear on the next buildIndex
+  const records = await readJsonLines<{ id: string }>(cachePath);
+  const filtered = records.filter((r) => r.id !== id);
+  if (filtered.length !== records.length) {
+    await writeJsonLines(cachePath, filtered);
+  }
+
+  // Remove associated media files and manifest entries
+  const manifestPath = bookmarkMediaManifestPath();
+  if (await pathExists(manifestPath)) {
+    const manifest = await readJson<MediaFetchManifest>(manifestPath);
+    const toRemove = manifest.entries.filter((e) => e.bookmarkId === id);
+    for (const entry of toRemove) {
+      if (entry.localPath) {
+        await unlink(entry.localPath).catch(() => { /* already gone */ });
+      }
+    }
+    manifest.entries = manifest.entries.filter((e) => e.bookmarkId !== id);
+    await writeJson(manifestPath, manifest);
+  }
+
+  return { url };
 }
 
 export async function getStats(): Promise<{
