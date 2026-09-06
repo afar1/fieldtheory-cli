@@ -76,6 +76,74 @@ async function exchangeCodeForToken(code: string, verifier: string): Promise<XOA
   };
 }
 
+async function requestTokenRefresh(refreshToken: string): Promise<XOAuthTokenSet> {
+  const cfg = loadXApiConfig();
+  const basic = Buffer.from(`${cfg.clientId}:${cfg.clientSecret}`).toString('base64');
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token: refreshToken,
+    client_id: cfg.clientId,
+  });
+
+  const response = await fetch('https://api.x.com/2/oauth2/token', {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${basic}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body,
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`Token refresh failed (HTTP ${response.status}). Run: ft auth`);
+  }
+  let parsed: any;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`Token refresh returned a non-JSON response (HTTP ${response.status}). Run: ft auth`);
+  }
+
+  return {
+    access_token: parsed.access_token,
+    // X rotates the refresh token on each refresh; keep the prior one only if the response omits it.
+    refresh_token: parsed.refresh_token ?? refreshToken,
+    expires_in: parsed.expires_in,
+    scope: parsed.scope,
+    token_type: parsed.token_type,
+    obtained_at: new Date().toISOString(),
+  };
+}
+
+function isAccessTokenExpired(token: XOAuthTokenSet, bufferSeconds = 300): boolean {
+  if (!token.expires_in) return false;
+  const obtainedMs = Date.parse(token.obtained_at);
+  if (Number.isNaN(obtainedMs)) return true;
+  const expiresAtMs = obtainedMs + token.expires_in * 1000;
+  return Date.now() >= expiresAtMs - bufferSeconds * 1000;
+}
+
+export async function ensureValidTwitterToken(): Promise<XOAuthTokenSet | null> {
+  const token = await loadTwitterOAuthToken();
+  if (!token?.access_token) return token;
+  if (!isAccessTokenExpired(token)) return token;
+  if (!token.refresh_token) return token;
+  const refreshed = await requestTokenRefresh(token.refresh_token);
+  // Persist the rotated token set before using it; writeJson is atomic (tmp + rename),
+  // so an interrupted write cannot strand us with the now-invalidated old refresh token.
+  await saveTwitterOAuthToken(refreshed);
+  return refreshed;
+}
+
+export async function refreshTwitterTokenNow(): Promise<XOAuthTokenSet | null> {
+  const token = await loadTwitterOAuthToken();
+  if (!token?.refresh_token) return null;
+  const refreshed = await requestTokenRefresh(token.refresh_token);
+  await saveTwitterOAuthToken(refreshed);
+  return refreshed;
+}
+
 export async function saveTwitterOAuthToken(token: XOAuthTokenSet): Promise<string> {
   ensureDataDir();
   const tokenPath = twitterOauthTokenPath();
