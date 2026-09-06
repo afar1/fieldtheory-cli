@@ -3,7 +3,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { compareVersions, runWithSpinner, buildCli, parseCookieOption, shouldInferStdinFromStats } from '../src/cli.js';
+import {
+  compareVersions,
+  hasAnyBookmarkData,
+  runWithSpinner,
+  buildCli,
+  parseCookieOption,
+  resolveSyncSource,
+  shouldInferStdinFromStats,
+} from '../src/cli.js';
 import { dataDir } from '../src/paths.js';
 import { skillWithFrontmatter } from '../src/skill.js';
 
@@ -864,6 +872,55 @@ test('ft sync: media is on by default and exposes --no-media', () => {
   assert.ok(mediaOption, 'a media option must be registered');
   assert.equal(mediaOption.negate, true, 'the media option must be --no-media (negated)');
   assert.equal(mediaOption.long, '--no-media');
+});
+
+test('ft sync keeps the no-argument X target and registers explicit Instagram selection', () => {
+  assert.equal(resolveSyncSource(undefined), 'x');
+  assert.equal(resolveSyncSource('instagram'), 'instagram');
+  assert.throws(() => resolveSyncSource('linkedin'), /Unknown sync source/);
+
+  const sync = buildCli().commands.find((command: any) => command.name() === 'sync');
+  assert.ok(sync);
+  assert.equal(sync.registeredArguments.length, 1);
+  assert.equal(sync.registeredArguments[0]?.required, false);
+});
+
+test('Instagram-only data can rebuild and query the existing CLI index', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-instagram-cli-'));
+  const previousDataDir = process.env.FT_DATA_DIR;
+  const previousExitCode = process.exitCode;
+  process.env.FT_DATA_DIR = tmpDir;
+  fs.writeFileSync(path.join(tmpDir, 'instagram-saved.jsonl'), JSON.stringify({
+    id: 'ig-cli-only',
+    tweetId: 'ig-cli-only',
+    source: 'instagram',
+    contentType: 'reel',
+    url: 'https://www.instagram.com/reel/CliFixture/',
+    text: 'Instagram CLI searchable sentinel',
+    authorHandle: 'ig_cli_fixture',
+    syncedAt: '2026-08-24T00:00:00Z',
+  }) + '\n');
+
+  try {
+    assert.equal(hasAnyBookmarkData(), true);
+    const indexOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'index', '--force']);
+    });
+    assert.match(indexOutput, /Indexed 1 bookmarks/);
+
+    const searchOutput = await captureStdout(async () => {
+      await buildCli().parseAsync(['node', 'ft', 'search', 'searchable sentinel', '--json']);
+    });
+    const results = JSON.parse(searchOutput);
+    assert.equal(results[0]?.id, 'instagram:ig-cli-only');
+    assert.equal(results[0]?.source, 'instagram');
+    assert.equal(results[0]?.canonicalUrl, 'https://www.instagram.com/reel/CliFixture/');
+  } finally {
+    process.exitCode = previousExitCode;
+    if (previousDataDir === undefined) delete process.env.FT_DATA_DIR;
+    else process.env.FT_DATA_DIR = previousDataDir;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 test('ft wiki: description mentions engine prerequisite', () => {

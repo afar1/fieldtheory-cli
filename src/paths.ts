@@ -104,6 +104,14 @@ export function twitterBookmarksMetaPath(): string {
   return path.join(dataDir(), 'bookmarks-meta.json');
 }
 
+export function instagramSavedCachePath(): string {
+  return path.join(dataDir(), 'instagram-saved.jsonl');
+}
+
+export function instagramSavedStatePath(): string {
+  return path.join(dataDir(), 'instagram-saved-state.json');
+}
+
 export function twitterOauthTokenPath(): string {
   return path.join(dataDir(), 'oauth-token.json');
 }

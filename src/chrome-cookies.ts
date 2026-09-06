@@ -509,3 +509,113 @@ export function extractChromeXCookies(
 
   return { csrfToken: cleanCt0, cookieHeader };
 }
+
+/**
+ * Read only the fixed cookie set required by Instagram Saved ingestion.
+ * The domain and names are intentionally not caller-configurable.
+ */
+function extractChromeInstagramCookiesUnchecked(
+  chromeUserDataDir: string,
+  profileDirectory = 'Default',
+  browser: BrowserDef | undefined = undefined,
+): ChromeCookieResult {
+  const os = platform();
+  const br = browser ?? {
+    id: 'chrome',
+    displayName: 'Google Chrome',
+    cookieBackend: 'chromium' as const,
+    keychainEntries: [],
+  };
+  const dbPath = resolveCookieDbPath(chromeUserDataDir, profileDirectory);
+
+  let key: Buffer;
+  let v11Key: Buffer | null | undefined;
+  let isWindows = false;
+  if (os === 'darwin') {
+    key = getMacOSKey(br);
+  } else if (os === 'linux') {
+    const linuxKeys = getLinuxKeys(br);
+    key = linuxKeys.v10;
+    v11Key = linuxKeys.v11;
+  } else if (os === 'win32') {
+    key = getWindowsKey(chromeUserDataDir, br);
+    isWindows = true;
+  } else {
+    throw new Error(`Automatic Instagram cookie extraction is not supported on ${os}.`);
+  }
+
+  const result = queryCookies(
+    dbPath,
+    '.instagram.com',
+    ['sessionid', 'csrftoken', 'ds_user_id', 'mid', 'rur'],
+    br,
+  );
+  const requiredNames = new Set(['sessionid', 'csrftoken']);
+  const decrypted = new Map<string, string>();
+  for (const cookie of result.cookies) {
+    try {
+      if (cookie.encrypted_value_hex) {
+        const encrypted = Buffer.from(cookie.encrypted_value_hex, 'hex');
+        decrypted.set(cookie.name, isWindows
+          ? decryptWindowsCookie(encrypted, key)
+          : decryptCookieValue(encrypted, key, result.dbVersion, v11Key));
+      } else if (cookie.value) {
+        decrypted.set(cookie.name, cookie.value);
+      }
+    } catch (error) {
+      if (requiredNames.has(cookie.name)) throw error;
+    }
+  }
+
+  const csrfToken = decrypted.get('csrftoken');
+  const sessionId = decrypted.get('sessionid');
+  if (!csrfToken || !sessionId) {
+    throw new Error(
+      `No active Instagram session found in ${br.displayName}.\n` +
+      'Open instagram.com, log in, and retry. If the login is in another profile, ' +
+      'pass --chrome-profile-directory <name>.'
+    );
+  }
+  const orderedNames = ['sessionid', 'csrftoken', 'ds_user_id', 'mid', 'rur'];
+  const cookieHeader = orderedNames
+    .flatMap((name) => {
+      const value = decrypted.get(name);
+      if (!value) return [];
+      try {
+        return [`${name}=${sanitizeCookieValue(name, value, br)}`];
+      } catch (error) {
+        if (requiredNames.has(name)) throw error;
+        return [];
+      }
+    })
+    .join('; ');
+  return {
+    csrfToken: sanitizeCookieValue('csrftoken', csrfToken, br),
+    cookieHeader,
+  };
+}
+
+function instagramCookieGuidance(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  const rewritten = message
+    .replace(/profile logged into X/g, 'profile logged into Instagram')
+    .replace(/log into x\.com/g, 'log into instagram.com')
+    .replace(/run ft sync again/g, 'run ft sync instagram again')
+    .replace(/(?:Or p|P)ass cookies manually:\s*ft sync --cookies <ct0> <auth_token>/g,
+      'Log into instagram.com in that browser profile, then run ft sync instagram');
+  return new Error(/instagram/i.test(rewritten)
+    ? rewritten
+    : `${rewritten}\nLog into instagram.com in that browser profile, then run ft sync instagram.`);
+}
+
+export function extractChromeInstagramCookies(
+  chromeUserDataDir: string,
+  profileDirectory = 'Default',
+  browser: BrowserDef | undefined = undefined,
+): ChromeCookieResult {
+  try {
+    return extractChromeInstagramCookiesUnchecked(chromeUserDataDir, profileDirectory, browser);
+  } catch (error) {
+    throw instagramCookieGuidance(error);
+  }
+}

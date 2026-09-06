@@ -1,0 +1,82 @@
+{
+  "items": [
+    {
+      "pk": "1001",
+      "code": "PhotoFixture",
+      "media_type": 1,
+      "taken_at": 1787500000,
+      "caption": { "text": "Synthetic photo caption" },
+      "user": { "username": "fixture_photo", "full_name": "Photo Fixture" },
+      "image_versions2": {
+        "candidates": [
+          { "url": "https://scontent-test.cdninstagram.com/photo.jpg", "width": 1080, "height": 1080 },
+          { "url": "https://example.com/rejected.jpg", "width": 320, "height": 320 }
+        ]
+      }
+    },
+    {
+      "pk": "1002",
+      "code": "CarouselFixture",
+      "media_type": 8,
+      "taken_at": 1787500100,
+      "caption": { "text": "Synthetic carousel caption" },
+      "user": { "username": "fixture_carousel", "full_name": "Carousel Fixture" },
+      "carousel_media": [
+        {
+          "media_type": 1,
+          "image_versions2": {
+            "candidates": [
+              { "url": "https://scontent-test.cdninstagram.com/carousel-1.jpg", "width": 1080, "height": 1350 }
+            ]
+          }
+        },
+        {
+          "media_type": 2,
+          "image_versions2": {
+            "candidates": [
+              { "url": "https://scontent-test.cdninstagram.com/carousel-2.jpg", "width": 1080, "height": 1350 }
+            ]
+          },
+          "video_versions": [
+            { "url": "https://instagram-test.fbcdn.net/carousel-2.mp4", "width": 720, "height": 900 }
+          ]
+        }
+      ]
+    },
+    {
+      "pk": "1003",
+      "code": "VideoFixture",
+      "media_type": 2,
+      "product_type": "feed",
+      "taken_at": 1787500200,
+      "caption": { "text": "Synthetic video caption" },
+      "user": { "username": "fixture_video", "full_name": "Video Fixture" },
+      "image_versions2": {
+        "candidates": [
+          { "url": "https://scontent-test.cdninstagram.com/video-preview.jpg", "width": 1080, "height": 1080 }
+        ]
+      },
+      "video_versions": [
+        { "url": "https://instagram-test.fbcdn.net/video.mp4", "width": 720, "height": 720 }
+      ]
+    },
+    {
+      "pk": "1004",
+      "code": "ReelFixture",
+      "media_type": 2,
+      "product_type": "clips",
+      "taken_at": 1787500300,
+      "caption": { "text": "Synthetic reel caption" },
+      "user": { "username": "fixture_reel", "full_name": "Reel Fixture" },
+      "image_versions2": {
+        "candidates": [
+          { "url": "https://scontent-test.cdninstagram.com/reel-preview.jpg", "width": 1080, "height": 1920 }
+        ]
+      },
+      "video_versions": [
+        { "url": "https://instagram-test.fbcdn.net/reel.mp4", "width": 720, "height": 1280 }
+      ]
+    }
+  ],
+  "more_available": false
+}

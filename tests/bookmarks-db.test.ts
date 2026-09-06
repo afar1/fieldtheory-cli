@@ -118,6 +118,73 @@ test('searchBookmarks: full-text search returns matching results', async () => {
   });
 });
 
+test('buildIndex keeps X and Instagram ids distinct and exposes source metadata', async () => {
+  await withIsolatedDataDir(async () => {
+    const instagram = [
+      {
+        id: '1',
+        tweetId: '1',
+        source: 'instagram',
+        contentType: 'reel',
+        url: 'https://www.instagram.com/reel/CollisionFixture/',
+        canonicalUrl: 'https://www.instagram.com/reel/CollisionFixture/',
+        text: 'Instagram collision fixture',
+        authorHandle: 'ig_fixture',
+        authorName: 'Instagram Fixture',
+        postedAt: '2026-04-01T00:00:00Z',
+        syncedAt: '2026-04-02T00:00:00Z',
+        untrustedFields: ['text', 'authorHandle', 'authorName'],
+        ingestedVia: 'instagram-web',
+      },
+      {
+        id: 'ig-only',
+        tweetId: 'ig-only',
+        source: 'instagram',
+        contentType: 'photo',
+        url: 'https://www.instagram.com/p/SearchFixture/',
+        text: 'A searchable Instagram archive item',
+        authorHandle: 'ig_search',
+        syncedAt: '2026-04-03T00:00:00Z',
+      },
+    ];
+    await writeFile(
+      path.join(process.env.FT_DATA_DIR!, 'instagram-saved.jsonl'),
+      instagram.map((record) => JSON.stringify(record)).join('\n') + '\n',
+    );
+
+    const built = await buildIndex({ reportSource: 'all' });
+    assert.equal(built.recordCount, 5);
+    const xReport = await buildIndex();
+    assert.equal(xReport.recordCount, 3, 'X sync/index reporting remains scoped to X');
+    assert.equal(xReport.newRecords, 0);
+
+    const xCollision = await getBookmarkById('1');
+    const instagramCollision = await getBookmarkById('instagram:1');
+    assert.equal(xCollision?.source, 'x');
+    assert.equal(Object.hasOwn(xCollision ?? {}, 'nativeId'), false, 'X structured output gains only source');
+    assert.equal(Object.hasOwn(xCollision ?? {}, 'canonicalUrl'), false, 'X structured output keeps its prior URL shape');
+    assert.equal(instagramCollision?.source, 'instagram');
+    assert.equal(instagramCollision?.contentType, 'reel');
+    assert.equal(instagramCollision?.canonicalUrl, 'https://www.instagram.com/reel/CollisionFixture/');
+    assert.deepEqual(instagramCollision?.untrustedFields, ['text', 'authorHandle', 'authorName']);
+
+    const results = await searchBookmarks({ query: 'searchable Instagram', limit: 10 });
+    assert.equal(results.length, 1);
+    assert.equal(results[0]?.id, 'instagram:ig-only');
+    assert.equal(results[0]?.source, 'instagram');
+    assert.equal(results[0]?.canonicalUrl, 'https://www.instagram.com/p/SearchFixture/');
+
+    const listed = await listBookmarks({ source: 'all', author: 'ig_fixture', limit: 10 });
+    assert.equal(listed[0]?.id, 'instagram:1');
+    assert.equal(listed[0]?.source, 'instagram');
+
+    const legacyList = await listBookmarks({ limit: 10 });
+    assert.equal(legacyList.some((item) => item.source === 'instagram'), false, 'non-query callers remain X-only');
+    assert.equal((await getStats()).totalBookmarks, 3, 'legacy stats remain X-only');
+    assert.equal((await getClassificationProgress()).total, 3, 'classification scope remains X-only');
+  });
+});
+
 test('searchBookmarks: author filter works', async () => {
   await withIsolatedDataDir(async () => {
     await buildIndex();

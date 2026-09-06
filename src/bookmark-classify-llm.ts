@@ -6,7 +6,8 @@
  * No API keys needed. No local models. Just a logged-in Claude or Codex CLI.
  */
 
-import { openDb, saveDb } from './db.js';
+import { saveDb } from './db.js';
+import { openBookmarksDb } from './bookmarks-db.js';
 import { twitterBookmarksIndexPath } from './paths.js';
 import type { ResolvedEngine } from './engine.js';
 import { invokeEngine } from './engine.js';
@@ -175,13 +176,13 @@ export async function classifyWithLlm(
   const { engine } = options;
 
   const dbPath = twitterBookmarksIndexPath();
-  const db = await openDb(dbPath);
+  const db = await openBookmarksDb();
 
   try {
     // Fetch unclassified bookmarks
     const rows = db.exec(
       `SELECT id, text, author_handle, links_json FROM bookmarks
-       WHERE primary_category = 'unclassified' OR primary_category IS NULL
+       WHERE source = 'x' AND (primary_category = 'unclassified' OR primary_category IS NULL)
        ORDER BY RANDOM()`
     );
 
@@ -288,7 +289,7 @@ export async function classifyDomainsWithLlm(
   const { engine } = options;
 
   const dbPath = twitterBookmarksIndexPath();
-  const db = await openDb(dbPath);
+  const db = await openBookmarksDb();
 
   // Ensure domain columns exist (migration from schema v2)
   try { db.run('ALTER TABLE bookmarks ADD COLUMN domains TEXT'); } catch { /* already exists */ }
@@ -296,8 +297,8 @@ export async function classifyDomainsWithLlm(
 
   try {
     const where = options.all
-      ? '1=1'
-      : 'primary_domain IS NULL';
+      ? "source = 'x'"
+      : "source = 'x' AND primary_domain IS NULL";
     const rows = db.exec(
       `SELECT id, text, author_handle, categories FROM bookmarks
        WHERE ${where} ORDER BY RANDOM()`

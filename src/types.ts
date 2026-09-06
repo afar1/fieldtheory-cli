@@ -55,6 +55,13 @@ export interface QuotedTweetSnapshot {
 export interface BookmarkRecord {
   id: string;
   tweetId: string;
+  /** Provider is optional on legacy X cache rows and normalized at index load. */
+  source?: 'x' | 'instagram';
+  nativeId?: string;
+  contentType?: 'photo' | 'carousel' | 'video' | 'reel';
+  canonicalUrl?: string;
+  /** Fields copied from third-party content and never interpreted as instructions. */
+  untrustedFields?: Array<'text' | 'authorHandle' | 'authorName'>;
   authorHandle?: string;
   authorName?: string;
   authorProfileImageUrl?: string;
@@ -83,7 +90,7 @@ export interface BookmarkRecord {
   mediaObjects?: BookmarkMediaObject[];
   links?: string[];
   tags?: string[];
-  ingestedVia?: 'api' | 'browser' | 'graphql';
+  ingestedVia?: 'api' | 'browser' | 'graphql' | 'instagram-web';
   /** Parallel arrays of folder IDs and display names this bookmark is in on X. */
   folderIds?: string[];
   folderNames?: string[];
