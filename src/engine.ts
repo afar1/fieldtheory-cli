@@ -1,7 +1,7 @@
 /**
  * LLM engine detection, selection, and invocation.
  *
- * Knows how to call `claude` and `codex` out of the box.
+ * Knows how to call `claude`, `codex`, and `opencode` out of the box.
  * Remembers the user's choice in the bookmark data directory's .preferences file.
  */
 
@@ -40,10 +40,21 @@ const KNOWN_ENGINES: Record<string, EngineConfig> = {
       p,
     ],
   },
+  opencode: {
+    bin: 'opencode',
+    // `opencode run` takes models as provider/model and effort as a variant.
+    args: (p, engine) => [
+      'run',
+      ...(engine?.model ? ['--model', engine.model] : []),
+      ...(engine?.effort ? ['--variant', engine.effort] : []),
+      '--',
+      p,
+    ],
+  },
 };
 
 /** Order used when auto-detecting. */
-const PREFERENCE_ORDER = ['claude', 'codex'];
+const PREFERENCE_ORDER = ['claude', 'codex', 'opencode'];
 
 // ── Detection ──────────────────────────────────────────────────────────
 
@@ -91,13 +102,13 @@ async function askYesNo(question: string): Promise<boolean> {
   const result = await promptText(question);
   if (result.kind === 'interrupt') {
     throw new PromptCancelledError(
-      'Cancelled — no engine selected. Pick one with `ft model <engine>`, or pass `--engine claude` / `--engine codex`.',
+      'Cancelled — no engine selected. Pick one with `ft model <engine>`, or pass `--engine claude` / `--engine codex` / `--engine opencode`.',
       130,
     );
   }
   if (result.kind === 'close') {
     throw new PromptCancelledError(
-      'No engine selected. Pick one with `ft model <engine>`, or pass `--engine claude` / `--engine codex`.',
+      'No engine selected. Pick one with `ft model <engine>`, or pass `--engine claude` / `--engine codex` / `--engine opencode`.',
       0,
     );
   }
@@ -196,7 +207,8 @@ export async function resolveEngine(profile: EngineRunProfile = {}): Promise<Res
       'No supported LLM CLI found.\n' +
       'Install one of the following and log in:\n' +
       '  - Claude Code: https://docs.anthropic.com/en/docs/claude-code\n' +
-      '  - Codex CLI:   https://github.com/openai/codex'
+      '  - Codex CLI:   https://github.com/openai/codex\n' +
+      '  - opencode:    https://opencode.ai'
     );
   }
 

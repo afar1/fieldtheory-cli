@@ -722,7 +722,7 @@ function printIdeasRunReport(summary: import('./ideas.js').IdeasRunSummary): voi
 
 /** Per-invocation LLM engine override (bypasses saved default, fails fast). */
 export function engineOption(): Option {
-  return new Option('--engine <name>', 'Override the LLM engine for this run (e.g. claude, codex)');
+  return new Option('--engine <name>', 'Override the LLM engine for this run (claude, codex, or opencode)');
 }
 
 /** Wrap an async action with graceful error handling. */
@@ -1344,8 +1344,10 @@ export function buildCli() {
 
   program
     .command('classify')
-    .description('Classify bookmarks by category and domain using LLM (requires claude or codex CLI)')
+    .description('Classify bookmarks by category and domain using LLM (requires claude, codex, or opencode CLI)')
     .option('--regex', 'Use simple regex classification instead of LLM')
+    .option('--timeout <ms>', 'LLM request timeout per batch in ms (default 120000)', parsePositiveInteger)
+    .option('--concurrency <n>', 'Batches sent to the LLM at once (default 3)', parsePositiveInteger)
     .addOption(engineOption())
     .action(safe(async (options) => {
       if (!requireData()) return;
@@ -1361,6 +1363,8 @@ export function buildCli() {
         process.stderr.write('Classifying categories with LLM (batches of 50, ~2 min per batch)...\n');
         const catResult = await classifyWithLlm({
           engine,
+          timeout: options.timeout,
+          concurrency: options.concurrency,
           onBatch: (done: number, total: number) => {
             const pct = total > 0 ? Math.round((done / total) * 100) : 0;
             const elapsed = Math.round((Date.now() - catStart) / 1000);
@@ -1374,6 +1378,8 @@ export function buildCli() {
         process.stderr.write('\nClassifying domains with LLM (batches of 50, ~2 min per batch)...\n');
         const domResult = await classifyDomainsWithLlm({
           engine,
+          timeout: options.timeout,
+          concurrency: options.concurrency,
           all: false,
           onBatch: (done: number, total: number) => {
             const pct = total > 0 ? Math.round((done / total) * 100) : 0;
@@ -1414,7 +1420,7 @@ export function buildCli() {
   program
     .command('model')
     .description('View or change the default LLM engine for classification')
-    .argument('[engine]', 'Set default engine directly (e.g. claude, codex)')
+    .argument('[engine]', 'Set default engine directly (claude, codex, or opencode)')
     .action(safe(async (engineArg?: string) => {
       const available = detectAvailableEngines();
       const prefs = loadPreferences();
@@ -1424,6 +1430,7 @@ export function buildCli() {
         console.log('  Install one of:');
         console.log('    - Claude Code: https://docs.anthropic.com/en/docs/claude-code');
         console.log('    - Codex CLI:   https://github.com/openai/codex');
+        console.log('    - opencode:    https://opencode.ai');
         return;
       }
 
@@ -2094,7 +2101,7 @@ export function buildCli() {
 
   program
     .command('wiki')
-    .description('Compile Karpathy-style markdown wiki from bookmarks (requires claude or codex CLI on PATH)')
+    .description('Compile Karpathy-style markdown wiki from bookmarks (requires claude, codex, or opencode CLI on PATH)')
     .option('--full', 'Recompile all pages (ignore incremental cache)')
     .option('--clean', 'Strip leftover LLM code fences from existing wiki pages (no compile)')
     .addOption(engineOption())
@@ -2306,7 +2313,7 @@ export function buildCli() {
     .option('--repos <path...>', 'Multiple repo paths; produces one consideration per repo plus a batch summary')
     .option('--frame <id>', 'Frame id (overrides any frame pinned on the seed)')
     .option('--depth <depth>', 'Depth: quick | standard | deep (default: standard, or quick under --defaults)')
-    .option('--engine <name>', 'LLM CLI engine for this run (claude | codex; default comes from ft model/autodetect)')
+    .option('--engine <name>', 'LLM CLI engine for this run (claude | codex | opencode; default comes from ft model/autodetect)')
     .option('--model <name>', 'Model alias/name passed to the engine (for example opus or gpt-5.5)')
     .option('--effort <level>', 'Reasoning effort passed to the engine (low | medium | high | xhigh | max)')
     .option('--weight <level>', 'Alias for --effort', undefined)
@@ -2468,7 +2475,7 @@ export function buildCli() {
     .option('--repos <path...>', 'Multiple repo paths')
     .option('--frame <id>', 'Frame id (defaults to seed-pinned frame or leverage-specificity)')
     .option('--depth <depth>', 'Depth: quick | standard | deep', 'quick')
-    .option('--engine <name>', 'LLM CLI engine for this run (claude | codex)')
+    .option('--engine <name>', 'LLM CLI engine for this run (claude | codex | opencode)')
     .option('--model <name>', 'Model alias/name passed to the engine')
     .option('--effort <level>', 'Reasoning effort passed to the engine')
     .option('--weight <level>', 'Alias for --effort', undefined)

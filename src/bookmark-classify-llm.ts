@@ -1,17 +1,18 @@
 /**
- * LLM-based bookmark classification — uses `claude -p` or `codex exec`
- * (whichever the user has via their Max/Pro subscription) to classify
+ * LLM-based bookmark classification — uses `claude -p`, `codex exec`, or
+ * `opencode run` (whichever the user has installed and logged in) to classify
  * bookmarks that the regex classifier couldn't categorize.
  *
- * No API keys needed. No local models. Just a logged-in Claude or Codex CLI.
+ * No API keys needed. No local models. Just a logged-in LLM CLI.
  */
 
 import { openDb, saveDb } from './db.js';
 import { twitterBookmarksIndexPath } from './paths.js';
 import type { ResolvedEngine } from './engine.js';
-import { invokeEngine } from './engine.js';
+import { invokeEngineAsync } from './engine.js';
 
 const BATCH_SIZE = 50;
+export const DEFAULT_CLASSIFY_CONCURRENCY = 3;
 
 interface UnclassifiedBookmark {
   id: string;
@@ -159,7 +160,7 @@ function parseResponse(raw: string, batchIds: Set<string>): LlmClassification[] 
   return results;
 }
 
-// ── Main classification pipeline ────────────────────────────────────────
+// ── Batch runner ────────────────────────────────────────────────────────
 
 export interface LlmClassifyResult {
   engine: string;
@@ -169,75 +170,118 @@ export interface LlmClassifyResult {
   batches: number;
 }
 
-export async function classifyWithLlm(
-  options: { engine: ResolvedEngine; onBatch?: (done: number, total: number) => void },
-): Promise<LlmClassifyResult> {
-  const { engine } = options;
+export interface LlmClassifyOptions {
+  engine: ResolvedEngine;
+  /** Per-batch LLM timeout in ms. */
+  timeout?: number;
+  /** How many batches run against the engine at once. */
+  concurrency?: number;
+  /** Called with the number of bookmarks processed so far. */
+  onBatch?: (done: number, total: number) => void;
+}
 
+/**
+ * Run batches against the engine with bounded concurrency.
+ *
+ * Results are written one batch at a time into a freshly opened copy of the
+ * index, so a long run never overwrites changes made by another process in
+ * the meantime (for example a bookmark deleted from `ft web`).
+ */
+async function runBatches<T extends { id: string }>(
+  items: T[],
+  options: LlmClassifyOptions & { buildPrompt: (batch: T[]) => string; updateSql: string },
+): Promise<LlmClassifyResult> {
+  const { engine, timeout } = options;
+  const dbPath = twitterBookmarksIndexPath();
+
+  const batches: T[][] = [];
+  for (let i = 0; i < items.length; i += BATCH_SIZE) {
+    batches.push(items.slice(i, i + BATCH_SIZE));
+  }
+  const concurrency = Math.max(1, Math.min(options.concurrency ?? DEFAULT_CLASSIFY_CONCURRENCY, batches.length));
+
+  let writeChain: Promise<void> = Promise.resolve();
+  const writeResults = (results: LlmClassification[]): Promise<void> => {
+    const write = writeChain.then(async () => {
+      const db = await openDb(dbPath);
+      try {
+        const stmt = db.prepare(options.updateSql);
+        for (const r of results) {
+          stmt.run([r.categories.join(','), r.primary, r.id]);
+        }
+        stmt.free();
+        saveDb(db, dbPath);
+      } finally {
+        db.close();
+      }
+    });
+    writeChain = write.catch(() => { /* surfaced to the batch that wrote */ });
+    return write;
+  };
+
+  let classified = 0;
+  let failed = 0;
+  let done = 0;
+  let nextBatch = 0;
+
+  options.onBatch?.(0, items.length);
+
+  const worker = async (): Promise<void> => {
+    while (nextBatch < batches.length) {
+      const batchNumber = nextBatch + 1;
+      const batch = batches[nextBatch++];
+      try {
+        const raw = await invokeEngineAsync(engine, options.buildPrompt(batch), { timeout });
+        const results = parseResponse(raw, new Set(batch.map((b) => b.id)));
+        await writeResults(results);
+        classified += results.length;
+        failed += batch.length - results.length;
+      } catch (err) {
+        failed += batch.length;
+        process.stderr.write(`  Batch ${batchNumber} failed: ${(err as Error).message}\n`);
+      }
+      done += batch.length;
+      options.onBatch?.(done, items.length);
+    }
+  };
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+  return { engine: engine.name, totalUnclassified: items.length, classified, failed, batches: batches.length };
+}
+
+// ── Category classification ─────────────────────────────────────────────
+
+export async function classifyWithLlm(options: LlmClassifyOptions): Promise<LlmClassifyResult> {
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
 
+  let unclassified: UnclassifiedBookmark[];
   try {
-    // Fetch unclassified bookmarks
     const rows = db.exec(
       `SELECT id, text, author_handle, links_json FROM bookmarks
        WHERE primary_category = 'unclassified' OR primary_category IS NULL
        ORDER BY RANDOM()`
     );
-
-    if (!rows.length || !rows[0].values.length) {
-      return { engine: engine.name, totalUnclassified: 0, classified: 0, failed: 0, batches: 0 };
-    }
-
-    const unclassified: UnclassifiedBookmark[] = rows[0].values.map(r => ({
+    unclassified = (rows[0]?.values ?? []).map(r => ({
       id: r[0] as string,
       text: r[1] as string,
       authorHandle: r[2] as string | null,
       links: r[3] as string | null,
     }));
-
-    const totalUnclassified = unclassified.length;
-    let classified = 0;
-    let failed = 0;
-    let batchCount = 0;
-
-    // Process in batches
-    for (let i = 0; i < unclassified.length; i += BATCH_SIZE) {
-      const batch = unclassified.slice(i, i + BATCH_SIZE);
-      const batchIds = new Set(batch.map(b => b.id));
-      batchCount++;
-
-      options.onBatch?.(i, totalUnclassified);
-
-      try {
-        const prompt = buildPrompt(batch);
-        const raw = invokeEngine(engine, prompt);
-        const results = parseResponse(raw, batchIds);
-
-        // Update SQLite
-        const stmt = db.prepare(
-          `UPDATE bookmarks SET categories = ?, primary_category = ? WHERE id = ?`
-        );
-        for (const r of results) {
-          stmt.run([r.categories.join(','), r.primary, r.id]);
-        }
-        stmt.free();
-
-        classified += results.length;
-        failed += batch.length - results.length;
-
-        // Save after each batch in case of interruption
-        saveDb(db, dbPath);
-      } catch (err) {
-        failed += batch.length;
-        process.stderr.write(`  Batch ${batchCount} failed: ${(err as Error).message}\n`);
-      }
-    }
-
-    return { engine: engine.name, totalUnclassified, classified, failed, batches: batchCount };
   } finally {
     db.close();
   }
+
+  if (unclassified.length === 0) {
+    return { engine: options.engine.name, totalUnclassified: 0, classified: 0, failed: 0, batches: 0 };
+  }
+
+  return runBatches(unclassified, {
+    ...options,
+    buildPrompt,
+    updateSql: `UPDATE bookmarks SET categories = ?, primary_category = ? WHERE id = ?`,
+  });
 }
 
 // ── Domain classification ───────────────────────────────────────────────
@@ -283,18 +327,19 @@ ${items}`;
 }
 
 export async function classifyDomainsWithLlm(
-  options: { engine: ResolvedEngine; all?: boolean; onBatch?: (done: number, total: number) => void },
+  options: LlmClassifyOptions & { all?: boolean },
 ): Promise<LlmClassifyResult> {
-  const { engine } = options;
-
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
 
-  // Ensure domain columns exist (migration from schema v2)
-  try { db.run('ALTER TABLE bookmarks ADD COLUMN domains TEXT'); } catch { /* already exists */ }
-  try { db.run('ALTER TABLE bookmarks ADD COLUMN primary_domain TEXT'); } catch { /* already exists */ }
-
+  let bookmarks: DomainBookmark[];
   try {
+    // Ensure domain columns exist (migration from schema v2)
+    let migrated = false;
+    try { db.run('ALTER TABLE bookmarks ADD COLUMN domains TEXT'); migrated = true; } catch { /* already exists */ }
+    try { db.run('ALTER TABLE bookmarks ADD COLUMN primary_domain TEXT'); migrated = true; } catch { /* already exists */ }
+    if (migrated) saveDb(db, dbPath);
+
     const where = options.all
       ? '1=1'
       : 'primary_domain IS NULL';
@@ -302,55 +347,24 @@ export async function classifyDomainsWithLlm(
       `SELECT id, text, author_handle, categories FROM bookmarks
        WHERE ${where} ORDER BY RANDOM()`
     );
-
-    if (!rows.length || !rows[0].values.length) {
-      return { engine: engine.name, totalUnclassified: 0, classified: 0, failed: 0, batches: 0 };
-    }
-
-    const bookmarks: DomainBookmark[] = rows[0].values.map(r => ({
+    bookmarks = (rows[0]?.values ?? []).map(r => ({
       id: r[0] as string,
       text: r[1] as string,
       authorHandle: r[2] as string | null,
       categories: r[3] as string | null,
     }));
-
-    const total = bookmarks.length;
-    let classified = 0;
-    let failed = 0;
-    let batchCount = 0;
-
-    for (let i = 0; i < bookmarks.length; i += BATCH_SIZE) {
-      const batch = bookmarks.slice(i, i + BATCH_SIZE);
-      const batchIds = new Set(batch.map(b => b.id));
-      batchCount++;
-
-      options.onBatch?.(i, total);
-
-      try {
-        const prompt = buildDomainPrompt(batch);
-        const raw = invokeEngine(engine, prompt);
-        // Reuse the same parse logic — structure is identical
-        const results = parseResponse(raw, batchIds);
-
-        const stmt = db.prepare(
-          `UPDATE bookmarks SET domains = ?, primary_domain = ? WHERE id = ?`
-        );
-        for (const r of results) {
-          stmt.run([r.categories.join(','), r.primary, r.id]);
-        }
-        stmt.free();
-
-        classified += results.length;
-        failed += batch.length - results.length;
-        saveDb(db, dbPath);
-      } catch (err) {
-        failed += batch.length;
-        process.stderr.write(`  Batch ${batchCount} failed: ${(err as Error).message}\n`);
-      }
-    }
-
-    return { engine: engine.name, totalUnclassified: total, classified, failed, batches: batchCount };
   } finally {
     db.close();
   }
+
+  if (bookmarks.length === 0) {
+    return { engine: options.engine.name, totalUnclassified: 0, classified: 0, failed: 0, batches: 0 };
+  }
+
+  return runBatches(bookmarks, {
+    ...options,
+    buildPrompt: buildDomainPrompt,
+    // Reuse the same parse logic — structure is identical
+    updateSql: `UPDATE bookmarks SET domains = ?, primary_domain = ? WHERE id = ?`,
+  });
 }

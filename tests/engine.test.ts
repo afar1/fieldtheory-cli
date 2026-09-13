@@ -74,7 +74,7 @@ test('detectAvailableEngines: returns array of available engines', async () => {
 
   // Each entry should be a known engine name
   for (const name of available) {
-    assert.ok(['claude', 'codex'].includes(name), `unexpected engine: ${name}`);
+    assert.ok(['claude', 'codex', 'opencode'].includes(name), `unexpected engine: ${name}`);
   }
 });
 
@@ -278,6 +278,33 @@ test('resolveEngine: codex args include skip-git-repo-check', async () => {
     assert.deepEqual(
       resolved.config.args('hello'),
       ['exec', '--skip-git-repo-check', 'hello'],
+    );
+  } finally {
+    process.env.PATH = origPath;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('resolveEngine: opencode args pass model and effort as --model/--variant', async () => {
+  if (process.platform === 'win32') return;
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-opencode-args-'));
+  const fakeBin = path.join(tmpDir, 'opencode');
+  const origPath = process.env.PATH;
+  process.env.PATH = tmpDir;
+
+  try {
+    fs.writeFileSync(fakeBin, '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(fakeBin, 0o755);
+
+    const { resolveEngine } = await import('../src/engine.js');
+    const plain = await resolveEngine({ override: 'opencode' });
+    assert.deepEqual(plain.config.args('-starts-with-dash', plain), ['run', '--', '-starts-with-dash']);
+
+    const tuned = await resolveEngine({ override: 'opencode', model: 'anthropic/claude-sonnet-5', effort: 'high' });
+    assert.deepEqual(
+      tuned.config.args('hello', tuned),
+      ['run', '--model', 'anthropic/claude-sonnet-5', '--variant', 'high', '--', 'hello'],
     );
   } finally {
     process.env.PATH = origPath;

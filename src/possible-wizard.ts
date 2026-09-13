@@ -302,7 +302,7 @@ export async function stepPickNodeTarget(
 // ── Step 6: pick model profile ─────────────────────────────────────────────
 
 const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
-const ENGINE_NAMES = new Set(['claude', 'codex']);
+const ENGINE_NAMES = new Set(['claude', 'codex', 'opencode']);
 
 export function parseModelProfileAnswer(answer: string): Pick<WizardPlan, 'engine' | 'model' | 'effort'> | null {
   const parts = answer.trim().split(/\s+/).filter(Boolean);
