@@ -3,21 +3,29 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, readdir, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildIndex, updateArticleContent } from '../src/bookmarks-db.js';
-import { exportBookmarks } from '../src/md-export.js';
+import { buildIndex, updateArticleContent, getBookmarksByIds } from '../src/bookmarks-db.js';
+import { openDb, saveDb } from '../src/db.js';
+import { twitterBookmarksIndexPath } from '../src/paths.js';
+import { exportBookmarks, removeExportedBookmarks } from '../src/md-export.js';
 
 async function withIsolatedDataDir(fn: (dir: string) => Promise<void>, fixtures: any[]): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), 'ft-md-export-'));
   const jsonl = fixtures.map((r) => JSON.stringify(r)).join('\n') + '\n';
   await writeFile(path.join(dir, 'bookmarks.jsonl'), jsonl);
 
+  // FT_LIBRARY_DIR beats FT_DATA_DIR in libraryDir(); clear it so exports (and
+  // the prune tests' deletions) land in the temp dir, never a real library.
   const saved = process.env.FT_DATA_DIR;
+  const savedLibrary = process.env.FT_LIBRARY_DIR;
   process.env.FT_DATA_DIR = dir;
+  delete process.env.FT_LIBRARY_DIR;
   try {
     await fn(dir);
   } finally {
     if (saved !== undefined) process.env.FT_DATA_DIR = saved;
     else delete process.env.FT_DATA_DIR;
+    if (savedLibrary !== undefined) process.env.FT_LIBRARY_DIR = savedLibrary;
+    else delete process.env.FT_LIBRARY_DIR;
   }
 }
 
@@ -165,4 +173,73 @@ test('exportBookmarks: changed mode rewrites only stale enriched markdown', asyn
     assert.match(content, /## Article/);
     assert.match(content, /The article body was added after the first markdown export/);
   }, fixtures);
+});
+
+// ── removeExportedBookmarks ─────────────────────────────────────────────────
+
+function prunableFixtures() {
+  return ['111', '222'].map((id, i) => ({
+    id,
+    tweetId: id,
+    url: `https://x.com/alice/status/${id}`,
+    text: i === 0 ? 'First exported bookmark' : 'Second exported bookmark',
+    authorHandle: 'alice',
+    syncedAt: '2026-04-18T00:00:00.000Z',
+    postedAt: '2026-04-04T12:00:00.000Z',
+    mediaObjects: [],
+    links: [],
+    tags: [],
+    ingestedVia: 'graphql',
+  }));
+}
+
+test('removeExportedBookmarks: removes the exact-named file and leaves others', async () => {
+  await withIsolatedDataDir(async (dir) => {
+    await buildIndex();
+    await exportBookmarks({ force: true, onProgress: () => {} });
+    const bookmarksDir = path.join(dir, 'md', 'bookmarks');
+    assert.equal((await readdir(bookmarksDir)).length, 2);
+
+    const removed = await removeExportedBookmarks(await getBookmarksByIds(['111']));
+
+    assert.equal(removed, 1);
+    assert.deepEqual(await readdir(bookmarksDir), ['2026-04-04-alice-second-exported-bookmark.md']);
+  }, prunableFixtures());
+});
+
+test('removeExportedBookmarks: finds a file whose slug drifted via the tweet_id frontmatter', async () => {
+  await withIsolatedDataDir(async (dir) => {
+    await buildIndex();
+    await exportBookmarks({ force: true, onProgress: () => {} });
+
+    // Simulate `ft sync --gaps` rewriting the text after the file was exported:
+    // the computed filename no longer matches the one on disk.
+    const dbPath = twitterBookmarksIndexPath();
+    const db = await openDb(dbPath);
+    try {
+      db.run('UPDATE bookmarks SET text = ? WHERE id = ?', ['Completely different expanded text', '111']);
+      saveDb(db, dbPath);
+    } finally {
+      db.close();
+    }
+
+    const removed = await removeExportedBookmarks(await getBookmarksByIds(['111']));
+
+    assert.equal(removed, 1);
+    const files = await readdir(path.join(dir, 'md', 'bookmarks'));
+    assert.deepEqual(files, ['2026-04-04-alice-second-exported-bookmark.md']);
+  }, prunableFixtures());
+});
+
+test('removeExportedBookmarks: a missing file (or missing export dir) is a no-op', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    // Nothing exported yet: the bookmarks dir does not exist.
+    assert.equal(await removeExportedBookmarks(await getBookmarksByIds(['111', '222'])), 0);
+
+    await exportBookmarks({ force: true, onProgress: () => {} });
+    assert.equal(await removeExportedBookmarks(await getBookmarksByIds(['111'])), 1);
+    // Second call: already gone.
+    assert.equal(await removeExportedBookmarks(await getBookmarksByIds(['111'])), 0);
+  }, prunableFixtures());
 });

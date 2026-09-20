@@ -1,8 +1,10 @@
 import type { Database } from 'sql.js';
 import { openDb, saveDb } from './db.js';
 import { parseTimestampMs, toIsoDate } from './date-utils.js';
-import { readJsonLines } from './fs.js';
-import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js';
+import { unlink } from 'node:fs/promises';
+import { readJsonLines, writeJsonLines, readJson, writeJson, pathExists } from './fs.js';
+import { twitterBookmarksCachePath, twitterBookmarksIndexPath, bookmarkMediaManifestPath } from './paths.js';
+import type { MediaFetchManifest } from './bookmark-media.js';
 import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
@@ -823,6 +825,153 @@ export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem 
   } finally {
     db.close();
   }
+}
+
+const ID_CHUNK_SIZE = 500;
+
+function chunkIds(ids: string[]): string[][] {
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += ID_CHUNK_SIZE) chunks.push(ids.slice(i, i + ID_CHUNK_SIZE));
+  return chunks;
+}
+
+function placeholders(count: number): string {
+  return Array(count).fill('?').join(',');
+}
+
+/**
+ * Batch form of deleteBookmark. Opens and saves the WASM DB once, rewrites the
+ * JSONL cache once, and updates the media manifest once — deleteBookmark does
+ * all three per call, which is O(N x dbsize) for a prune.
+ *
+ * Ids missing from the index are still removed from the JSONL cache, so a
+ * stale index cannot leave a record behind. Returns the ids actually removed.
+ */
+export async function deleteBookmarks(ids: string[]): Promise<{ deleted: string[] }> {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return { deleted: [] };
+  const idSet = new Set(unique);
+  const removed = new Set<string>();
+
+  const dbPath = twitterBookmarksIndexPath();
+  const cachePath = twitterBookmarksCachePath();
+
+  const db = await openDb(dbPath);
+  try {
+    ensureMigrations(db);
+    const hasTable = (db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'")[0]?.values.length ?? 0) > 0;
+    for (const chunk of hasTable ? chunkIds(unique) : []) {
+      const marks = placeholders(chunk.length);
+      const present = db.exec(`SELECT id FROM bookmarks WHERE id IN (${marks})`, chunk);
+      for (const row of present[0]?.values ?? []) removed.add(row[0] as string);
+      // External-content FTS table with no triggers: drop index entries (with
+      // their indexed values) before the rows go away.
+      db.run(
+        `INSERT INTO bookmarks_fts(bookmarks_fts, rowid, text, author_handle, author_name, article_text)
+         SELECT 'delete', rowid, text, author_handle, author_name, article_text FROM bookmarks WHERE id IN (${marks})`,
+        chunk,
+      );
+      db.run(`DELETE FROM bookmarks WHERE id IN (${marks})`, chunk);
+    }
+    saveDb(db, dbPath);
+  } finally {
+    db.close();
+  }
+
+  const records = await readJsonLines<{ id: string }>(cachePath);
+  const kept = records.filter((r) => !idSet.has(r.id));
+  if (kept.length !== records.length) {
+    for (const r of records) if (idSet.has(r.id)) removed.add(r.id);
+    await writeJsonLines(cachePath, kept);
+  }
+
+  const manifestPath = bookmarkMediaManifestPath();
+  if (await pathExists(manifestPath)) {
+    const manifest = await readJson<MediaFetchManifest>(manifestPath);
+    const toRemove = manifest.entries.filter((e) => idSet.has(e.bookmarkId));
+    if (toRemove.length > 0) {
+      for (const entry of toRemove) {
+        if (entry.localPath) {
+          await unlink(entry.localPath).catch(() => { /* already gone */ });
+        }
+      }
+      manifest.entries = manifest.entries.filter((e) => !idSet.has(e.bookmarkId));
+      await writeJson(manifestPath, manifest);
+    }
+  }
+
+  return { deleted: [...removed] };
+}
+
+/** Look up several bookmarks in one pass over the index. Missing ids are skipped. */
+export async function getBookmarksByIds(ids: string[]): Promise<BookmarkTimelineItem[]> {
+  const wanted = new Set(ids);
+  if (wanted.size === 0) return [];
+  const found = new Map<string, BookmarkTimelineItem>();
+  const batchSize = 500;
+  for (let offset = 0; found.size < wanted.size; offset += batchSize) {
+    const batch = await listBookmarks({ limit: batchSize, offset, sort: 'desc' });
+    if (batch.length === 0) break;
+    for (const item of batch) if (wanted.has(item.id)) found.set(item.id, item);
+  }
+  return ids.flatMap((id) => found.get(id) ?? []);
+}
+
+/**
+ * Records for the given ids as they stand before a destructive prune: the JSONL
+ * record joined with its SQLite row. Classification (categories, domains) lives
+ * only in SQLite — it costs LLM spend to regenerate and is not in the JSONL —
+ * so an archive built from the JSONL alone would lose it.
+ */
+export async function exportRecordsForArchive(ids: string[]): Promise<Array<Record<string, unknown>>> {
+  const idSet = new Set(ids);
+  if (idSet.size === 0) return [];
+
+  const records = (await readJsonLines<BookmarkRecord>(twitterBookmarksCachePath()))
+    .filter((r) => idSet.has(r.id));
+
+  const dbRows = new Map<string, Record<string, unknown>>();
+  const db = await openDb(twitterBookmarksIndexPath());
+  try {
+    ensureMigrations(db);
+    for (const chunk of chunkIds([...idSet])) {
+      const result = db.exec(
+        `SELECT id, categories, primary_category, domains, primary_domain, github_urls,
+                article_title, article_text, article_site, enriched_at
+         FROM bookmarks WHERE id IN (${placeholders(chunk.length)})`,
+        chunk,
+      );
+      for (const r of result[0]?.values ?? []) {
+        dbRows.set(r[0] as string, {
+          categories: parseCsv(r[1]),
+          primaryCategory: r[2] ?? null,
+          domains: parseCsv(r[3]),
+          primaryDomain: r[4] ?? null,
+          githubUrls: parseJsonArray(r[5]),
+          articleTitle: r[6] ?? null,
+          articleText: r[7] ?? null,
+          articleSite: r[8] ?? null,
+          enrichedAt: r[9] ?? null,
+        });
+      }
+    }
+  } finally {
+    db.close();
+  }
+
+  return records.map((record) => {
+    const row = dbRows.get(record.id);
+    if (!row) return { ...record };
+    return {
+      ...record,
+      ...row,
+      // Enrichment can also live in the JSONL; never let a null DB column erase it.
+      articleTitle: row.articleTitle ?? record.articleTitle ?? null,
+      articleText: row.articleText ?? record.articleText ?? null,
+      articleSite: row.articleSite ?? record.articleSite ?? null,
+      enrichedAt: row.enrichedAt ?? record.enrichedAt ?? null,
+    };
+  });
 }
 
 export async function getStats(): Promise<{

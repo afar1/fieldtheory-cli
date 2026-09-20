@@ -4,7 +4,7 @@ import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
 import { runTwitterOAuthFlow } from './xauth.js';
 import { syncBookmarksGraphQL, syncGaps, syncBookmarkFolders } from './graphql-bookmarks.js';
-import type { SyncProgress, GapFillProgress, FolderSyncProgress } from './graphql-bookmarks.js';
+import type { SyncProgress, SyncResult, GapFillProgress, FolderSyncProgress } from './graphql-bookmarks.js';
 import type { BookmarkFolder, QuotedTweetSnapshot } from './types.js';
 import { DEFAULT_MEDIA_MAX_BYTES, fetchBookmarkMediaBatch } from './bookmark-media.js';
 import type { MediaFetchManifest, MediaFetchProgress } from './bookmark-media.js';
@@ -20,7 +20,11 @@ import {
   getFolderCounts,
   listBookmarks,
   getBookmarkById,
+  getBookmarksByIds,
+  exportRecordsForArchive,
+  deleteBookmarks,
 } from './bookmarks-db.js';
+import { writeJsonLines } from './fs.js';
 import { formatClassificationSummary } from './bookmark-classify.js';
 import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm.js';
 import { resolveEngine, detectAvailableEngines } from './engine.js';
@@ -29,7 +33,7 @@ import { compileMd } from './md.js';
 import { cleanWikiFences } from './md-fence.js';
 import { askMd } from './md-ask.js';
 import { lintMd, fixLintIssues } from './md-lint.js';
-import { exportBookmarks } from './md-export.js';
+import { exportBookmarks, removeExportedBookmarks } from './md-export.js';
 import { renderViz } from './bookmarks-viz.js';
 import { listBrowserIds } from './browsers.js';
 import { configureHttpProxyFromEnv } from './http-proxy.js';
@@ -232,6 +236,84 @@ function formatRetryAfter(seconds?: number): string | undefined {
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = seconds % 60;
   return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+}
+
+/** Default for --prune-limit: refuse a prune bigger than this percent of the library. */
+export const DEFAULT_PRUNE_LIMIT_PERCENT = 10;
+/** ...but never refuse a prune this small, so tiny libraries aren't nagged. */
+const PRUNE_GUARD_MIN = 10;
+
+function parsePruneLimit(value: string): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0 || n > 100) {
+    throw new InvalidArgumentError('must be a percentage from 0 to 100 (0 disables the guard).');
+  }
+  return n;
+}
+const PRUNE_LIST_LIMIT = 50;
+
+/**
+ * Act on the prune set computed by a complete `ft sync --rebuild` walk:
+ * list it (dry run) or archive, delete, and clean up markdown exports.
+ */
+export async function pruneUnbookmarked(
+  result: SyncResult,
+  { dryRun, limitPercent = DEFAULT_PRUNE_LIMIT_PERCENT }: { dryRun: boolean; limitPercent?: number },
+): Promise<void> {
+  if (result.pruneSkippedReason) {
+    console.log(`  ⚠ Prune skipped: ${result.pruneSkippedReason}. Nothing was deleted.`);
+    console.log('  Re-run `ft sync --rebuild --prune` once a full crawl can finish.\n');
+    return;
+  }
+  const ids = result.pruneCandidateIds ?? [];
+  if (ids.length === 0) {
+    console.log('  ✓ Nothing to prune — every local bookmark is still on X.\n');
+    return;
+  }
+
+  const items = await getBookmarksByIds(ids);
+  const byId = new Map(items.map((item) => [item.id, item]));
+
+  if (dryRun) {
+    console.log(`  ${ids.length} bookmark${ids.length === 1 ? '' : 's'} no longer on X would be removed (dry run, nothing deleted):`);
+    for (const id of ids.slice(0, PRUNE_LIST_LIMIT)) {
+      const item = byId.get(id);
+      const handle = item?.authorHandle ? `@${item.authorHandle}` : 'unknown';
+      const text = item ? sanitizeForDisplay(item.text.replace(/\s+/g, ' ').trim()).slice(0, 70) : '(not in index)';
+      console.log(`    ${id}  ${sanitizeForDisplay(handle)}  ${text}`);
+    }
+    if (ids.length > PRUNE_LIST_LIMIT) console.log(`    ...and ${ids.length - PRUNE_LIST_LIMIT} more`);
+    console.log('  Run `ft sync --rebuild --prune` to remove them.\n');
+    return;
+  }
+
+  // limitPercent 0 disables the guard.
+  const guard = Math.max(PRUNE_GUARD_MIN, Math.ceil(result.totalBookmarks * limitPercent / 100));
+  if (limitPercent > 0 && ids.length > guard) {
+    const needed = Math.ceil((ids.length / result.totalBookmarks) * 100);
+    console.error(`  ⚠ Refusing to prune ${ids.length} of ${result.totalBookmarks} bookmarks (over the ${limitPercent}% limit).`);
+    console.error('  That is more than normal use produces — something may be wrong upstream.');
+    console.error(`  Review with \`ft sync --rebuild --prune-dry-run\`, then re-run with --prune-limit ${needed} (or higher) to proceed.`);
+    console.error('  Nothing was deleted.\n');
+    process.exitCode = 1;
+    return;
+  }
+
+  // Archive first: SQLite-only fields (classification) are otherwise unrecoverable.
+  const archive = await exportRecordsForArchive(ids);
+  if (archive.length !== ids.length) {
+    throw new Error(`Prune aborted: archived ${archive.length} of ${ids.length} records. Nothing was deleted.`);
+  }
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const archivePath = path.join(dataDir(), `pruned-${timestamp}.jsonl`);
+  await writeJsonLines(archivePath, archive);
+
+  const { deleted } = await deleteBookmarks(ids);
+  const mdRemoved = await removeExportedBookmarks(items);
+
+  console.log(`  ✓ Pruned ${deleted.length} bookmark${deleted.length === 1 ? '' : 's'} no longer on X (${result.totalBookmarks - deleted.length} remain)`);
+  if (mdRemoved > 0) console.log(`  ✓ ${mdRemoved} exported markdown file${mdRemoved === 1 ? '' : 's'} removed`);
+  console.log(`  ✓ Archived to: ${archivePath}\n`);
 }
 
 function printMediaFetchSummary(result: MediaFetchManifest): void {
@@ -828,6 +910,9 @@ export function buildCli() {
     .description('Sync bookmarks from X into your local database')
     .option('--api', 'Use OAuth v2 API instead of Chrome session', false)
     .option('--rebuild', 'Full re-crawl of all bookmarks', false)
+    .option('--prune', 'With --rebuild: remove local bookmarks you have un-bookmarked on X (archived first)', false)
+    .option('--prune-dry-run', 'With --rebuild: list what --prune would remove, without deleting', false)
+    .option('--prune-limit <percent>', `Refuse to prune more than this percent of your library (default ${DEFAULT_PRUNE_LIMIT_PERCENT}; 0 disables)`, parsePruneLimit)
     .option('--continue', 'Resume a previous sync that was interrupted or hit the page limit', false)
     .option('--gaps', 'Backfill missing data (quoted tweets, truncated articles, linked article content)', false)
     .option('--yes', 'Skip confirmation prompts', false)
@@ -863,6 +948,29 @@ export function buildCli() {
           console.error('  Error: --rebuild, --continue, and --gaps cannot be used together.');
           process.exitCode = 1;
           return;
+        }
+
+        // --prune deletes whatever the crawl did not see, so it is only safe on a
+        // crawl that walks the whole list. Reject combinations that cannot.
+        const pruneDryRun = Boolean(options.pruneDryRun);
+        const pruneMode = Boolean(options.prune) || pruneDryRun;
+        if (options.pruneLimit != null && !pruneMode) {
+          console.error('  Error: --prune-limit only applies with --prune (and --rebuild).');
+          process.exitCode = 1;
+          return;
+        }
+        if (pruneMode) {
+          const flag = pruneDryRun ? '--prune-dry-run' : '--prune';
+          let problem: string | undefined;
+          if (!options.rebuild) problem = `${flag} requires --rebuild (it needs a full crawl of your bookmarks).`;
+          else if (options.api) problem = `${flag} cannot be used with --api (the OAuth path has no reliable end-of-list signal). Remove --api.`;
+          else if (options.folders || options.folder) problem = `${flag} cannot be combined with --folders/--folder. Run them separately.`;
+          else if (options.maxPages != null || options.targetAdds != null) problem = `${flag} cannot be combined with --max-pages/--target-adds (they truncate the crawl).`;
+          if (problem) {
+            console.error(`  Error: ${problem}`);
+            process.exitCode = 1;
+            return;
+          }
         }
 
         // Folder flags: --folders (all) and --folder <name> (one) are mutually exclusive.
@@ -969,9 +1077,19 @@ export function buildCli() {
           const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
           const backupDir = `${dir}-backup-${timestamp}`;
 
-          console.log(`  \u26a0 Rebuild will re-crawl all bookmarks from X.`);
-          console.log(`  Your existing data will be merged (not deleted), but`);
-          console.log(`  this is a full re-sync and may take a while.\n`);
+          if (pruneMode && !pruneDryRun) {
+            console.log(`  \u26a0 Rebuild with --prune will re-crawl all bookmarks from X, then DELETE`);
+            console.log(`  local bookmarks that X no longer lists (tweets you un-bookmarked).`);
+            console.log(`  Nothing is deleted unless the crawl reaches the end of your bookmarks.`);
+            console.log(`  Removed bookmarks are archived (with their classification) to`);
+            console.log(`  ${dir}/pruned-<timestamp>.jsonl first. Their exported markdown`);
+            console.log(`  files are deleted too \u2014 any edits you made to those are lost.\n`);
+          } else {
+            console.log(`  \u26a0 Rebuild will re-crawl all bookmarks from X.`);
+            console.log(`  Your existing data will be merged (not deleted), but`);
+            console.log(`  this is a full re-sync and may take a while.\n`);
+            if (pruneDryRun) console.log(`  --prune-dry-run will only list what --prune would remove.\n`);
+          }
           console.log(`  To back up first, run:`);
           console.log(`    cp -r ${dir} ${backupDir}\n`);
 
@@ -1056,6 +1174,7 @@ export function buildCli() {
             chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
             firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
             signal: controller.signal,
+            prune: pruneMode,
             onProgress: (status: SyncProgress) => {
               lastSync = status;
               spinner.update();
@@ -1079,6 +1198,10 @@ export function buildCli() {
             console.log(`  ${result.bookmarkedAtMissing} bookmarks missing a reliable bookmark date`);
           }
           console.log(`  \u2713 Data: ${dataDir()}\n`);
+
+          if (pruneMode) {
+            await pruneUnbookmarked(result, { dryRun: pruneDryRun, limitPercent: options.pruneLimit });
+          }
 
           if (result.stopReason === 'interrupted') {
             console.log('  Interrupted. Progress has been saved; run ft sync --continue to resume.\n');

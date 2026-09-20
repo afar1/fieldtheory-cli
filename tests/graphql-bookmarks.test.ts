@@ -16,6 +16,7 @@ import {
   mergeBookmarkRecord,
   mergeRecords,
   applyFolderMirror,
+  applyTimelineMirror,
   clearFolderEverywhere,
   formatSyncResult,
   syncBookmarksGraphQL,
@@ -1747,4 +1748,237 @@ test('applyFolderMirror: collapses duplicate folder id occurrences on re-tag', (
   const { merged } = applyFolderMirror(existing, CODING_FOLDER, walked);
   assert.deepEqual(merged[0].folderIds, ['f-coding']);
   assert.deepEqual(merged[0].folderNames, ['Coding']);
+});
+
+// ── applyTimelineMirror / prune gate ────────────────────────────────────────
+
+test('applyTimelineMirror: walked records survive, absent records are pruned', () => {
+  const existing = [makeRecord({ id: '1' }), makeRecord({ id: '2' }), makeRecord({ id: '3' })];
+  const { kept, pruned } = applyTimelineMirror(existing, ['1', '3']);
+  assert.deepEqual(kept.map((r) => r.id), ['1', '3']);
+  assert.deepEqual(pruned.map((r) => r.id), ['2']);
+});
+
+test('applyTimelineMirror: an empty walked set prunes nothing', () => {
+  const existing = [makeRecord({ id: '1' }), makeRecord({ id: '2' })];
+  const { kept, pruned } = applyTimelineMirror(existing, []);
+  assert.equal(kept.length, 2);
+  assert.equal(pruned.length, 0);
+});
+
+const PRUNE_SYNC_OPTS = {
+  incremental: false,
+  csrfToken: 'ct0',
+  cookieHeader: 'ct0=ct0; auth_token=auth',
+  delayMs: 0,
+  prune: true,
+} as const;
+
+function pruneExisting(): BookmarkRecord[] {
+  return [
+    makeRecord({ id: '1234567890', tweetId: '1234567890', text: 'Still bookmarked', postedAt: 'Tue Mar 10 12:00:00 +0000 2026' }),
+    makeRecord({ id: '555', tweetId: '555', text: 'Un-bookmarked on X', postedAt: 'Mon Mar 09 12:00:00 +0000 2026' }),
+  ];
+}
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+}
+
+test('syncBookmarksGraphQL: prune lists records absent from a complete walk and deletes nothing itself', async () => {
+  const page1 = makeGraphQLResponse([makeTweetResult()]); // no bottom cursor => end of bookmarks
+  await withIsolatedGapFillDataDir(async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => jsonResponse(page1)) as typeof fetch;
+    try {
+      const result = await syncBookmarksGraphQL(PRUNE_SYNC_OPTS);
+      assert.equal(result.stopReason, 'end of bookmarks');
+      assert.deepEqual(result.pruneCandidateIds, ['555']);
+      assert.equal(result.pruneSkippedReason, undefined);
+      // The engine only reports: the stale record is still in the cache.
+      const cache = (await readFile(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'), 'utf8')).trim().split('\n');
+      assert.equal(cache.length, 2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }, pruneExisting());
+});
+
+test('syncBookmarksGraphQL: prune is refused when the walk is rate limited', async () => {
+  const page1 = makeGraphQLResponse([makeTweetResult()], 'cursor-2');
+  await withIsolatedGapFillDataDir(async () => {
+    const originalFetch = globalThis.fetch;
+    const originalSetTimeout = globalThis.setTimeout;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      if (fetchCalls === 1) return jsonResponse(page1);
+      return new Response('', { status: 429, headers: { 'retry-after': '1' } });
+    }) as typeof fetch;
+    globalThis.setTimeout = (((handler: TimerHandler, _timeout?: number, ...args: any[]) => {
+      if (typeof handler === 'function') handler(...args);
+      return 0 as any;
+    }) as typeof setTimeout);
+    try {
+      const result = await syncBookmarksGraphQL(PRUNE_SYNC_OPTS);
+      assert.equal(result.stopReason, 'rate limited');
+      assert.equal(result.pruneCandidateIds, undefined);
+      assert.match(result.pruneSkippedReason ?? '', /rate limited/);
+    } finally {
+      globalThis.fetch = originalFetch;
+      globalThis.setTimeout = originalSetTimeout;
+    }
+  }, pruneExisting());
+});
+
+test('syncBookmarksGraphQL: prune is refused when the walk is interrupted', async () => {
+  const page1 = makeGraphQLResponse([makeTweetResult()], 'cursor-2');
+  await withIsolatedGapFillDataDir(async () => {
+    const originalFetch = globalThis.fetch;
+    const controller = new AbortController();
+    globalThis.fetch = (async () => jsonResponse(page1)) as typeof fetch;
+    try {
+      const result = await syncBookmarksGraphQL({
+        ...PRUNE_SYNC_OPTS,
+        signal: controller.signal,
+        onProgress: (progress) => { if (progress.page === 1) controller.abort(); },
+      });
+      assert.equal(result.stopReason, 'interrupted');
+      assert.equal(result.pruneCandidateIds, undefined);
+      assert.match(result.pruneSkippedReason ?? '', /interrupted/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }, pruneExisting());
+});
+
+test('syncBookmarksGraphQL: prune is refused when the walk stops as stale', async () => {
+  const page1 = makeGraphQLResponse([makeTweetResult()], 'cursor-2');
+  await withIsolatedGapFillDataDir(async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => jsonResponse(page1)) as typeof fetch;
+    try {
+      const result = await syncBookmarksGraphQL({ ...PRUNE_SYNC_OPTS, stalePageLimit: 1, staleWhenNoNewRecords: true });
+      assert.equal(result.stopReason, 'no new bookmarks (stale)');
+      assert.equal(result.pruneCandidateIds, undefined);
+      assert.ok(result.pruneSkippedReason);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }, pruneExisting());
+});
+
+test('syncBookmarksGraphQL: prune is refused when X returns no bookmarks at all', async () => {
+  const empty = makeGraphQLResponse([]);
+  await withIsolatedGapFillDataDir(async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => jsonResponse(empty)) as typeof fetch;
+    try {
+      const result = await syncBookmarksGraphQL(PRUNE_SYNC_OPTS);
+      assert.equal(result.stopReason, 'end of bookmarks');
+      assert.equal(result.pruneCandidateIds, undefined);
+      assert.match(result.pruneSkippedReason ?? '', /no bookmarks/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }, pruneExisting());
+});
+
+/** Add an entry X lists but that has no `legacy` payload (deleted/unavailable tweet). */
+function withTombstone(response: any, id: string): any {
+  response.data.bookmark_timeline_v2.timeline.instructions[0].entries.push({
+    entryId: `tweet-${id}`,
+    content: { itemContent: { tweet_results: { result: { __typename: 'TweetTombstone' } } } },
+  });
+  return response;
+}
+
+test('syncBookmarksGraphQL: prune keeps bookmarks X still lists as unavailable tweets', async () => {
+  const page1 = withTombstone(makeGraphQLResponse([makeTweetResult()]), '555');
+  const existing = [
+    ...pruneExisting(), // 1234567890 (walked) and 555 (tombstoned on X, still bookmarked)
+    makeRecord({ id: '777', tweetId: '777', text: 'Really un-bookmarked' }),
+  ];
+  await withIsolatedGapFillDataDir(async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => jsonResponse(page1)) as typeof fetch;
+    try {
+      const result = await syncBookmarksGraphQL(PRUNE_SYNC_OPTS);
+      assert.deepEqual(result.pruneCandidateIds, ['777']);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }, existing);
+});
+
+test('syncBookmarksGraphQL: prune accepts a stale stop when the last pages were truly empty', async () => {
+  const page1 = makeGraphQLResponse([makeTweetResult()], 'cursor-2');
+  const emptyPage = makeGraphQLResponse([], 'cursor-3');
+  await withIsolatedGapFillDataDir(async () => {
+    const originalFetch = globalThis.fetch;
+    const originalSetTimeout = globalThis.setTimeout;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => jsonResponse(++fetchCalls === 1 ? page1 : emptyPage)) as typeof fetch;
+    globalThis.setTimeout = (((handler: TimerHandler, _timeout?: number, ...args: any[]) => {
+      if (typeof handler === 'function') handler(...args);
+      return 0 as any;
+    }) as typeof setTimeout);
+    try {
+      const result = await syncBookmarksGraphQL(PRUNE_SYNC_OPTS);
+      assert.equal(result.stopReason, 'no new bookmarks (stale)');
+      assert.equal(result.pruneSkippedReason, undefined);
+      assert.deepEqual(result.pruneCandidateIds, ['555']);
+    } finally {
+      globalThis.fetch = originalFetch;
+      globalThis.setTimeout = originalSetTimeout;
+    }
+  }, pruneExisting());
+});
+
+test('syncBookmarksGraphQL: prune refuses a stale stop caused by pages of unavailable tweets', async () => {
+  const page1 = makeGraphQLResponse([makeTweetResult()], 'cursor-2');
+  const tombstonePage = () => withTombstone(makeGraphQLResponse([], 'cursor-3'), '888');
+  await withIsolatedGapFillDataDir(async () => {
+    const originalFetch = globalThis.fetch;
+    const originalSetTimeout = globalThis.setTimeout;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => jsonResponse(++fetchCalls === 1 ? page1 : tombstonePage())) as typeof fetch;
+    globalThis.setTimeout = (((handler: TimerHandler, _timeout?: number, ...args: any[]) => {
+      if (typeof handler === 'function') handler(...args);
+      return 0 as any;
+    }) as typeof setTimeout);
+    try {
+      const result = await syncBookmarksGraphQL(PRUNE_SYNC_OPTS);
+      assert.equal(result.stopReason, 'no new bookmarks (stale)');
+      assert.equal(result.pruneCandidateIds, undefined);
+      assert.ok(result.pruneSkippedReason);
+    } finally {
+      globalThis.fetch = originalFetch;
+      globalThis.setTimeout = originalSetTimeout;
+    }
+  }, pruneExisting());
+});
+
+test('syncBookmarksGraphQL: prune on an incremental walk throws before touching the network', async () => {
+  await withIsolatedGapFillDataDir(async () => {
+    await assert.rejects(
+      syncBookmarksGraphQL({ ...PRUNE_SYNC_OPTS, incremental: true }),
+      /prune requires a full walk/,
+    );
+  }, pruneExisting());
+});
+
+test('syncBookmarksGraphQL: without prune, no candidates are reported', async () => {
+  const page1 = makeGraphQLResponse([makeTweetResult()]);
+  await withIsolatedGapFillDataDir(async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => jsonResponse(page1)) as typeof fetch;
+    try {
+      const result = await syncBookmarksGraphQL({ ...PRUNE_SYNC_OPTS, prune: false });
+      assert.equal(result.pruneCandidateIds, undefined);
+      assert.equal(result.pruneSkippedReason, undefined);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }, pruneExisting());
 });

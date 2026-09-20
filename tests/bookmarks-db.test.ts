@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, listBookmarks, sanitizeFtsQuery, getCategoryCounts, sampleByCategory, getClassificationProgress } from '../src/bookmarks-db.js';
+import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, listBookmarks, sanitizeFtsQuery, getCategoryCounts, sampleByCategory, getClassificationProgress, deleteBookmarks, exportRecordsForArchive, getBookmarksByIds } from '../src/bookmarks-db.js';
 import { openDb, saveDb } from '../src/db.js';
-import { twitterBookmarksIndexPath } from '../src/paths.js';
+import { twitterBookmarksIndexPath, bookmarkMediaManifestPath } from '../src/paths.js';
+import type { MediaFetchManifest } from '../src/bookmark-media.js';
 
 const FIXTURES = [
   { id: '1', tweetId: '1', url: 'https://x.com/alice/status/1', text: 'Machine learning is transforming healthcare', authorHandle: 'alice', authorName: 'Alice Smith', syncedAt: '2026-01-01T00:00:00Z', postedAt: '2026-01-01T12:00:00Z', language: 'en', engagement: { likeCount: 100, repostCount: 10 }, mediaObjects: [], links: ['https://example.com'], tags: [], ingestedVia: 'graphql' },
@@ -332,4 +333,155 @@ test('sanitizeFtsQuery: strips internal quotes to avoid double-escaping', () => 
   const result = sanitizeFtsQuery('"foo"bar');
   // Internal quotes stripped; term wrapped once
   assert.ok(!result.includes('""'));
+});
+
+// ── fixtures for deleteBookmarks: media files + manifest ──────────────────────
+
+async function withMediaFixture(fn: (mediaDir: string) => Promise<void>): Promise<void> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ft-media-test-'));
+  const jsonl = FIXTURES.map((r) => JSON.stringify(r)).join('\n') + '\n';
+  await writeFile(path.join(dir, 'bookmarks.jsonl'), jsonl);
+
+  const mediaDir = path.join(dir, 'media');
+  await mkdir(mediaDir, { recursive: true });
+
+  // Write two fake image files: one for bookmark 1, one for bookmark 2
+  const file1 = path.join(mediaDir, 'tweet1-aabbcc.jpg');
+  const file2 = path.join(mediaDir, 'tweet2-ddeeff.jpg');
+  await writeFile(file1, 'fake-image-1');
+  await writeFile(file2, 'fake-image-2');
+
+  const manifest: MediaFetchManifest = {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    limit: 100,
+    maxBytes: 10_000_000,
+    processed: 2,
+    downloaded: 2,
+    skippedTooLarge: 0,
+    failed: 0,
+    entries: [
+      {
+        bookmarkId: '1',
+        tweetId: '1',
+        tweetUrl: 'https://x.com/alice/status/1',
+        sourceUrl: 'https://img.com/a.jpg',
+        localPath: file1,
+        contentType: 'image/jpeg',
+        bytes: 12,
+        status: 'downloaded',
+        fetchedAt: new Date().toISOString(),
+      },
+      {
+        bookmarkId: '2',
+        tweetId: '2',
+        tweetUrl: 'https://x.com/bob/status/2',
+        sourceUrl: 'https://img.com/b.jpg',
+        localPath: file2,
+        contentType: 'image/jpeg',
+        bytes: 12,
+        status: 'downloaded',
+        fetchedAt: new Date().toISOString(),
+      },
+    ],
+  };
+  await writeFile(path.join(dir, 'media-manifest.json'), JSON.stringify(manifest));
+
+  const saved = process.env.FT_DATA_DIR;
+  process.env.FT_DATA_DIR = dir;
+  try {
+    await fn(mediaDir);
+  } finally {
+    if (saved !== undefined) process.env.FT_DATA_DIR = saved;
+    else delete process.env.FT_DATA_DIR;
+  }
+}
+
+async function fileExists(p: string): Promise<boolean> {
+  try { await access(p); return true; } catch { return false; }
+}
+
+// ── deleteBookmarks (batch) / exportRecordsForArchive ─────────────────────────
+
+test('deleteBookmarks removes rows, FTS entries, JSONL lines, media files and manifest entries', async () => {
+  await withMediaFixture(async (mediaDir) => {
+    await buildIndex();
+    assert.equal((await searchBookmarks({ query: 'Machine learning' })).length, 1);
+
+    const { deleted } = await deleteBookmarks(['1', '2']);
+    assert.deepEqual(deleted.sort(), ['1', '2']);
+
+    assert.equal((await getStats()).totalBookmarks, 1);
+    assert.equal(await getBookmarkById('1'), null);
+    assert.equal((await searchBookmarks({ query: 'Machine learning' })).length, 0, 'FTS entry should be gone');
+    assert.equal((await searchBookmarks({ query: 'Deep learning' })).length, 1, 'unrelated FTS entry should remain');
+
+    const { readJsonLines, readJson } = await import('../src/fs.js');
+    const remaining = await readJsonLines<{ id: string }>(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'));
+    assert.deepEqual(remaining.map((r) => r.id), ['3']);
+
+    assert.equal(await fileExists(path.join(mediaDir, 'tweet1-aabbcc.jpg')), false);
+    assert.equal(await fileExists(path.join(mediaDir, 'tweet2-ddeeff.jpg')), false);
+    const manifest = await readJson<MediaFetchManifest>(bookmarkMediaManifestPath());
+    assert.equal(manifest.entries.length, 0);
+  });
+});
+
+test('deleteBookmarks removes ids missing from the index from the JSONL cache too', async () => {
+  await withIsolatedDataDir(async () => {
+    // Index deliberately not built: the JSONL is the only place these live.
+    const { deleted } = await deleteBookmarks(['1', 'does-not-exist']);
+    assert.deepEqual(deleted, ['1']);
+
+    const { readJsonLines } = await import('../src/fs.js');
+    const remaining = await readJsonLines<{ id: string }>(path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'));
+    assert.deepEqual(remaining.map((r) => r.id), ['2', '3']);
+  });
+});
+
+test('deleteBookmarks with no ids is a no-op', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    assert.deepEqual(await deleteBookmarks([]), { deleted: [] });
+    assert.equal((await getStats()).totalBookmarks, 3);
+  });
+});
+
+test('exportRecordsForArchive keeps SQLite-only classification alongside the JSONL record', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+
+    const dbPath = twitterBookmarksIndexPath();
+    const db = await openDb(dbPath);
+    try {
+      db.run(
+        `UPDATE bookmarks SET categories = ?, primary_category = ?, domains = ?, primary_domain = ? WHERE id = ?`,
+        ['ai,health', 'ai', 'medicine,software', 'medicine', '1'],
+      );
+      saveDb(db, dbPath);
+    } finally {
+      db.close();
+    }
+
+    const archive = await exportRecordsForArchive(['1', '3']);
+    assert.equal(archive.length, 2);
+
+    const one = archive.find((r) => r.id === '1')!;
+    assert.equal(one.text, 'Machine learning is transforming healthcare', 'JSONL fields are kept');
+    assert.equal(one.primaryCategory, 'ai');
+    assert.deepEqual(one.categories, ['ai', 'health']);
+    assert.equal(one.primaryDomain, 'medicine');
+    assert.deepEqual(one.domains, ['medicine', 'software']);
+
+    const three = archive.find((r) => r.id === '3')!;
+    assert.equal(three.primaryCategory, 'unclassified');
+  });
+});
+
+test('getBookmarksByIds returns the requested bookmarks and skips unknown ids', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    const items = await getBookmarksByIds(['2', 'nope', '3']);
+    assert.deepEqual(items.map((i) => i.id), ['2', '3']);
+  });
 });

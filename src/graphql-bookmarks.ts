@@ -98,6 +98,13 @@ export interface SyncOptions {
   checkpointEvery?: number;
   /** Stop at the next safe loop boundary, then persist final state. */
   signal?: AbortSignal;
+  /**
+   * Compute which local records X no longer lists. Nothing is deleted here —
+   * the result carries `pruneCandidateIds` for the caller to archive and remove.
+   * Only honoured on a walk that reached the end of the list; requires
+   * `incremental: false` and no `resumeCursor`.
+   */
+  prune?: boolean;
 }
 
 export interface SyncProgress {
@@ -119,6 +126,10 @@ export interface SyncResult {
   cachePath: string;
   statePath: string;
   retryAfterSec?: number;
+  /** Set when `prune` was requested and the walk was complete: local ids X no longer lists. */
+  pruneCandidateIds?: string[];
+  /** Set when `prune` was requested but skipped, with the reason. */
+  pruneSkippedReason?: string;
 }
 
 function parseSnowflake(value?: string | null): bigint | null {
@@ -235,6 +246,12 @@ function buildHeaders(csrfToken: string, cookieHeader?: string): Record<string, 
 interface PageResult {
   records: BookmarkRecord[];
   nextCursor?: string;
+  /**
+   * Tweet ids X listed on this page, including entries we could not turn into a
+   * record (deleted/unavailable tweets have no `legacy` payload). Lets a prune
+   * treat those as still bookmarked instead of un-bookmarked.
+   */
+  entryIds?: string[];
 }
 
 export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRecord | null {
@@ -389,6 +406,7 @@ export function parseBookmarksResponse(json: any, now?: string): PageResult {
   }
 
   const records: BookmarkRecord[] = [];
+  const entryIds: string[] = [];
   let nextCursor: string | undefined;
 
   for (const entry of entries) {
@@ -396,6 +414,9 @@ export function parseBookmarksResponse(json: any, now?: string): PageResult {
       nextCursor = entry.content?.value;
       continue;
     }
+
+    const listedId = typeof entry.entryId === 'string' ? /^tweet-(\d+)$/.exec(entry.entryId)?.[1] : undefined;
+    if (listedId) entryIds.push(listedId);
 
     const tweetResult = entry?.content?.itemContent?.tweet_results?.result;
     if (!tweetResult) continue;
@@ -407,7 +428,7 @@ export function parseBookmarksResponse(json: any, now?: string): PageResult {
     }
   }
 
-  return { records, nextCursor };
+  return { records, nextCursor, entryIds };
 }
 
 class RateLimitError extends Error {
@@ -551,6 +572,26 @@ export function mergeRecords(
   return { merged, added };
 }
 
+/**
+ * Split local records into those X still lists and those it no longer does.
+ *
+ * IMPORTANT: only call with ids from a COMPLETE timeline walk
+ * (`!incremental && stopReason === 'end of bookmarks'`). Absence from a partial
+ * walk means "we stopped before reaching it", not "un-bookmarked". An empty
+ * walked set prunes nothing.
+ */
+export function applyTimelineMirror(
+  existing: BookmarkRecord[],
+  walkedIds: Iterable<string>,
+): { kept: BookmarkRecord[]; pruned: BookmarkRecord[] } {
+  const walked = new Set(walkedIds);
+  if (walked.size === 0) return { kept: existing, pruned: [] };
+  const kept: BookmarkRecord[] = [];
+  const pruned: BookmarkRecord[] = [];
+  for (const record of existing) (walked.has(record.id) ? kept : pruned).push(record);
+  return { kept, pruned };
+}
+
 function updateState(
   prev: BookmarkBackfillState,
   input: { added: number; seenIds: string[]; stopReason: string; lastRunAt?: string; lastCursor?: string }
@@ -591,6 +632,10 @@ export async function syncBookmarksGraphQL(
   const stalePageLimit = options.stalePageLimit ?? 3;
   const checkpointEvery = options.checkpointEvery ?? 25;
   const pageSize = Math.max(1, Math.min(options.pageSize ?? 20, 100));
+
+  if (options.prune && (incremental || options.resumeCursor)) {
+    throw new Error('prune requires a full walk from the newest bookmark (incremental: false, no resumeCursor).');
+  }
 
   let csrfToken: string;
   let cookieHeader: string | undefined;
@@ -635,6 +680,10 @@ export async function syncBookmarksGraphQL(
   let stalePages = 0;
   let cursor: string | undefined = options.resumeCursor;
   const allSeenIds: string[] = [];
+  // Every id X listed (parsed or not) — what a prune treats as still bookmarked.
+  const walkedIds = new Set<string>();
+  // Consecutive pages X returned with no tweet entries at all.
+  let trailingEmptyPages = 0;
   let stopReason = 'unknown';
   let retryAfterSec: number | undefined;
 
@@ -674,6 +723,11 @@ export async function syncBookmarksGraphQL(
     existing = merged;
     totalAdded += added;
     result.records.forEach((r) => allSeenIds.push(r.id));
+    result.records.forEach((r) => walkedIds.add(r.id));
+    result.entryIds?.forEach((id) => walkedIds.add(id));
+    trailingEmptyPages = result.records.length === 0 && (result.entryIds?.length ?? 0) === 0
+      ? trailingEmptyPages + 1
+      : 0;
     const reachedLatestStored = Boolean(newestKnownId) && result.records.some((record) => record.id === newestKnownId);
 
     const noNewLocalRecords = added === 0;
@@ -806,6 +860,24 @@ export async function syncBookmarksGraphQL(
   const syncedAt = new Date().toISOString();
   const bookmarkedAtMissing = existing.filter((record) => !record.bookmarkedAt).length;
   const completedFullSync = !incremental && stopReason === 'end of bookmarks';
+  let pruneCandidateIds: string[] | undefined;
+  let pruneSkippedReason: string | undefined;
+  if (options.prune) {
+    // X may end a timeline with empty pages that still carry a cursor instead of
+    // omitting the cursor. Accept a stale stop as the end only when the pages that
+    // tripped it held no tweet entries at all — pages of unparseable (deleted /
+    // unavailable) tweets are not an end signal.
+    const endedOnEmptyPages = !incremental
+      && stopReason === 'no new bookmarks (stale)'
+      && trailingEmptyPages >= stalePageLimit;
+    if (!completedFullSync && !endedOnEmptyPages) {
+      pruneSkippedReason = `the walk stopped early (${stopReason}), so it can't tell what was un-bookmarked`;
+    } else if (walkedIds.size === 0) {
+      pruneSkippedReason = 'X returned no bookmarks';
+    } else {
+      pruneCandidateIds = applyTimelineMirror(existing, walkedIds).pruned.map((r) => r.id);
+    }
+  }
   await writeJsonLines(cachePath, existing);
   await writeJson(metaPath, {
     provider: 'twitter',
@@ -845,6 +917,8 @@ export async function syncBookmarksGraphQL(
     cachePath,
     statePath,
     retryAfterSec,
+    pruneCandidateIds,
+    pruneSkippedReason,
   };
 }
 

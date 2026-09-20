@@ -190,3 +190,63 @@ export async function exportBookmarks(options: ExportOptions = {}): Promise<Expo
   const elapsed = Math.round((Date.now() - startTime) / 1000);
   return { exported, skipped, total, elapsed };
 }
+
+/**
+ * Delete the exported markdown files for bookmarks that were removed locally
+ * (e.g. pruned because they were un-bookmarked on X). Returns how many files
+ * were removed. A missing file is not an error.
+ *
+ * Two tiers, because the filename is derived from `text`, which `ft sync --gaps`
+ * can rewrite after the file was exported:
+ *  1. compute the exact filename and unlink it;
+ *  2. for misses, scan the export dir for a `tweet_id` frontmatter match.
+ */
+export async function removeExportedBookmarks(items: BookmarkTimelineItem[]): Promise<number> {
+  const dir = bookmarksDir();
+  let removed = 0;
+  const outstanding = new Map<string, BookmarkTimelineItem>();
+
+  for (const item of items) {
+    try {
+      await fs.promises.unlink(path.join(dir, bookmarkFilename(item)));
+      removed++;
+    } catch {
+      outstanding.set(item.tweetId, item);
+    }
+  }
+  if (outstanding.size === 0) return removed;
+
+  let files: string[];
+  try {
+    files = (await fs.promises.readdir(dir)).filter((f) => f.endsWith('.md'));
+  } catch {
+    return removed;
+  }
+
+  for (const file of files) {
+    if (outstanding.size === 0) break;
+    const filePath = path.join(dir, file);
+    let head: string;
+    try {
+      const handle = await fs.promises.open(filePath, 'r');
+      try {
+        const buf = Buffer.alloc(4096);
+        const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+        head = buf.toString('utf8', 0, bytesRead);
+      } finally {
+        await handle.close();
+      }
+    } catch {
+      continue;
+    }
+    const match = head.match(/^tweet_id: "([^"]+)"$/m);
+    if (!match || !outstanding.has(match[1])) continue;
+    try {
+      await fs.promises.unlink(filePath);
+      removed++;
+      outstanding.delete(match[1]);
+    } catch { /* already gone */ }
+  }
+
+  return removed;
+}
