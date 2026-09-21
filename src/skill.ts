@@ -68,7 +68,7 @@ ft current --summary --json    # Active Field Theory document metadata without t
 ft current update --stdin --expected-sha256 <sha>   # Replace the actual current source file with stdin
 ft recent --json               # Current repo last-modified file and recent files for agent references
 
-ft search <query>              # Full-text BM25 search ("exact phrase", AND, OR, NOT)
+ft search <query>              # BM25 search over literal terms (all must match; includes quoted posts)
 ft list --category <cat>       # tool, technique, research, opinion, launch, security, commerce
 ft list --domain <dom>         # ai, web-dev, startups, finance, design, devops, marketing, etc.
 ft list --author @handle       # By author

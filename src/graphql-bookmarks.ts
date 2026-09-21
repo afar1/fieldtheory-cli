@@ -5,7 +5,7 @@ import { extractChromeXCookies } from './chrome-cookies.js';
 import { extractFirefoxXCookies } from './firefox-cookies.js';
 import { parseTimestampMs } from './date-utils.js';
 import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkFolder, BookmarkRecord, QuotedTweetSnapshot } from './types.js';
-import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText, updateArticleContent } from './bookmarks-db.js';
+import { exportBookmarksForSyncSeed, updateBookmarkContent, updateArticleContent } from './bookmarks-db.js';
 import type { ArticleUpdate } from './bookmarks-db.js';
 import { fetchArticle, resolveTcoLink } from './bookmark-enrich.js';
 import type { ArticleContent } from './bookmark-enrich.js';
@@ -2005,8 +2005,7 @@ export async function syncGaps(options: SyncGapsOptions = {}): Promise<GapFillRe
 
   // Final persist (gaps 1+2)
   await writeJsonLines(cachePath, records);
-  if (dbQuotedUpdates.length > 0) await updateQuotedTweets(dbQuotedUpdates);
-  if (dbTextUpdates.length > 0) await updateBookmarkText(dbTextUpdates);
+  await updateBookmarkContent({ quotes: dbQuotedUpdates, texts: dbTextUpdates });
 
   // ── Gap 3b: Article enrichment for ordinary link-only bookmarks ─────────
   // Bookmarks with < 80 chars of text after stripping URLs are "link-only"

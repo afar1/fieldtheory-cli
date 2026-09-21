@@ -11,6 +11,9 @@ async function captureStdout(fn: () => Promise<void>): Promise<string> {
   const chunks: string[] = [];
   const origWrite = process.stdout.write;
   process.stdout.write = ((chunk: any, encodingOrCb?: any, cb?: any) => {
+    // Node's test runner emits binary protocol frames on stdout; capturing
+    // those hides completed tests and makes the whole test file fail.
+    if (Buffer.isBuffer(chunk)) return origWrite.call(process.stdout, chunk, encodingOrCb, cb);
     chunks.push(Buffer.isBuffer(chunk) ? chunk.toString('utf-8') : String(chunk));
     if (typeof encodingOrCb === 'function') encodingOrCb();
     if (typeof cb === 'function') cb();
@@ -92,10 +95,10 @@ test('ft search, stats, and status expose --json', () => {
   }
 });
 
-test('ft paths, current, state, recent, navigation aliases, library, commands, app, and install command groups are registered', () => {
+test('ft paths, current, recent, navigation aliases, library, commands, app, and install command groups are registered', () => {
   const program = buildCli();
   for (const name of [
-    'paths', 'current', 'state', 'recent', 'ls', 'tree', 'find', 'grep', 'cat', 'head',
+    'paths', 'current', 'recent', 'ls', 'tree', 'find', 'grep', 'cat', 'head',
     'meta', 'open', 'tab', 'reveal', 'pwd', 'context', 'link', 'links', 'backlinks',
     'tags', 'tagged', 'new', 'append', 'note', 'rename', 'cd', 'back',
     'library', 'commands', 'app', 'install',
@@ -1002,4 +1005,11 @@ test('runWithSpinner: stops spinner after error', async () => {
   );
 
   assert.equal(stopped, 1);
+});
+
+test('search help describes literal terms rather than promising Boolean syntax', () => {
+  const search = buildCli().commands.find(c => c.name() === 'search');
+  assert.ok(search);
+  assert.match(search.helpInformation(), /literal terms/i);
+  assert.doesNotMatch(search.helpInformation(), /supports FTS5 syntax/);
 });

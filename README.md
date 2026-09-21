@@ -46,85 +46,89 @@ On first run, `ft sync` extracts your X session from your browser and downloads 
 
 ### Sync
 
-| Command | Description |
-|---------|-------------|
-| `ft sync` | Download and sync bookmarks, then fetch any missing media (photos, video posters, capped videos). No API required. |
-| `ft sync --no-media` | Sync bookmarks only; skip the media download pass |
-| `ft sync --skip-profile-images` | Sync bookmarks and post media but skip author profile images |
-| `ft sync --rebuild` | Full re-crawl of all bookmarks |
-| `ft sync --continue` | Resume a paused or interrupted sync from the saved cursor |
-| `ft sync --gaps` | Backfill quoted tweets, expand truncated/X Article text, enrich linked articles, and fill any media gaps |
-| `ft sync --folders` | Also sync X bookmark folder tags (read-only mirror of X state) |
-| `ft sync --folder <name>` | Sync a single folder by name (exact or unambiguous prefix) |
-| `ft sync --classify` | Sync then classify new bookmarks with LLM |
-| `ft sync --api` | Sync via OAuth API (cross-platform) |
-| `ft auth` | Set up OAuth for API-based sync (optional) |
+| Command                         | Description                                                                                                        |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `ft sync`                       | Download and sync bookmarks, then fetch any missing media (photos, video posters, capped videos). No API required. |
+| `ft sync --no-media`            | Sync bookmarks only; skip the media download pass                                                                  |
+| `ft sync --skip-profile-images` | Sync bookmarks and post media but skip author profile images                                                       |
+| `ft sync --rebuild`             | Full re-crawl of all bookmarks                                                                                     |
+| `ft sync --continue`            | Resume a paused or interrupted sync from the saved cursor                                                          |
+| `ft sync --gaps`                | Backfill quoted tweets, expand truncated/X Article text, enrich linked articles, and fill any media gaps           |
+| `ft sync --folders`             | Also sync X bookmark folder tags (read-only mirror of X state)                                                     |
+| `ft sync --folder <name>`       | Sync a single folder by name (exact or unambiguous prefix)                                                         |
+| `ft sync --classify`            | Sync then classify new bookmarks with LLM                                                                          |
+| `ft sync --api`                 | Sync via OAuth API (cross-platform)                                                                                |
+| `ft auth`                       | Set up OAuth for API-based sync (optional)                                                                         |
 
 ### Search and browse
 
-| Command | Description |
-|---------|-------------|
-| `ft search <query>` | Full-text search with BM25 ranking |
-| `ft list` | Filter by author, date, category, domain, or folder |
-| `ft list --folder <name>` | Show bookmarks in an X bookmark folder |
-| `ft show <id>` | Show one bookmark in detail |
-| `ft sample <category>` | Random sample from a category |
-| `ft stats` | Top authors, languages, date range |
-| `ft viz` | Terminal dashboard with sparklines, categories, and domains |
-| `ft categories` | Show category distribution |
-| `ft domains` | Subject domain distribution |
-| `ft folders` | Show X bookmark folder distribution (requires `ft sync --folders` first) |
+| Command                   | Description                                                              |
+| ------------------------- | ------------------------------------------------------------------------ |
+| `ft search <query>`       | Full-text search with BM25 ranking                                       |
+| `ft list`                 | Filter by author, date, category, domain, or folder                      |
+| `ft list --folder <name>` | Show bookmarks in an X bookmark folder                                   |
+| `ft show <id>`            | Show one bookmark in detail                                              |
+| `ft sample <category>`    | Random sample from a category                                            |
+| `ft stats`                | Top authors, languages, date range                                       |
+| `ft viz`                  | Terminal dashboard with sparklines, categories, and domains              |
+| `ft categories`           | Show category distribution                                               |
+| `ft domains`              | Subject domain distribution                                              |
+| `ft folders`              | Show X bookmark folder distribution (requires `ft sync --folders` first) |
+
+Search matches all supplied terms across post text, authors, article text, and quoted-post text/authors. Boolean operators and exact-phrase syntax are treated as literal terms, not query operators. Results rank by BM25 and keep the original post and quoted author/text separate, including in `--json` output. `--author` filters the original poster. Malformed quote snapshots without string ID, text, and URL fields do not contribute search terms; the original post remains searchable.
+
+Existing indexes are upgraded in memory when opened. Run `ft index` to persist the quote-aware index; this preserves bookmark rows and enrichment. No resync or model call is required.
 
 ### Classification
 
-| Command | Description |
-|---------|-------------|
-| `ft classify` | Classify by category and domain using LLM |
-| `ft classify --regex` | Classify by category using simple regex |
-| `ft classify-domains` | Classify by subject domain only (LLM) |
+| Command                       | Description                                                                                        |
+| ----------------------------- | -------------------------------------------------------------------------------------------------- |
+| `ft classify`                 | Classify by category and domain using LLM                                                          |
+| `ft classify --regex`         | Classify by category using simple regex                                                            |
+| `ft classify-domains`         | Classify by subject domain only (LLM)                                                              |
 | `ft classify --engine <name>` | Override the LLM engine for one run (also works on `ft sync --classify` and `ft classify-domains`) |
-| `ft model` | View or change the default LLM engine |
+| `ft model`                    | View or change the default LLM engine                                                              |
 
 ### Knowledge base
 
-| Command | Description |
-|---------|-------------|
-| `ft md` | Export bookmarks as individual markdown files, including enriched article text |
-| `ft md --changed` | Re-export only markdown files whose source bookmark data changed |
-| `ft wiki` | Compile a Karpathy-style interlinked knowledge base |
-| `ft ask <question>` | Ask questions against the knowledge base |
-| `ft ask <question> --save` | Ask and save the answer as a concept page |
-| `ft lint` | Health-check the wiki for broken links and missing pages |
-| `ft lint --fix` | Auto-fix fixable wiki issues |
+| Command                    | Description                                                                    |
+| -------------------------- | ------------------------------------------------------------------------------ |
+| `ft md`                    | Export bookmarks as individual markdown files, including enriched article text |
+| `ft md --changed`          | Re-export only markdown files whose source bookmark data changed               |
+| `ft wiki`                  | Compile a Karpathy-style interlinked knowledge base                            |
+| `ft ask <question>`        | Ask questions against the knowledge base                                       |
+| `ft ask <question> --save` | Ask and save the answer as a concept page                                      |
+| `ft lint`                  | Health-check the wiki for broken links and missing pages                       |
+| `ft lint --fix`            | Auto-fix fixable wiki issues                                                   |
 
 ### Possibility runs
 
-| Command | Description |
-|---------|-------------|
-| `ft seeds search "<query>" --create` | Save a bookmark-grounded seed |
-| `ft repos add <path>` | Add a repo to the default repo set |
-| `ft possible` | Interactive seed + repo + frame wizard |
-| `ft possible run --defaults` | Re-run with the most-recently-used seed and saved repos |
-| `ft possible run --background` | Start a run as a background job |
-| `ft possible prompt <node-id>` | Print the goal prompt for one plotted node |
-| `ft possible nightly install` | Install a nightly Possible run on macOS |
+| Command                              | Description                                             |
+| ------------------------------------ | ------------------------------------------------------- |
+| `ft seeds search "<query>" --create` | Save a bookmark-grounded seed                           |
+| `ft repos add <path>`                | Add a repo to the default repo set                      |
+| `ft possible`                        | Interactive seed + repo + frame wizard                  |
+| `ft possible run --defaults`         | Re-run with the most-recently-used seed and saved repos |
+| `ft possible run --background`       | Start a run as a background job                         |
+| `ft possible prompt <node-id>`       | Print the goal prompt for one plotted node              |
+| `ft possible nightly install`        | Install a nightly Possible run on macOS                 |
 
 ### Field Theory app companion
 
-| Command | Description |
-|---------|-------------|
-| `ft paths --json` | Show canonical bookmarks, Library, Commands, and compatibility paths |
-| `ft status --json` | Show bookmark/classification status plus Field Theory paths |
-| `ft library search <query>` | Search local Field Theory Library markdown |
-| `ft library show <path>` | Print a Library page and its version metadata with `--json` |
-| `ft library create <path> --stdin` | Create a new Library page under `~/.fieldtheory/library` |
-| `ft library update <path> --stdin --expected-sha256 <hash>` | Replace a Library page with conflict protection |
-| `ft library delete <path>` | Move a Library page to Trash; the Mac app owns remote sync tombstones |
-| `ft library open <path>` | Open a Library page in the Field Theory Mac app |
-| `ft commands list` | List portable commands under `~/.fieldtheory/commands` |
-| `ft commands new <name>` | Create a reusable portable command |
-| `ft commands validate [name]` | Check command shape and guardrails |
-| `ft install app` | Download and install the latest Field Theory Mac app from `afar1/field-releases` |
+| Command                                                     | Description                                                                      |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `ft paths --json`                                           | Show canonical bookmarks, Library, Commands, and compatibility paths             |
+| `ft status --json`                                          | Show bookmark/classification status plus Field Theory paths                      |
+| `ft library search <query>`                                 | Search local Field Theory Library markdown                                       |
+| `ft library show <path>`                                    | Print a Library page and its version metadata with `--json`                      |
+| `ft library create <path> --stdin`                          | Create a new Library page under `~/.fieldtheory/library`                         |
+| `ft library update <path> --stdin --expected-sha256 <hash>` | Replace a Library page with conflict protection                                  |
+| `ft library delete <path>`                                  | Move a Library page to Trash; the Mac app owns remote sync tombstones            |
+| `ft library open <path>`                                    | Open a Library page in the Field Theory Mac app                                  |
+| `ft commands list`                                          | List portable commands under `~/.fieldtheory/commands`                           |
+| `ft commands new <name>`                                    | Create a reusable portable command                                               |
+| `ft commands validate [name]`                               | Check command shape and guardrails                                               |
+| `ft install app`                                            | Download and install the latest Field Theory Mac app from `afar1/field-releases` |
 
 `ft library open` targets the packaged Field Theory app by bundle id (`com.fieldtheory.app`) instead of trusting the system-wide `fieldtheory://` handler. That avoids accidentally opening a generic Electron development app when another checkout registered the same URL scheme.
 
@@ -139,21 +143,21 @@ Packaged variants can override the bundle id with `FT_APP_BUNDLE_ID`. Advanced d
 
 ### Agent integration
 
-| Command | Description |
-|---------|-------------|
-| `ft skill install` | Install `/fieldtheory` skill for Claude Code and Codex |
-| `ft skill show` | Print skill content to stdout |
-| `ft skill uninstall` | Remove installed skill files |
+| Command              | Description                                            |
+| -------------------- | ------------------------------------------------------ |
+| `ft skill install`   | Install `/fieldtheory` skill for Claude Code and Codex |
+| `ft skill show`      | Print skill content to stdout                          |
+| `ft skill uninstall` | Remove installed skill files                           |
 
 ### Utilities
 
-| Command | Description |
-|---------|-------------|
-| `ft index` | Rebuild search index from JSONL cache (preserves classifications) |
-| `ft fetch-media` | Backfill/download X media assets for existing bookmarks (default: all pending bookmarks) |
-| `ft fetch-media --skip-profile-images` | Download post media without author profile images |
-| `ft status` | Show sync/classification status and data location |
-| `ft path` | Print data directory path |
+| Command                                | Description                                                                              |
+| -------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `ft index`                             | Rebuild search index from JSONL cache (preserves classifications)                        |
+| `ft fetch-media`                       | Backfill/download X media assets for existing bookmarks (default: all pending bookmarks) |
+| `ft fetch-media --skip-profile-images` | Download post media without author profile images                                        |
+| `ft status`                            | Show sync/classification status and data location                                        |
+| `ft path`                              | Print data directory path                                                                |
 
 ## Agent integration
 
@@ -247,15 +251,15 @@ File app-source issues in the app source repo. Keep binary installer, updater, a
 
 ## Categories
 
-| Category | What it catches |
-|----------|----------------|
-| **tool** | GitHub repos, CLI tools, npm packages, open-source projects |
-| **security** | CVEs, vulnerabilities, exploits, supply chain |
-| **technique** | Tutorials, demos, code patterns, "how I built X" |
-| **launch** | Product launches, announcements, "just shipped" |
-| **research** | ArXiv papers, studies, academic findings |
-| **opinion** | Takes, analysis, commentary, threads |
-| **commerce** | Products, shopping, physical goods |
+| Category      | What it catches                                             |
+| ------------- | ----------------------------------------------------------- |
+| **tool**      | GitHub repos, CLI tools, npm packages, open-source projects |
+| **security**  | CVEs, vulnerabilities, exploits, supply chain               |
+| **technique** | Tutorials, demos, code patterns, "how I built X"            |
+| **launch**    | Product launches, announcements, "just shipped"             |
+| **research**  | ArXiv papers, studies, academic findings                    |
+| **opinion**   | Takes, analysis, commentary, threads                        |
+| **commerce**  | Products, shopping, physical goods                          |
 
 Use `ft classify` for LLM-powered classification that catches what regex misses.
 
@@ -282,11 +286,11 @@ Treat `ct0` and `auth_token` like passwords. Do not paste them into logs, issues
 
 ## Platform support
 
-| Feature | macOS | Linux | Windows |
-|---------|-------|-------|---------|
-| Session sync (`ft sync`) | Chrome, Chromium, Brave, Edge, Helium, Comet, Dia, Firefox | Chrome, Chromium, Brave, Edge, Firefox | Chrome, Chromium, Brave, Edge, Firefox |
-| OAuth API sync (`ft sync --api`) | Yes | Yes | Yes |
-| Search, list, classify, viz, wiki | Yes | Yes | Yes |
+| Feature                           | macOS                                                      | Linux                                  | Windows                                |
+| --------------------------------- | ---------------------------------------------------------- | -------------------------------------- | -------------------------------------- |
+| Session sync (`ft sync`)          | Chrome, Chromium, Brave, Edge, Helium, Comet, Dia, Firefox | Chrome, Chromium, Brave, Edge, Firefox | Chrome, Chromium, Brave, Edge, Firefox |
+| OAuth API sync (`ft sync --api`)  | Yes                                                        | Yes                                    | Yes                                    |
+| Search, list, classify, viz, wiki | Yes                                                        | Yes                                    | Yes                                    |
 
 Session sync extracts cookies from your browser's local database. Use `ft sync --browser <name>` to pick a browser. On Windows, Firefox requires Node.js 22.5+ or `sqlite3` on PATH. For unsupported browsers or platforms, use `ft auth` + `ft sync --api`.
 

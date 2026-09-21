@@ -6,6 +6,10 @@ import path from 'node:path';
 import { skillWithFrontmatter, skillBody, installSkill } from '../src/skill.js';
 
 describe('skill content', () => {
+  it('describes literal search rather than unsupported query operators', () => {
+    assert.match(skillBody(), /literal terms/i);
+    assert.doesNotMatch(skillBody(), /BM25 search \("exact phrase", AND, OR, NOT\)/);
+  });
   it('does not route repository work through FT state', () => {
     assert.doesNotMatch(skillWithFrontmatter(), /ft state|repo workflow state|reusable workflows/);
   });

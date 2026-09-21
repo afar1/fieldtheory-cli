@@ -1,3 +1,4 @@
+import { sanitizeForDisplay } from './display.js';
 import type { Database } from 'sql.js';
 import { openDb, saveDb } from './db.js';
 import { parseTimestampMs, toIsoDate } from './date-utils.js';
@@ -7,7 +8,7 @@ import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 8;
 
 export interface SearchResult {
   id: string;
@@ -17,6 +18,7 @@ export interface SearchResult {
   authorName?: string;
   postedAt?: string | null;
   score: number;
+  quotedTweet?: QuotedTweetSnapshot | null;
 }
 
 export interface SearchOptions {
@@ -98,7 +100,15 @@ function parseQuotedTweet(value: unknown): QuotedTweetSnapshot | null {
     const parsed = JSON.parse(value) as Partial<QuotedTweetSnapshot>;
     if (!parsed || typeof parsed !== 'object') return null;
     if (typeof parsed.id !== 'string' || typeof parsed.text !== 'string' || typeof parsed.url !== 'string') return null;
-    return parsed as QuotedTweetSnapshot;
+    // Stored JSON is not guaranteed to respect the optional TypeScript fields.
+    // Keep a usable quote while discarding invalid optional display metadata.
+    const { postedAt, ...snapshot } = parsed;
+    return {
+      ...snapshot,
+      ...(postedAt === null || typeof postedAt === 'string' ? { postedAt } : {}),
+      authorHandle: typeof parsed.authorHandle === 'string' ? parsed.authorHandle : undefined,
+      authorName: typeof parsed.authorName === 'string' ? parsed.authorName : undefined,
+    } as QuotedTweetSnapshot;
   } catch {
     return null;
   }
@@ -280,17 +290,36 @@ function initSchema(db: Database): void {
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_category ON bookmarks(primary_category)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_domain ON bookmarks(primary_domain)`);
 
-  db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
-    text,
-    author_handle,
-    author_name,
-    article_text,
-    content=bookmarks,
-    content_rowid=rowid,
-    tokenize='porter unicode61'
-  )`);
+  createSearchIndex(db);
 
   db.run("REPLACE INTO meta VALUES ('schema_version', ?)", [String(SCHEMA_VERSION)]);
+}
+
+// A view keeps derived quote fields out of the stored bookmark schema and
+// preserves attribution without indexing URLs, media metadata, or JSON keys.
+// Match parseQuotedTweet validation so every indexed quote can be displayed.
+function createSearchIndex(db: Database): void {
+  db.run(`CREATE VIEW IF NOT EXISTS bookmarks_search_content AS
+    SELECT rowid, text, author_handle, author_name, article_text, valid_quote_json,
+      json_extract(valid_quote_json, '$.text') AS quoted_text,
+      CASE WHEN json_type(valid_quote_json, '$.authorHandle') = 'text'
+        THEN json_extract(valid_quote_json, '$.authorHandle') END AS quoted_author_handle,
+      CASE WHEN json_type(valid_quote_json, '$.authorName') = 'text'
+        THEN json_extract(valid_quote_json, '$.authorName') END AS quoted_author_name
+    FROM (
+      SELECT rowid, *, CASE WHEN json_valid(quoted_tweet_json) THEN
+        CASE WHEN json_type(quoted_tweet_json, '$.id') = 'text'
+          AND json_type(quoted_tweet_json, '$.text') = 'text'
+          AND json_type(quoted_tweet_json, '$.url') = 'text'
+          THEN quoted_tweet_json END END AS valid_quote_json
+      FROM bookmarks
+    )`);
+  db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
+    text, author_handle, author_name, article_text,
+    quoted_text, quoted_author_handle, quoted_author_name,
+    content=bookmarks_search_content, content_rowid=rowid,
+    tokenize='porter unicode61'
+  )`);
 }
 
 function columnExists(db: Database, table: string, column: string): boolean {
@@ -318,7 +347,7 @@ function ftsHasColumn(db: Database, column: string): boolean {
   }
 }
 
-function ensureMigrations(db: Database): void {
+function ensureMigrations(db: Database, rebuildSearchIndex = true): void {
   // Ensure meta table exists (may not on a fresh/empty DB)
   db.run('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)');
 
@@ -346,16 +375,15 @@ function ensureMigrations(db: Database): void {
     ensureColumn(db, 'bookmarks', 'folder_ids', 'TEXT');
     ensureColumn(db, 'bookmarks', 'folder_names', 'TEXT');
 
-    // FTS rebuild: only if the FTS table is missing the article_text column.
-    // Check via a zero-row SELECT so we don't rebuild unnecessarily.
-    if (!ftsHasColumn(db, 'article_text')) {
+    // Inspect the real schema: old indexes need a rebuild even if meta is ahead.
+    if (!columnExists(db, 'bookmarks_search_content', 'valid_quote_json') ||
+      !['article_text', 'quoted_text', 'quoted_author_handle', 'quoted_author_name'].every(
+      column => ftsHasColumn(db, column)
+    )) {
       db.run('DROP TABLE IF EXISTS bookmarks_fts');
-      db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
-        text, author_handle, author_name, article_text,
-        content=bookmarks, content_rowid=rowid,
-        tokenize='porter unicode61'
-      )`);
-      db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
+      db.run('DROP VIEW IF EXISTS bookmarks_search_content');
+      createSearchIndex(db);
+      if (rebuildSearchIndex) db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
     }
   }
 
@@ -446,8 +474,9 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
       db.run('DROP TABLE IF EXISTS meta');
     }
 
-    initSchema(db);
+    // Upgrade existing tables before creating indexes/views that depend on new columns.
     ensureMigrations(db);
+    initSchema(db);
 
     // Preserve classification and enrichment fields when refreshing existing rows.
     // Folder fields are normally sourced from JSONL (source of truth) but we also
@@ -539,15 +568,15 @@ export function sanitizeFtsQuery(query: string): string {
 export async function searchBookmarks(options: SearchOptions): Promise<SearchResult[]> {
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
-  ensureMigrations(db);
   const limit = options.limit ?? 20;
 
   try {
+    ensureMigrations(db);
     const conditions: string[] = [];
     const params: any[] = [];
 
     if (options.query) {
-      conditions.push(`b.rowid IN (SELECT rowid FROM bookmarks_fts WHERE bookmarks_fts MATCH ?)`);
+      conditions.push(`bookmarks_fts MATCH ?`);
       params.push(sanitizeFtsQuery(options.query));
     }
     if (options.author) {
@@ -567,7 +596,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
 
     // If we have an FTS query, use bm25 for ranking; otherwise sort by posted_at
     const orderBy = options.query
-      ? `ORDER BY bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0) ASC`
+      ? `ORDER BY bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0, 5.0, 1.0, 1.0) ASC, b.rowid ASC`
       : `ORDER BY b.posted_at DESC`;
 
     // For FTS ranking we need to join with the FTS table for bm25
@@ -575,7 +604,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
     if (options.query) {
       sql = `
         SELECT b.id, b.url, b.text, b.author_handle, b.author_name, b.posted_at,
-               bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0) as score
+               bm25(bookmarks_fts, 5.0, 1.0, 1.0, 3.0, 5.0, 1.0, 1.0) as score, b.quoted_tweet_json
         FROM bookmarks b
         JOIN bookmarks_fts ON bookmarks_fts.rowid = b.rowid
         ${where}
@@ -585,7 +614,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
     } else {
       sql = `
         SELECT b.id, b.url, b.text, b.author_handle, b.author_name, b.posted_at,
-               0 as score
+               0 as score, b.quoted_tweet_json
         FROM bookmarks b
         ${where}
         ORDER BY b.posted_at DESC
@@ -600,7 +629,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
     } catch (err) {
       const msg = (err as Error).message ?? '';
       if (msg.includes('fts5') || msg.includes('MATCH') || msg.includes('syntax')) {
-        throw new Error(`Invalid search query: "${options.query}". Try simpler terms or wrap phrases in double quotes.`);
+        throw new Error(`Invalid search query: "${options.query}". Use plain search terms; Boolean operators and phrase syntax are treated literally.`);
       }
       throw err;
     }
@@ -614,6 +643,7 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
       authorName: row[4] as string | undefined,
       postedAt: row[5] as string | null,
       score: row[6] as number,
+      quotedTweet: parseQuotedTweet(row[7]),
     }));
   } finally {
     db.close();
@@ -1155,41 +1185,37 @@ export { type Database } from 'sql.js';
 export async function updateQuotedTweets(
   records: Array<{ id: string; quotedTweet: QuotedTweetSnapshot }>,
 ): Promise<void> {
-  const dbPath = twitterBookmarksIndexPath();
-  const db = await openDb(dbPath);
-  ensureMigrations(db);
-
-  try {
-    const stmt = db.prepare('UPDATE bookmarks SET quoted_tweet_json = ? WHERE id = ?');
-    for (const record of records) {
-      stmt.run([JSON.stringify(record.quotedTweet), record.id]);
-    }
-    stmt.free();
-    saveDb(db, dbPath);
-  } finally {
-    db.close();
-  }
+  await updateBookmarkContent({ quotes: records });
 }
 
 export async function updateBookmarkText(
   records: Array<{ id: string; text: string }>,
 ): Promise<void> {
+  await updateBookmarkContent({ texts: records });
+}
+
+export async function updateBookmarkContent(updates: {
+  quotes?: Array<{ id: string; quotedTweet: QuotedTweetSnapshot }>;
+  texts?: Array<{ id: string; text: string }>;
+}): Promise<void> {
+  const { quotes = [], texts = [] } = updates;
+  if (!quotes.length && !texts.length) return;
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
-  ensureMigrations(db);
-
   try {
-    const stmt = db.prepare('UPDATE bookmarks SET text = ? WHERE id = ?');
-    for (const record of records) {
-      stmt.run([record.text, record.id]);
-    }
-    stmt.free();
-    // Rebuild FTS to reflect updated text
+    // This write rebuilds once after all updates, including any schema upgrade.
+    ensureMigrations(db, false);
+    const quoteStmt = db.prepare('UPDATE bookmarks SET quoted_tweet_json = ? WHERE id = ?');
+    try {
+      for (const record of quotes) quoteStmt.run([JSON.stringify(record.quotedTweet), record.id]);
+    } finally { quoteStmt.free(); }
+    const textStmt = db.prepare('UPDATE bookmarks SET text = ? WHERE id = ?');
+    try {
+      for (const record of texts) textStmt.run([record.text, record.id]);
+    } finally { textStmt.free(); }
     db.run("INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')");
     saveDb(db, dbPath);
-  } finally {
-    db.close();
-  }
+  } finally { db.close(); }
 }
 
 export interface ArticleUpdate {
@@ -1232,7 +1258,11 @@ export function formatSearchResults(results: SearchResult[]): string {
       const date = r.postedAt ? r.postedAt.slice(0, 10) : '?';
       const text = r.text.length > 140 ? r.text.slice(0, 140) + '...' : r.text;
       const id = r.id;
-      return `${i + 1}. [${date}] ${author} (ID: ${id})\n   ${text}\n   ${r.url}`;
+      const quoted = r.quotedTweet;
+      const quote = quoted
+        ? `\n   Quoted ${sanitizeForDisplay(quoted.authorHandle ? '@' + quoted.authorHandle : (quoted.authorName || 'unknown author'))}: ${sanitizeForDisplay(quoted.text.length > 140 ? quoted.text.slice(0, 140) + '...' : quoted.text)}\n   ${sanitizeForDisplay(quoted.url)}`
+        : '';
+      return `${i + 1}. [${sanitizeForDisplay(date)}] ${sanitizeForDisplay(author)} (ID: ${sanitizeForDisplay(id)})\n   ${sanitizeForDisplay(text)}\n   ${sanitizeForDisplay(r.url)}${quote}`;
     })
     .join('\n\n');
 }
