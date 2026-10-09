@@ -439,23 +439,43 @@ function parseRetryAfterSec(response: Response): number | undefined {
   return undefined;
 }
 
-async function fetchPageWithRetry(csrfToken: string, cursor?: string, cookieHeader?: string, pageSize?: number): Promise<PageResult> {
+function waitForSync(ms: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const abort = () => { clearTimeout(timer); reject(signal.reason); };
+    signal.addEventListener('abort', abort, { once: true });
+    timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, ms);
+  });
+}
+
+async function fetchPageWithRetry(
+  csrfToken: string, cursor: string | undefined, cookieHeader: string | undefined,
+  pageSize: number, signal: AbortSignal, onRetry: (message: string) => void,
+): Promise<PageResult> {
   let lastError: Error | undefined;
 
   for (let attempt = 0; attempt < 4; attempt++) {
-    const response = await fetch(buildUrl(cursor, pageSize), { headers: buildHeaders(csrfToken, cookieHeader) });
+    const response = await fetch(buildUrl(cursor, pageSize), {
+      headers: buildHeaders(csrfToken, cookieHeader),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
+    });
 
     if (response.status === 429) {
       const retryAfterSec = parseRetryAfterSec(response);
       const waitSec = retryAfterSec ?? Math.min(15 * Math.pow(2, attempt), 120);
       lastError = new RateLimitError(`Rate limited (429) on attempt ${attempt + 1}`, retryAfterSec);
-      await new Promise((r) => setTimeout(r, waitSec * 1000));
+      if (attempt === 3) break;
+      onRetry(`Rate limited (429); retry ${attempt + 1}/3 in ${waitSec}s`);
+      await waitForSync(waitSec * 1000, signal);
       continue;
     }
 
     if (response.status >= 500) {
       lastError = new Error(`Server error (${response.status}) on attempt ${attempt + 1}`);
-      await new Promise((r) => setTimeout(r, 5000 * (attempt + 1)));
+      if (attempt === 3) break;
+      onRetry(`Server error (${response.status}); retry ${attempt + 1}/3 in ${5 * (attempt + 1)}s`);
+      await waitForSync(5000 * (attempt + 1), signal);
       continue;
     }
 
@@ -630,6 +650,9 @@ export async function syncBookmarksGraphQL(
     : { provider: 'twitter', totalRuns: 0, totalAdded: 0, lastAdded: 0, lastSeenIds: [] };
 
   const started = Date.now();
+  const deadline = AbortSignal.timeout(Math.max(1, Math.ceil(maxMinutes * 60_000)));
+  const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
+  let fatalError: unknown;
   let page = 0;
   let totalAdded = 0;
   let stalePages = 0;
@@ -640,20 +663,28 @@ export async function syncBookmarksGraphQL(
 
   const fetchNextPage = async (): Promise<PageResult | undefined> => {
     try {
-      return await fetchPageWithRetry(csrfToken, cursor, cookieHeader, pageSize);
+      return await fetchPageWithRetry(csrfToken, cursor, cookieHeader, pageSize, signal,
+        message => options.onProgress?.({ page, totalFetched: allSeenIds.length,
+          newAdded: totalAdded, running: true, done: false, stopReason: message }));
     } catch (error) {
+      if (signal.aborted) {
+        stopReason = options.signal?.aborted ? 'interrupted' : 'max runtime reached';
+        return undefined;
+      }
       if (error instanceof RateLimitError) {
         stopReason = 'rate limited';
         retryAfterSec = error.retryAfterSec;
         return undefined;
       }
-      throw error;
+      fatalError = error;
+      stopReason = 'fetch failed';
+      return undefined;
     }
   };
 
   while (page < maxPages) {
-    if (options.signal?.aborted) {
-      stopReason = 'interrupted';
+    if (signal.aborted) {
+      stopReason = options.signal?.aborted ? 'interrupted' : 'max runtime reached';
       break;
     }
     if (Date.now() - started > maxMinutes * 60_000) {
@@ -690,7 +721,7 @@ export async function syncBookmarksGraphQL(
       done: false,
     });
 
-    // Update cursor before stop checks so auto-continue has the right position
+    // Save the next cursor before stop checks so explicit --continue can resume.
     cursor = result.nextCursor;
 
     if (options.targetAdds && totalAdded >= options.targetAdds) {
@@ -712,96 +743,15 @@ export async function syncBookmarksGraphQL(
 
     if (page % checkpointEvery === 0) await writeJsonLines(cachePath, existing);
 
-    if (page < maxPages) await new Promise((r) => setTimeout(r, delayMs));
+    if (page < maxPages) {
+      try { await waitForSync(delayMs, signal); } catch {
+        stopReason = options.signal?.aborted ? 'interrupted' : 'max runtime reached';
+        break;
+      }
+    }
   }
 
   if (stopReason === 'unknown') stopReason = page >= maxPages ? 'max pages reached' : 'unknown';
-
-  // ── Auto-continue: detect users stuck at the old 10k cap ──────────
-  // If we finished an incremental sync, the user has ≥9,500 bookmarks,
-  // and there's a cursor to keep going, automatically page through to
-  // find bookmarks the old 20-per-page × 500-page cap missed.
-  const OLD_CAP_THRESHOLD = 9_500;
-  const terminalStops = new Set(['end of bookmarks']);
-  const shouldAutoContinue =
-    incremental &&
-    !options.resumeCursor &&
-    existing.length >= OLD_CAP_THRESHOLD &&
-    !terminalStops.has(stopReason) &&
-    stopReason !== 'rate limited' &&
-    cursor != null;
-
-  if (shouldAutoContinue) {
-    // Use the first page's actual item count to estimate how many pages
-    // we need to scan through before reaching bookmarks beyond the old cap.
-    const firstPageSize = allSeenIds.length > 0 ? Math.min(allSeenIds.length, pageSize) : pageSize;
-    const estimatedScanPages = Math.ceil(existing.length / firstPageSize);
-    const scanStartPage = page;
-
-    let continueAdded = 0;
-
-    options.onProgress?.({
-      page,
-      totalFetched: allSeenIds.length,
-      newAdded: totalAdded,
-      running: true,
-      done: false,
-      stopReason: `scanning past ${existing.length.toLocaleString()} existing bookmarks (~${estimatedScanPages} pages)...`,
-    });
-
-    // Continue paginating with no stale-page or caught-up limits
-    while (page < maxPages) {
-      if (options.signal?.aborted) {
-        stopReason = 'interrupted';
-        break;
-      }
-      if (Date.now() - started > maxMinutes * 60_000) {
-        stopReason = 'max runtime reached';
-        break;
-      }
-
-      const result = await fetchNextPage();
-      if (!result) break;
-      page += 1;
-
-      if (result.records.length === 0 && !result.nextCursor) {
-        stopReason = 'end of bookmarks';
-        break;
-      }
-
-      const { merged, added } = mergeRecords(existing, result.records);
-      existing = merged;
-      totalAdded += added;
-      continueAdded += added;
-      result.records.forEach((r) => allSeenIds.push(r.id));
-      cursor = result.nextCursor;
-
-      const scanProgress = page - scanStartPage;
-      options.onProgress?.({
-        page,
-        totalFetched: allSeenIds.length,
-        newAdded: totalAdded,
-        running: true,
-        done: false,
-        stopReason: continueAdded > 0
-          ? undefined // found new bookmarks — normal progress display
-          : `scanning past existing bookmarks (${scanProgress}/~${estimatedScanPages})...`,
-      });
-
-      if (!cursor) {
-        stopReason = 'end of bookmarks';
-        break;
-      }
-
-      if (page % checkpointEvery === 0) await writeJsonLines(cachePath, existing);
-
-      if (page < maxPages) await new Promise((r) => setTimeout(r, delayMs));
-    }
-
-    if (stopReason !== 'end of bookmarks' && page >= maxPages) {
-      stopReason = 'max pages reached';
-    }
-  }
 
   const syncedAt = new Date().toISOString();
   const bookmarkedAtMissing = existing.filter((record) => !record.bookmarkedAt).length;
@@ -811,7 +761,7 @@ export async function syncBookmarksGraphQL(
     provider: 'twitter',
     schemaVersion: 1,
     lastFullSyncAt: completedFullSync ? syncedAt : previousMeta?.lastFullSyncAt,
-    lastIncrementalSyncAt: incremental ? syncedAt : previousMeta?.lastIncrementalSyncAt,
+    lastIncrementalSyncAt: incremental && page > 0 ? syncedAt : previousMeta?.lastIncrementalSyncAt,
     totalBookmarks: existing.length,
   } satisfies BookmarkCacheMeta);
   // Save cursor for resumption if sync stopped before reaching the end
@@ -834,6 +784,8 @@ export async function syncBookmarksGraphQL(
     done: true,
     stopReason,
   });
+
+  if (fatalError) throw fatalError;
 
   return {
     added: totalAdded,

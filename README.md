@@ -60,6 +60,12 @@ On first run, `ft sync` extracts your X session from your browser and downloads 
 | `ft sync --api` | Sync via OAuth API (cross-platform) |
 | `ft auth` | Set up OAuth for API-based sync (optional) |
 
+`ft sync` is incremental by default, including caches with more than 9,500
+bookmarks. Use `--continue` or `--rebuild` to scan older pages explicitly.
+GraphQL requests and retry delays are bounded by `--max-minutes`; retries show
+their wait, and interruption saves the partial cache and resume cursor. A failed
+fetch also saves partial results before returning an error.
+
 ### Search and browse
 
 | Command | Description |
