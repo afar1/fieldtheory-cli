@@ -96,3 +96,15 @@ test('invokeEngineAsync: captures multi-line stderr in the error message', async
     },
   );
 });
+
+test('invokeEngineAsync preserves the explicit failure before noisy MCP shutdown', async () => {
+  const { invokeEngineAsync } = await import('../src/engine.js');
+  const engine = {
+    name: 'codex', label: 'test', config: { bin: process.execPath, args: () => ['-e', `
+      console.error('ERROR: You have no credits remaining.');
+      for (let i = 0; i < 200; i++) console.error('WARN unrelated MCP OAuth shutdown failed ' + i);
+      process.exitCode = 1;
+    `] },
+  };
+  await assert.rejects(invokeEngineAsync(engine, 'ignored'), /You have no credits remaining/);
+});

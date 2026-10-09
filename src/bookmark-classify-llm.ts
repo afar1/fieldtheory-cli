@@ -3,13 +3,15 @@
  * (whichever the user has via their Max/Pro subscription) to classify
  * bookmarks that the regex classifier couldn't categorize.
  *
- * No API keys needed. No local models. Just a logged-in Claude or Codex CLI.
+ * Authentication follows the upstream engine and the installed CLI configuration.
  */
 
 import { openDb, saveDb } from './db.js';
 import { twitterBookmarksIndexPath } from './paths.js';
 import type { ResolvedEngine } from './engine.js';
-import { invokeEngine } from './engine.js';
+import { withClassificationLock } from './classification-lock.js';
+import { invokeClassifier } from './codex-classifier.js';
+export { invokeClassifier } from './codex-classifier.js';
 
 const BATCH_SIZE = 50;
 
@@ -169,7 +171,11 @@ export interface LlmClassifyResult {
   batches: number;
 }
 
-export async function classifyWithLlm(
+export function classifyWithLlm(options: Parameters<typeof classifyCategories>[0]): Promise<LlmClassifyResult> {
+  return withClassificationLock('classify', () => classifyCategories(options));
+}
+
+async function classifyCategories(
   options: { engine: ResolvedEngine; onBatch?: (done: number, total: number) => void },
 ): Promise<LlmClassifyResult> {
   const { engine } = options;
@@ -211,7 +217,7 @@ export async function classifyWithLlm(
 
       try {
         const prompt = buildPrompt(batch);
-        const raw = invokeEngine(engine, prompt);
+        const raw = await invokeClassifier(engine, prompt);
         const results = parseResponse(raw, batchIds);
 
         // Update SQLite
@@ -232,6 +238,7 @@ export async function classifyWithLlm(
         failed += batch.length;
         process.stderr.write(`  Batch ${batchCount} failed: ${(err as Error).message}\n`);
       }
+      options.onBatch?.(Math.min(i + BATCH_SIZE, totalUnclassified), totalUnclassified);
     }
 
     return { engine: engine.name, totalUnclassified, classified, failed, batches: batchCount };
@@ -282,7 +289,11 @@ Bookmarks:
 ${items}`;
 }
 
-export async function classifyDomainsWithLlm(
+export function classifyDomainsWithLlm(options: Parameters<typeof classifyDomains>[0]): Promise<LlmClassifyResult> {
+  return withClassificationLock('classify-domains', () => classifyDomains(options));
+}
+
+async function classifyDomains(
   options: { engine: ResolvedEngine; all?: boolean; onBatch?: (done: number, total: number) => void },
 ): Promise<LlmClassifyResult> {
   const { engine } = options;
@@ -328,7 +339,7 @@ export async function classifyDomainsWithLlm(
 
       try {
         const prompt = buildDomainPrompt(batch);
-        const raw = invokeEngine(engine, prompt);
+        const raw = await invokeClassifier(engine, prompt);
         // Reuse the same parse logic — structure is identical
         const results = parseResponse(raw, batchIds);
 
@@ -347,6 +358,7 @@ export async function classifyDomainsWithLlm(
         failed += batch.length;
         process.stderr.write(`  Batch ${batchCount} failed: ${(err as Error).message}\n`);
       }
+      options.onBatch?.(Math.min(i + BATCH_SIZE, total), total);
     }
 
     return { engine: engine.name, totalUnclassified: total, classified, failed, batches: batchCount };

@@ -2,6 +2,9 @@ import { getTwitterBookmarksStatus, latestBookmarkSyncAt } from './bookmarks.js'
 import { buildIndex, getClassificationProgress } from './bookmarks-db.js';
 import { loadTwitterOAuthToken } from './xauth.js';
 import { syncBookmarksGraphQL, type SyncProgress } from './graphql-bookmarks.js';
+import { detectAvailableEngines } from './engine.js';
+import { loadPreferences } from './preferences.js';
+import { readClassificationLock, type ClassificationLock } from './classification-lock.js';
 
 export interface BookmarkEnableResult {
   synced: boolean;
@@ -12,6 +15,8 @@ export interface BookmarkEnableResult {
 }
 
 export interface BookmarkStatusView {
+  classificationEngine?: string;
+  classificationJob?: ClassificationLock | null;
   connected: boolean;
   bookmarkCount: number;
   classificationTotal: number;
@@ -53,9 +58,12 @@ export async function getBookmarkStatusView(): Promise<BookmarkStatusView> {
   const token = await loadTwitterOAuthToken();
   const status = await getTwitterBookmarksStatus();
   const progress = await getClassificationProgress();
+  const availableEngines = detectAvailableEngines();
   return {
     connected: Boolean(token?.access_token),
     bookmarkCount: status.totalBookmarks,
+    classificationEngine: loadPreferences().defaultEngine ?? availableEngines[0] ?? 'none',
+    classificationJob: readClassificationLock(),
     classificationTotal: progress.total,
     categoriesDone: progress.categoriesDone,
     domainsDone: progress.domainsDone,
@@ -76,6 +84,8 @@ export function formatBookmarkStatus(view: BookmarkStatusView): string {
     `  bookmarks: ${view.bookmarkCount}`,
     `  categories: ${view.categoriesDone}/${total}`,
     `  domains: ${view.domainsDone}/${total}`,
+    ...(view.classificationEngine ? [`  classifier: ${view.classificationEngine}`] : []),
+    ...(view.classificationJob ? [`  classification: running (${view.classificationJob.kind}, pid ${view.classificationJob.pid}, 50/batch)`] : []),
     `  last updated: ${view.lastUpdated ?? 'never'}`,
     `  sync mode: ${view.mode}`,
     `  cache: ${view.cachePath}`,
@@ -84,5 +94,7 @@ export function formatBookmarkStatus(view: BookmarkStatusView): string {
 
 export function formatBookmarkSummary(view: BookmarkStatusView): string {
   const total = classificationDenominator(view);
-  return `bookmarks=${view.bookmarkCount} categories=${view.categoriesDone}/${total} domains=${view.domainsDone}/${total} updated=${view.lastUpdated ?? 'never'} mode="${view.mode}"`;
+  const classifier = view.classificationEngine ? ` classifier=${view.classificationEngine}` : '';
+  const job = view.classificationJob ? ` classification=${view.classificationJob.kind}:${view.classificationJob.pid}:50` : '';
+  return `bookmarks=${view.bookmarkCount} categories=${view.categoriesDone}/${total} domains=${view.domainsDone}/${total}${classifier}${job} updated=${view.lastUpdated ?? 'never'} mode="${view.mode}"`;
 }

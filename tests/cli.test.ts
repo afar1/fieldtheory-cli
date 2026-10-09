@@ -11,7 +11,10 @@ async function captureStdout(fn: () => Promise<void>): Promise<string> {
   const chunks: string[] = [];
   const origWrite = process.stdout.write;
   process.stdout.write = ((chunk: any, encodingOrCb?: any, cb?: any) => {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk.toString('utf-8') : String(chunk));
+    // Node 26 sends binary test-runner events through stdout during awaits.
+    // CLI output is text; forward runner frames instead of adding them to JSON.
+    if (Buffer.isBuffer(chunk)) return origWrite.call(process.stdout, chunk, encodingOrCb, cb);
+    chunks.push(String(chunk));
     if (typeof encodingOrCb === 'function') encodingOrCb();
     if (typeof cb === 'function') cb();
     return true;
@@ -92,10 +95,10 @@ test('ft search, stats, and status expose --json', () => {
   }
 });
 
-test('ft paths, current, state, recent, navigation aliases, library, commands, app, and install command groups are registered', () => {
+test('ft paths, current, recent, navigation aliases, library, commands, app, and install command groups are registered', () => {
   const program = buildCli();
   for (const name of [
-    'paths', 'current', 'state', 'recent', 'ls', 'tree', 'find', 'grep', 'cat', 'head',
+    'paths', 'current', 'recent', 'ls', 'tree', 'find', 'grep', 'cat', 'head',
     'meta', 'open', 'tab', 'reveal', 'pwd', 'context', 'link', 'links', 'backlinks',
     'tags', 'tagged', 'new', 'append', 'note', 'rename', 'cd', 'back',
     'library', 'commands', 'app', 'install',

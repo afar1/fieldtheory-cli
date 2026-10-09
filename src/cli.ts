@@ -20,6 +20,7 @@ import {
   getFolderCounts,
   listBookmarks,
   getBookmarkById,
+  getClassificationProgress,
 } from './bookmarks-db.js';
 import { formatClassificationSummary } from './bookmark-classify.js';
 import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm.js';
@@ -778,6 +779,8 @@ export function buildCli() {
   }
 
   async function classifyNew(override?: string): Promise<void> {
+    const progress = await getClassificationProgress();
+    if (progress.categoriesDone === progress.total && progress.domainsDone === progress.total) return;
     const engine = await resolveEngine({ override });
 
     const start = Date.now();
@@ -805,6 +808,7 @@ export function buildCli() {
         process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
       },
     });
+    if (catResult.failed || domResult.failed) process.exitCode = 1;
     if (domResult.classified > 0) {
       process.stderr.write(`  \u2713 ${domResult.classified} domains assigned\n`);
     }
@@ -999,8 +1003,8 @@ export function buildCli() {
           console.log(`  \u2713 Data: ${dataDir()}\n`);
           warnIfEmpty(result.totalBookmarks);
           await postSyncMediaFetch();
-          const newCount = await rebuildIndex();
-          if (options.classify && newCount > 0) {
+          await rebuildIndex();
+          if (options.classify) {
             await classifyNew(engineOverride);
           }
         } else {
@@ -1081,6 +1085,7 @@ export function buildCli() {
           console.log(`  \u2713 Data: ${dataDir()}\n`);
 
           if (result.stopReason === 'interrupted') {
+            process.exitCode = 130;
             console.log('  Interrupted. Progress has been saved; run ft sync --continue to resume.\n');
             return;
           }
@@ -1141,8 +1146,8 @@ export function buildCli() {
 
           await postSyncMediaFetch();
 
-          const newCount = await rebuildIndex();
-          if (options.classify && newCount > 0) {
+          await rebuildIndex();
+          if (options.classify) {
             await classifyNew(engineOverride);
           }
         }
@@ -1382,6 +1387,7 @@ export function buildCli() {
           },
         });
         console.log(`\nDomains: ${domResult.classified}/${domResult.totalUnclassified} classified`);
+        if (catResult.failed || domResult.failed) process.exitCode = 1;
       }
     }));
 
@@ -1407,6 +1413,7 @@ export function buildCli() {
         },
       });
       console.log(`\nDomains: ${result.classified}/${result.totalUnclassified} classified`);
+      if (result.failed) process.exitCode = 1;
     }));
 
   // ── model ───────────────────────────────────────────────────────────────
