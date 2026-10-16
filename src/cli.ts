@@ -292,10 +292,20 @@ async function runMediaFetchWithProgress(options: { limit?: number; maxBytes?: n
  * syncBookmarksGraphQL and syncGaps expect. Returns undefined fields when
  * the flag wasn't passed, so callers can fall through to browser extraction.
  */
-export function parseCookieOption(cookies: unknown): { csrfToken?: string; cookieHeader?: string } {
-  if (!cookies || !Array.isArray(cookies) || cookies.length === 0) return {};
-  const csrfToken = String(cookies[0]);
-  const authToken = cookies.length > 1 ? String(cookies[1]) : undefined;
+export function parseCookieOption(cookies: unknown, env: NodeJS.ProcessEnv = process.env): { csrfToken?: string; cookieHeader?: string } {
+  if (!cookies || !Array.isArray(cookies) || cookies.length === 0) {
+    // Dedicated credentials let scheduled jobs run without broad browser/FDA access.
+    const ct0 = env.FT_X_CSRF_TOKEN;
+    const auth = env.FT_X_AUTH_TOKEN;
+    if (!ct0 && !auth) return {};
+    if (!ct0 || !auth || !/^[a-zA-Z0-9]+$/.test(ct0) || !/^[a-zA-Z0-9]+$/.test(auth)) {
+      throw new Error('FT_X_CSRF_TOKEN and FT_X_AUTH_TOKEN must both contain valid cookie values');
+    }
+    cookies = [ct0, auth];
+  }
+  const values = cookies as unknown[];
+  const csrfToken = String(values[0]);
+  const authToken = values.length > 1 ? String(values[1]) : undefined;
   const parts = [`ct0=${csrfToken}`];
   if (authToken) parts.push(`auth_token=${authToken}`);
   return { csrfToken, cookieHeader: parts.join('; ') };

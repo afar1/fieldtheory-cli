@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, listBookmarks, sanitizeFtsQuery, getCategoryCounts, sampleByCategory, getClassificationProgress } from '../src/bookmarks-db.js';
+import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById, listBookmarks, countBookmarks, sanitizeFtsQuery, getCategoryCounts, sampleByCategory, getClassificationProgress } from '../src/bookmarks-db.js';
 import { openDb, saveDb } from '../src/db.js';
 import { twitterBookmarksIndexPath } from '../src/paths.js';
 
@@ -11,6 +11,13 @@ const FIXTURES = [
   { id: '1', tweetId: '1', url: 'https://x.com/alice/status/1', text: 'Machine learning is transforming healthcare', authorHandle: 'alice', authorName: 'Alice Smith', syncedAt: '2026-01-01T00:00:00Z', postedAt: '2026-01-01T12:00:00Z', language: 'en', engagement: { likeCount: 100, repostCount: 10 }, mediaObjects: [], links: ['https://example.com'], tags: [], ingestedVia: 'graphql' },
   { id: '2', tweetId: '2', url: 'https://x.com/bob/status/2', text: 'Rust is a great systems programming language', authorHandle: 'bob', authorName: 'Bob Jones', syncedAt: '2026-02-01T00:00:00Z', postedAt: '2026-02-01T12:00:00Z', language: 'en', engagement: { likeCount: 50 }, mediaObjects: [], links: [], tags: [], ingestedVia: 'graphql' },
   { id: '3', tweetId: '3', url: 'https://x.com/alice/status/3', text: 'Deep learning models need massive compute', authorHandle: 'alice', authorName: 'Alice Smith', syncedAt: '2026-03-01T00:00:00Z', postedAt: '2026-03-01T12:00:00Z', language: 'en', engagement: { likeCount: 200, repostCount: 30 }, mediaObjects: [{ type: 'photo', url: 'https://img.com/1.jpg' }], links: [], tags: [], ingestedVia: 'graphql' },
+];
+
+const CJK_FIXTURES = [
+  ...FIXTURES,
+  { id: '4', tweetId: '4', url: 'https://x.com/xiaohu/status/4', text: '一个非常狠的提示词，超级严厉的老师会一直追问。', authorHandle: 'xiaohu', authorName: '小互', syncedAt: '2026-04-01T00:00:00Z', postedAt: '2026-04-01T12:00:00Z', language: 'zh', engagement: { likeCount: 300 }, mediaObjects: [], links: [], tags: [], ingestedVia: 'graphql' },
+  { id: '5', tweetId: '5', url: 'https://x.com/tools/status/5', text: 'AI 工具链需要可靠的本地搜索。', authorHandle: 'tools', authorName: '工具箱', syncedAt: '2026-05-01T00:00:00Z', postedAt: '2026-05-01T12:00:00Z', language: 'zh', engagement: { likeCount: 120 }, mediaObjects: [], links: ['https://example.com/中文搜索'], tags: [], ingestedVia: 'graphql' },
+  { id: '6', tweetId: '6', url: 'https://x.com/memory/status/6', text: '这些未读内容来自 X、播客、微信、RSS 等信息流。', authorHandle: 'memory', authorName: '记忆系统', syncedAt: '2026-06-01T00:00:00Z', postedAt: '2026-06-01T12:00:00Z', language: 'zh', engagement: { likeCount: 80 }, mediaObjects: [], links: [], tags: [], ingestedVia: 'graphql' },
 ];
 
 async function withIsolatedDataDir(fn: () => Promise<void>, fixtures: any[] = FIXTURES): Promise<void> {
@@ -141,6 +148,45 @@ test('searchBookmarks: no results for unmatched query', async () => {
     const results = await searchBookmarks({ query: 'cryptocurrency', limit: 10 });
     assert.equal(results.length, 0);
   });
+});
+
+test('searchBookmarks: CJK query matches Chinese substrings', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    const results = await searchBookmarks({ query: '提示词', limit: 10 });
+    assert.equal(results.length, 1);
+    assert.equal(results[0]?.id, '4');
+  }, CJK_FIXTURES);
+});
+
+test('searchBookmarks: CJK phrase query matches Chinese text literally', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    const results = await searchBookmarks({ query: '严厉的老师', limit: 10 });
+    assert.equal(results.length, 1);
+    assert.equal(results[0]?.id, '4');
+  }, CJK_FIXTURES);
+});
+
+test('listBookmarks and countBookmarks: CJK query uses the same substring search path', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    const listed = await listBookmarks({ query: '工具箱', limit: 10 });
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0]?.id, '5');
+
+    const count = await countBookmarks({ query: '工具箱' });
+    assert.equal(count, 1);
+  }, CJK_FIXTURES);
+});
+
+test('searchBookmarks: CJK queries split on whitespace and match terms across punctuation', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex();
+    const results = await searchBookmarks({ query: '微信 RSS', limit: 10 });
+    assert.equal(results.length, 1);
+    assert.equal(results[0]?.id, '6');
+  }, CJK_FIXTURES);
 });
 
 test('getStats returns correct aggregate data', async () => {

@@ -1,5 +1,12 @@
 # Field Theory CLI
 
+Local scheduled-sync extension: `ft sync` can read `FT_X_CSRF_TOKEN` and
+`FT_X_AUTH_TOKEN` from the environment, avoiding cookie values in command arguments
+and browser database access from launchd. Both values must be present. Explicit
+`--cookies` takes precedence; with neither environment value, browser extraction
+continues normally. Store credentials in the user's private secret store, never
+in this repository. Expired sessions require renewal after signing into X.
+
 Sync and store bookmarks locally, manage Field Theory Library and command workflows, and make local context available to Claude Code, Codex, or any agent with shell access.
 
 Free and open source. Designed for Mac.
