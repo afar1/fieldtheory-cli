@@ -25,6 +25,13 @@ npm install -g fieldtheory
 
 Requires Node.js 20+. A Chrome-family browser or Firefox is recommended for session sync; OAuth is available for all platforms.
 
+For security updates, use a maintained Node.js release line with current patches.
+The [October 2026 security releases](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)
+start at Node 22.23.4, 24.22.1, and 26.12.1. Development uses Node 24.22.1
+(`.nvmrc`); the package's minimum compatible runtime remains Node 20.
+Updating Node's bundled Undici does not replace the CLI's separate npm Undici
+dependency, which requires 6.29.1 or later in the 6.x line.
+
 ## Quick start
 
 ```bash
