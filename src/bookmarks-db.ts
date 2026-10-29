@@ -690,6 +690,28 @@ export async function listBookmarks(
   }
 }
 
+/** Every bookmark matching the filters, in timeline order, without paging. */
+export async function listBookmarkIds(
+  filters: BookmarkTimelineFilters = {},
+  existingDb?: Database,
+): Promise<Array<{ id: string; tweetId: string }>> {
+  const db = await openForRead(existingDb);
+
+  try {
+    const { where, params } = buildBookmarkWhereClause(filters);
+    const rows = db.exec(`
+      SELECT b.id, b.tweet_id
+      FROM bookmarks b
+      ${where}
+      ${bookmarkSortClause(filters.sort)}
+    `, params);
+    if (!rows.length) return [];
+    return rows[0].values.map((row) => ({ id: row[0] as string, tweetId: row[1] as string }));
+  } finally {
+    if (!existingDb) db.close();
+  }
+}
+
 export async function getFilterSuggestions(
   field: 'author' | 'category' | 'domain',
   prefix: string = '',

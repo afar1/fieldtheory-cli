@@ -8,6 +8,7 @@ import type { Database } from 'sql.js';
 import { buildVizData } from './bookmarks-viz.js';
 import {
   listBookmarks,
+  listBookmarkIds,
   countBookmarks,
   getBookmarkById,
   getFilterSuggestions,
@@ -17,7 +18,7 @@ import {
 import { openDb } from './db.js';
 import { pathExists, readJson } from './fs.js';
 import { bookmarkMediaDir, bookmarkMediaManifestPath, twitterBookmarksIndexPath } from './paths.js';
-import type { MediaFetchManifest } from './bookmark-media.js';
+import type { MediaFetchEntry, MediaFetchManifest } from './bookmark-media.js';
 import { WEB_CSS } from './web-styles.js';
 import { createUnbookmarker } from './x-unbookmark.js';
 import type { UnbookmarkResult, UnbookmarkStatus } from './x-unbookmark.js';
@@ -117,7 +118,22 @@ const VENDOR_ASSETS: Record<string, { resolve: () => string; contentType: string
 // ── Media index ───────────────────────────────────────────────────────────────
 
 interface MediaEntry { filename: string; contentType: string; isProfileImage: boolean }
-type MediaIndex = Map<string, MediaEntry[]>; // tweetId → entries
+
+/** One cell of the media grid: an image or video poster, plus its video when there is one. */
+interface MediaTile {
+  src?: string;
+  videoSrc?: string;
+  /** The tweet the media belongs to: the bookmark itself or the tweet it quotes. */
+  tweetId: string;
+  tweetUrl: string;
+  authorHandle?: string;
+}
+
+interface MediaIndex {
+  byTweet: Map<string, MediaEntry[]>;
+  /** Grid tiles per bookmark id, including quoted-tweet media, in download order. */
+  byBookmark: Map<string, MediaTile[]>;
+}
 
 const EXT_CONTENT_TYPE: Record<string, string> = {
   '.jpg': 'image/jpeg',
@@ -128,26 +144,64 @@ const EXT_CONTENT_TYPE: Record<string, string> = {
   '.mp4': 'video/mp4',
 };
 
+function emptyMediaIndex(): MediaIndex {
+  return { byTweet: new Map(), byBookmark: new Map() };
+}
+
+function isVideoEntry(entry: MediaFetchEntry): boolean {
+  return (entry.contentType ?? '').includes('mp4') || /\.mp4(\?|$)/i.test(entry.localPath ?? entry.sourceUrl);
+}
+
 async function buildMediaIndex(): Promise<MediaIndex> {
   const manifestPath = bookmarkMediaManifestPath();
-  if (!(await pathExists(manifestPath))) return new Map();
+  if (!(await pathExists(manifestPath))) return emptyMediaIndex();
   try {
     const manifest = await readJson<MediaFetchManifest>(manifestPath);
-    const index = new Map<string, MediaEntry[]>();
+    const index = emptyMediaIndex();
+    // A video is fetched right after its poster, so the manifest lists the
+    // poster just before the mp4. Failed entries stay in the walk so a video
+    // whose poster failed is never paired with an unrelated image.
+    const previous = new Map<string, { tweetId: string; isVideo: boolean; tile?: MediaTile; paired: boolean }>();
+
     for (const entry of manifest.entries) {
-      if (entry.status !== 'downloaded' || !entry.localPath) continue;
-      const filename = path.basename(entry.localPath);
-      const arr = index.get(entry.tweetId) ?? [];
-      arr.push({
-        filename,
-        contentType: entry.contentType ?? 'application/octet-stream',
-        isProfileImage: entry.sourceUrl.includes('/profile_images/'),
-      });
-      index.set(entry.tweetId, arr);
+      const isProfileImage = entry.sourceUrl.includes('/profile_images/');
+      const downloaded = entry.status === 'downloaded' && Boolean(entry.localPath);
+      const url = entry.localPath ? `/media/${path.basename(entry.localPath)}` : undefined;
+
+      if (downloaded && entry.localPath) {
+        const arr = index.byTweet.get(entry.tweetId) ?? [];
+        arr.push({
+          filename: path.basename(entry.localPath),
+          contentType: entry.contentType ?? 'application/octet-stream',
+          isProfileImage,
+        });
+        index.byTweet.set(entry.tweetId, arr);
+      }
+      if (isProfileImage) continue;
+
+      const isVideo = isVideoEntry(entry);
+      const prev = previous.get(entry.bookmarkId);
+      const base = { tweetId: entry.tweetId, tweetUrl: entry.tweetUrl, authorHandle: entry.authorHandle };
+      let tile: MediaTile | undefined;
+
+      if (isVideo && prev && !prev.isVideo && !prev.paired && prev.tweetId === entry.tweetId) {
+        prev.paired = true;
+        if (downloaded && prev.tile) prev.tile.videoSrc = url;
+        else if (downloaded) tile = { ...base, videoSrc: url };
+      } else if (downloaded) {
+        tile = isVideo ? { ...base, videoSrc: url } : { ...base, src: url };
+      }
+
+      if (tile) {
+        const tiles = index.byBookmark.get(entry.bookmarkId) ?? [];
+        tiles.push(tile);
+        index.byBookmark.set(entry.bookmarkId, tiles);
+      }
+      previous.set(entry.bookmarkId, { tweetId: entry.tweetId, isVideo, tile, paired: false });
     }
     return index;
   } catch {
-    return new Map();
+    return emptyMediaIndex();
   }
 }
 
@@ -228,9 +282,12 @@ function buildHtml(): string {
         <button @click="page='overview'"
           :class="page==='overview' ? 'bg-white/10 text-white' : 'text-white/50 hover:text-white/80'"
           class="px-3 py-1 rounded text-sm transition-colors">Overview</button>
-        <button @click="page='bookmarks'; loadBookmarks()"
+        <button @click="showResults('bookmarks')"
           :class="page==='bookmarks' ? 'bg-white/10 text-white' : 'text-white/50 hover:text-white/80'"
           class="px-3 py-1 rounded text-sm transition-colors">Bookmarks</button>
+        <button @click="showResults('media')"
+          :class="page==='media' ? 'bg-white/10 text-white' : 'text-white/50 hover:text-white/80'"
+          class="px-3 py-1 rounded text-sm transition-colors">Media</button>
       </div>
       <div class="ml-auto text-xs text-white/30" x-text="overview ? overview.total.toLocaleString() + ' bookmarks' : ''"></div>
     </div>
@@ -436,8 +493,8 @@ function buildHtml(): string {
     </template>
   </div>
 
-  <!-- ── BOOKMARKS ──────────────────────────────────────────────────────────── -->
-  <div x-show="page==='bookmarks'" class="max-w-7xl mx-auto px-4 py-8">
+  <!-- ── BOOKMARKS + MEDIA (same filters, list or grid) ─────────────────────── -->
+  <div x-show="page==='bookmarks' || page==='media'" class="max-w-7xl mx-auto px-4 py-8">
 
     <!-- Filters bar -->
     <div class="bg-white/5 border border-white/5 rounded-xl p-4 mb-6 space-y-3">
@@ -563,7 +620,7 @@ function buildHtml(): string {
 
     <!-- Count + pagination info -->
     <div class="flex items-center justify-between mb-4">
-      <div class="text-sm text-white/40" x-text="totalCount.toLocaleString() + ' results'"></div>
+      <div class="text-sm text-white/40" x-text="totalCount.toLocaleString() + (page==='media' ? ' media' : ' results')"></div>
       <div class="flex items-center gap-3">
         <button @click="prevPage()" :disabled="filters.offset === 0"
           class="px-3 py-1 text-sm bg-white/5 rounded disabled:opacity-30 hover:bg-white/10 transition-colors">← Prev</button>
@@ -582,8 +639,43 @@ function buildHtml(): string {
       </svg>
     </div>
 
+    <!-- Media grid: a tile opens the bookmark; "X ↗" opens the tweet the media is from -->
+    <div x-show="!bookmarksLoading && page==='media'">
+      <template x-if="mediaTiles.length === 0">
+        <div class="text-center py-16 text-white/30">
+          No downloaded media here. Run <code class="text-white/60">ft fetch-media</code> to download it.
+        </div>
+      </template>
+      <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2">
+        <template x-for="t in mediaTiles" :key="t.bookmarkId + ':' + (t.src || t.videoSrc)">
+          <div class="relative group aspect-square rounded-lg overflow-hidden bg-white/5">
+            <button type="button" @click="openDetail(t.bookmarkId)"
+              class="block w-full h-full focus:outline-none focus:ring-2 focus:ring-purple-500 rounded-lg"
+              :aria-label="'Open bookmark by @' + (t.authorHandle || 'unknown')">
+              <template x-if="t.src">
+                <img :src="t.src" alt="" loading="lazy" class="w-full h-full object-cover"
+                  @error="$el.closest('.group').style.display='none'" />
+              </template>
+              <template x-if="!t.src">
+                <video :src="t.videoSrc" preload="metadata" muted playsinline class="w-full h-full object-cover"></video>
+              </template>
+            </button>
+            <span x-show="t.videoSrc" aria-label="Video"
+              class="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/60 text-white/90 text-[10px] pointer-events-none">▶</span>
+            <span x-show="t.quoted"
+              class="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/60 text-white/70 text-[10px] pointer-events-none">quoted</span>
+            <div class="absolute inset-x-0 bottom-0 flex items-center gap-2 px-2 py-1.5 bg-black/70 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
+              <span class="flex-1 min-w-0 text-xs text-white/80 truncate pointer-events-none" x-text="'@' + (t.authorHandle || '?')"></span>
+              <a :href="t.tweetUrl" target="_blank" rel="noopener noreferrer" @click.stop
+                class="shrink-0 text-xs text-white/80 hover:text-white">X ↗</a>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
     <!-- Bookmark cards -->
-    <div x-show="!bookmarksLoading" class="space-y-3">
+    <div x-show="!bookmarksLoading && page==='bookmarks'" class="space-y-3">
       <template x-if="bookmarks.length === 0">
         <div class="text-center py-16 text-white/30">No bookmarks found</div>
       </template>
@@ -706,10 +798,17 @@ function buildHtml(): string {
                 <div class="text-white/40 text-xs uppercase tracking-wider mb-2">Media</div>
                 <div class="grid grid-cols-2 gap-2">
                   <template x-for="url in detail.localMediaUrls" :key="url">
-                    <a :href="url" target="_blank" rel="noopener" class="block rounded-lg overflow-hidden bg-white/5">
-                      <img :src="url" class="w-full object-cover max-h-52"
-                        @error="$el.closest('a').style.display='none'" />
-                    </a>
+                    <div class="rounded-lg overflow-hidden bg-white/5">
+                      <template x-if="url.endsWith('.mp4')">
+                        <video :src="url" controls preload="metadata" playsinline class="w-full max-h-52 bg-black"></video>
+                      </template>
+                      <template x-if="!url.endsWith('.mp4')">
+                        <a :href="url" target="_blank" rel="noopener" class="block">
+                          <img :src="url" class="w-full object-cover max-h-52"
+                            @error="$el.closest('a').parentElement.style.display='none'" />
+                        </a>
+                      </template>
+                    </div>
                   </template>
                 </div>
               </div>
@@ -1055,6 +1154,7 @@ function app() {
     page: 'overview',
     overview: null,
     bookmarks: [],
+    mediaTiles: [],
     totalCount: 0,
     bookmarksLoading: false,
     detailOpen: false,
@@ -1108,15 +1208,31 @@ function app() {
       buildLinkDomainsChart(d);
     },
 
+    // The Bookmarks list and the Media grid share the filters; the grid pages
+    // by tile, so switching resets the page and its size.
+    showResults(page) {
+      if (this.page !== page) {
+        this.filters.offset = 0;
+        this.filters.limit = page === 'media' ? 60 : 50;
+      }
+      this.page = page;
+      this.loadBookmarks();
+    },
+
+    // Loads the current page's results: bookmark cards or media tiles.
     // keepPosition refreshes the list in place (e.g. after a removal). Swapping
     // the list for the loading spinner collapses the page and jumps to the top.
     async loadBookmarks({ keepPosition = false } = {}) {
+      const page = this.page;
       const scrollY = window.scrollY;
       if (!keepPosition) this.bookmarksLoading = true;
       try {
-        const res = await fetch('/api/bookmarks?' + this.buildParams());
+        const endpoint = page === 'media' ? '/api/media?' : '/api/bookmarks?';
+        const res = await fetch(endpoint + this.buildParams());
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || res.statusText);
+        // Switched tabs while this was loading: the newer load owns the page.
+        if (this.page !== page) return;
         const total = Number(res.headers.get('X-Total-Count')) || 0;
 
         // Removing the last item on a later page leaves it empty: show the new last page.
@@ -1125,7 +1241,8 @@ function app() {
           return this.loadBookmarks({ keepPosition });
         }
 
-        this.bookmarks = data;
+        if (page === 'media') this.mediaTiles = data;
+        else this.bookmarks = data;
         this.totalCount = total;
         if (keepPosition) {
           this.$nextTick(() => {
@@ -1136,7 +1253,7 @@ function app() {
       } catch (e) {
         console.error('Failed to load bookmarks:', e);
       } finally {
-        this.bookmarksLoading = false;
+        if (this.page === page) this.bookmarksLoading = false;
       }
     },
 
@@ -1479,7 +1596,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, state: W
       json(res, { error: 'not found' }, 404);
       return;
     }
-    const mediaEntries = (await state.getMediaIndex()).get(bookmark.tweetId) ?? [];
+    const mediaEntries = (await state.getMediaIndex()).byTweet.get(bookmark.tweetId) ?? [];
     const localMediaUrls = mediaEntries
       .filter((e) => !e.isProfileImage)
       .map((e) => `/media/${e.filename}`);
@@ -1504,13 +1621,30 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, state: W
     }, db);
     const total = await countBookmarks(filters, db);
     const enriched = items.map((b) => {
-      const entries = mediaIndex.get(b.tweetId) ?? [];
+      const entries = mediaIndex.byTweet.get(b.tweetId) ?? [];
       const localMediaUrls = entries
         .filter((e) => !e.isProfileImage)
         .map((e) => `/media/${e.filename}`);
       return { ...b, localMediaUrls };
     });
     json(res, enriched, 200, { 'X-Total-Count': String(total) });
+    return;
+  }
+
+  // /api/media — downloaded media of the bookmarks matching the filters, one
+  // tile per image or video, in timeline order. Paged by tile, total in X-Total-Count.
+  if (pathname === '/api/media') {
+    const q = qs(req);
+    const { byBookmark } = await state.getMediaIndex();
+    const matches = byBookmark.size === 0 ? [] : await listBookmarkIds({
+      ...filtersFromQuery(q),
+      sort: q.sort === 'asc' ? 'asc' : 'desc',
+    }, await state.getDb());
+    const tiles = matches.flatMap(({ id, tweetId }) =>
+      (byBookmark.get(id) ?? []).map((tile) => ({ ...tile, bookmarkId: id, quoted: tile.tweetId !== tweetId })));
+    const offset = intParam(q.offset, 0, 0);
+    const page = tiles.slice(offset, offset + intParam(q.limit, 60, 1, 200));
+    json(res, page, 200, { 'X-Total-Count': String(tiles.length) });
     return;
   }
 
