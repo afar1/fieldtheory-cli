@@ -1,8 +1,10 @@
 import type { Database } from 'sql.js';
 import { openDb, saveDb } from './db.js';
 import { parseTimestampMs, toIsoDate } from './date-utils.js';
-import { readJsonLines } from './fs.js';
-import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js';
+import { unlink } from 'node:fs/promises';
+import { readJsonLines, writeJsonLines, readJson, writeJson, pathExists } from './fs.js';
+import { twitterBookmarksCachePath, twitterBookmarksIndexPath, bookmarkMediaManifestPath } from './paths.js';
+import type { MediaFetchManifest } from './bookmark-media.js';
 import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
@@ -318,7 +320,7 @@ function ftsHasColumn(db: Database, column: string): boolean {
   }
 }
 
-function ensureMigrations(db: Database): void {
+export function ensureMigrations(db: Database): void {
   // Ensure meta table exists (may not on a fresh/empty DB)
   db.run('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)');
 
@@ -620,12 +622,19 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
   }
 }
 
+/** Open the index for a single read, or reuse a caller-owned handle. */
+async function openForRead(existingDb?: Database): Promise<Database> {
+  if (existingDb) return existingDb;
+  const db = await openDb(twitterBookmarksIndexPath());
+  ensureMigrations(db);
+  return db;
+}
+
 export async function listBookmarks(
   filters: BookmarkTimelineFilters = {},
+  existingDb?: Database,
 ): Promise<BookmarkTimelineItem[]> {
-  const dbPath = twitterBookmarksIndexPath();
-  const db = await openDb(dbPath);
-  ensureMigrations(db);
+  const db = await openForRead(existingDb);
   const limit = filters.limit ?? 30;
   const offset = filters.offset ?? 0;
 
@@ -677,16 +686,86 @@ export async function listBookmarks(
     if (!rows.length) return [];
     return rows[0].values.map((row) => mapTimelineRow(row));
   } finally {
-    db.close();
+    if (!existingDb) db.close();
+  }
+}
+
+/** Every bookmark matching the filters, in timeline order, without paging. */
+export async function listBookmarkIds(
+  filters: BookmarkTimelineFilters = {},
+  existingDb?: Database,
+): Promise<Array<{ id: string; tweetId: string }>> {
+  const db = await openForRead(existingDb);
+
+  try {
+    const { where, params } = buildBookmarkWhereClause(filters);
+    const rows = db.exec(`
+      SELECT b.id, b.tweet_id
+      FROM bookmarks b
+      ${where}
+      ${bookmarkSortClause(filters.sort)}
+    `, params);
+    if (!rows.length) return [];
+    return rows[0].values.map((row) => ({ id: row[0] as string, tweetId: row[1] as string }));
+  } finally {
+    if (!existingDb) db.close();
+  }
+}
+
+export async function getFilterSuggestions(
+  field: 'author' | 'category' | 'domain',
+  prefix: string = '',
+  limit: number = 20,
+  existingDb?: Database,
+): Promise<string[]> {
+  const columnMap = {
+    author: 'author_handle',
+    category: 'primary_category',
+    domain: 'primary_domain',
+  } as const;
+  const col = columnMap[field];
+  const db = await openForRead(existingDb);
+
+  try {
+    let sql: string;
+    let params: Array<string | number>;
+
+    if (prefix) {
+      sql = `
+        SELECT ${col}, COUNT(*) AS cnt
+        FROM bookmarks
+        WHERE ${col} IS NOT NULL AND ${col} != ''
+          AND ${col} LIKE ? COLLATE NOCASE
+        GROUP BY ${col}
+        ORDER BY cnt DESC
+        LIMIT ?
+      `;
+      params = [`${prefix}%`, limit];
+    } else {
+      sql = `
+        SELECT ${col}, COUNT(*) AS cnt
+        FROM bookmarks
+        WHERE ${col} IS NOT NULL AND ${col} != ''
+        GROUP BY ${col}
+        ORDER BY cnt DESC
+        LIMIT ?
+      `;
+      params = [limit];
+    }
+
+    const rows = db.exec(sql, params);
+    if (!rows.length) return [];
+    return rows[0].values.map((row) => row[0] as string);
+  } finally {
+    if (!existingDb) db.close();
   }
 }
 
 export async function countBookmarks(
   filters: BookmarkTimelineFilters = {},
+  existingDb?: Database,
 ): Promise<number> {
-  const dbPath = twitterBookmarksIndexPath();
-  const db = await openDb(dbPath);
-  ensureMigrations(db);
+  const db = await openForRead(existingDb);
 
   try {
     const { where, params } = buildBookmarkWhereClause(filters);
@@ -698,7 +777,7 @@ export async function countBookmarks(
     const rows = db.exec(sql, params);
     return Number(rows[0]?.values?.[0]?.[0] ?? 0);
   } finally {
-    db.close();
+    if (!existingDb) db.close();
   }
 }
 
@@ -773,10 +852,8 @@ export async function exportBookmarksForSyncSeed(): Promise<BookmarkRecord[]> {
   }
 }
 
-export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem | null> {
-  const dbPath = twitterBookmarksIndexPath();
-  const db = await openDb(dbPath);
-  ensureMigrations(db);
+export async function getBookmarkById(id: string, existingDb?: Database): Promise<BookmarkTimelineItem | null> {
+  const db = await openForRead(existingDb);
 
   try {
     const rows = db.exec(
@@ -821,8 +898,64 @@ export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem 
     const row = rows[0]?.values?.[0];
     return row ? mapTimelineRow(row) : null;
   } finally {
+    if (!existingDb) db.close();
+  }
+}
+
+/**
+ * Delete a bookmark by id from both the SQLite index and the JSONL cache.
+ * Returns the deleted bookmark's URL (for opening the tweet on Twitter) or
+ * null when no matching record was found.
+ */
+export async function deleteBookmark(id: string): Promise<{ url: string } | null> {
+  const dbPath = twitterBookmarksIndexPath();
+  const cachePath = twitterBookmarksCachePath();
+
+  const db = await openDb(dbPath);
+  ensureMigrations(db);
+
+  let url: string | null = null;
+  try {
+    const rows = db.exec('SELECT url FROM bookmarks WHERE id = ? LIMIT 1', [id]);
+    url = (rows[0]?.values?.[0]?.[0] as string) ?? null;
+    if (!url) return null;
+
+    // bookmarks_fts is an external-content table with no triggers, so remove
+    // this row's index entry explicitly (with its indexed values) before the
+    // row itself goes away. Cheaper than a full 'rebuild' on every delete.
+    db.run(
+      `INSERT INTO bookmarks_fts(bookmarks_fts, rowid, text, author_handle, author_name, article_text)
+       SELECT 'delete', rowid, text, author_handle, author_name, article_text FROM bookmarks WHERE id = ?`,
+      [id],
+    );
+    db.run('DELETE FROM bookmarks WHERE id = ?', [id]);
+    saveDb(db, dbPath);
+  } finally {
     db.close();
   }
+
+  // Remove from the JSONL cache so it won't re-appear on the next buildIndex
+  const records = await readJsonLines<{ id: string }>(cachePath);
+  const filtered = records.filter((r) => r.id !== id);
+  if (filtered.length !== records.length) {
+    await writeJsonLines(cachePath, filtered);
+  }
+
+  // Remove associated media files and manifest entries
+  const manifestPath = bookmarkMediaManifestPath();
+  if (await pathExists(manifestPath)) {
+    const manifest = await readJson<MediaFetchManifest>(manifestPath);
+    const toRemove = manifest.entries.filter((e) => e.bookmarkId === id);
+    for (const entry of toRemove) {
+      if (entry.localPath) {
+        await unlink(entry.localPath).catch(() => { /* already gone */ });
+      }
+    }
+    manifest.entries = manifest.entries.filter((e) => e.bookmarkId !== id);
+    await writeJson(manifestPath, manifest);
+  }
+
+  return { url };
 }
 
 export async function getStats(): Promise<{

@@ -27,6 +27,8 @@ Single CLI application built with Commander.js. Bookmark data is stored in `~/.f
 | `src/bookmark-classify.ts` | Regex-based category classifier |
 | `src/bookmark-classify-llm.ts` | Optional LLM classifier |
 | `src/bookmarks-viz.ts` | ANSI terminal dashboard |
+| `src/web.ts` | `ft web` local dashboard server (HTML shell, JSON API, media) |
+| `src/web-styles.ts` | Generated Tailwind CSS for `ft web` — regenerate with `npm run build:web-css` |
 | `src/chrome-cookies.ts` | Chrome cookie extraction (macOS Keychain) |
 | `src/xauth.ts` | OAuth 2.0 flow |
 | `src/db.ts` | WASM SQLite layer (sql.js-fts5) |

@@ -220,7 +220,7 @@ function buildUrl(cursor?: string, count = 20): string {
   return `https://x.com/i/api/graphql/${BOOKMARKS_QUERY_ID}/${BOOKMARKS_OPERATION}?${params}`;
 }
 
-function buildHeaders(csrfToken: string, cookieHeader?: string): Record<string, string> {
+export function buildHeaders(csrfToken: string, cookieHeader?: string): Record<string, string> {
   return {
     authorization: `Bearer ${X_PUBLIC_BEARER}`,
     'x-csrf-token': csrfToken,
@@ -1205,9 +1205,24 @@ export interface FolderSyncResult {
   orphanFoldersCleared: Array<{ folderId: string; recordsAffected: number }>;
 }
 
-async function resolveFolderSyncCookies(
-  options: FolderSyncOptions,
-): Promise<{ csrfToken: string; cookieHeader?: string }> {
+export interface XSessionOptions {
+  browser?: string;
+  chromeUserDataDir?: string;
+  chromeProfileDirectory?: string;
+  firefoxProfileDir?: string;
+  /** Direct csrf token override; skips all cookie extraction. */
+  csrfToken?: string;
+  /** Direct cookie header override; skips all cookie extraction. */
+  cookieHeader?: string;
+}
+
+export interface XSessionCookies {
+  csrfToken: string;
+  cookieHeader?: string;
+}
+
+/** Resolve X session cookies from explicit values or the user's browser. Throws when none are found. */
+export function resolveXSessionCookies(options: XSessionOptions): XSessionCookies {
   if (options.csrfToken) {
     return { csrfToken: options.csrfToken, cookieHeader: options.cookieHeader };
   }
@@ -1220,6 +1235,10 @@ async function resolveFolderSyncCookies(
   const chromeProfile = options.chromeProfileDirectory ?? config.chromeProfileDirectory;
   const cookies = extractChromeXCookies(chromeDir, chromeProfile, config.browser);
   return { csrfToken: cookies.csrfToken, cookieHeader: cookies.cookieHeader };
+}
+
+async function resolveFolderSyncCookies(options: FolderSyncOptions): Promise<XSessionCookies> {
+  return resolveXSessionCookies(options);
 }
 
 /**

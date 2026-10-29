@@ -1,3 +1,4 @@
+import type { Database } from 'sql.js';
 import { openDb } from './db.js';
 import { parseTimestampMs, toIsoDate, toIsoMonth, toMonthDayLabel, toUtcHour, toWeekdayShort, toYearLabel } from './date-utils.js';
 import { twitterBookmarksIndexPath } from './paths.js';
@@ -13,16 +14,16 @@ const rgb = (r: number, g: number, b: number) => `${ESC}38;2;${r};${g};${b}m`;
 
 // Palette — muted, tasteful
 const C = {
-  title:   rgb(199, 146, 234),  // soft lavender
-  accent:  rgb(130, 170, 255),  // periwinkle
-  warm:    rgb(255, 180, 120),  // peach
-  green:   rgb(120, 220, 170),  // mint
-  dim:     rgb(100, 100, 120),  // muted gray
-  text:    rgb(200, 200, 210),  // light gray
-  hot:     rgb(255, 120, 140),  // coral
-  gold:    rgb(240, 200, 100),  // amber
-  cyan:    rgb(100, 220, 230),  // teal
-  violet:  rgb(170, 130, 255),  // violet
+  title: rgb(199, 146, 234),  // soft lavender
+  accent: rgb(130, 170, 255),  // periwinkle
+  warm: rgb(255, 180, 120),  // peach
+  green: rgb(120, 220, 170),  // mint
+  dim: rgb(100, 100, 120),  // muted gray
+  text: rgb(200, 200, 210),  // light gray
+  hot: rgb(255, 120, 140),  // coral
+  gold: rgb(240, 200, 100),  // amber
+  cyan: rgb(100, 220, 230),  // teal
+  violet: rgb(170, 130, 255),  // violet
 };
 
 // ── Block characters for bar charts ──────────────────────────────────────────
@@ -116,14 +117,14 @@ function lerpColor(
 
 // ── Data queries ─────────────────────────────────────────────────────────────
 
-interface GemBookmark {
+export interface GemBookmark {
   author: string;
   text: string;
   tweetId: string;
   postedAt: string;
 }
 
-interface VizData {
+export interface VizData {
   total: number;
   uniqueAuthors: number;
   dateRange: { earliest: string; latest: string };
@@ -255,10 +256,10 @@ function aggregateTimelineData(rows: TimelineAggregateRow[]): {
   const risingVoices = latestPostedMonth == null
     ? []
     : [...authorPostedCounts.entries()]
-        .filter(([handle, count]) => count >= 3 && authorPostedMonths.get(handle)?.size === 1 && authorPostedMonths.get(handle)?.has(latestPostedMonth))
-        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-        .slice(0, 8)
-        .map(([handle, count]) => ({ handle, count }));
+      .filter(([handle, count]) => count >= 3 && authorPostedMonths.get(handle)?.size === 1 && authorPostedMonths.get(handle)?.has(latestPostedMonth))
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 8)
+      .map(([handle, count]) => ({ handle, count }));
 
   return {
     dateRange: { earliest, latest },
@@ -270,8 +271,9 @@ function aggregateTimelineData(rows: TimelineAggregateRow[]): {
   };
 }
 
-async function queryVizData(): Promise<VizData> {
-  const db = await openDb(twitterBookmarksIndexPath());
+/** Pass `existingDb` to reuse an open index (the caller keeps ownership). */
+export async function buildVizData(existingDb?: Database): Promise<VizData> {
+  const db = existingDb ?? await openDb(twitterBookmarksIndexPath());
 
   try {
     const total = db.exec('SELECT COUNT(*) FROM bookmarks')[0]?.values[0]?.[0] as number;
@@ -310,9 +312,9 @@ async function queryVizData(): Promise<VizData> {
             if (domain && domain !== 'x.com' && domain !== 't.co') {
               domainCounts.set(domain, (domainCounts.get(domain) ?? 0) + 1);
             }
-          } catch {}
+          } catch { }
         }
-      } catch {}
+      } catch { }
     }
     const topDomains = [...domainCounts.entries()]
       .sort((a, b) => b[1] - a[1])
@@ -423,7 +425,7 @@ async function queryVizData(): Promise<VizData> {
       domains,
     };
   } finally {
-    db.close();
+    if (!existingDb) db.close();
   }
 }
 
@@ -788,7 +790,7 @@ function renderRisingVoices(data: VizData): string[] {
 // ── Main render ──────────────────────────────────────────────────────────────
 
 export async function renderViz(): Promise<string> {
-  const data = await queryVizData();
+  const data = await buildVizData();
 
   const sections = [
     ...renderHiddenGems(data),
