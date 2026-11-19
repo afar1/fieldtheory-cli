@@ -46,6 +46,23 @@ function bookmarkFilename(b: BookmarkTimelineItem): string {
   return `${date}-${author}-${textSlug}.md`;
 }
 
+function bookmarkFilePath(b: BookmarkTimelineItem): string {
+  const filename = bookmarkFilename(b);
+  let filePath = path.join(bookmarksDir(), filename);
+  let collision = 0;
+  while (fs.existsSync(filePath)) {
+    const content = fs.readFileSync(filePath, 'utf8');
+    const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content)?.[1];
+    if (frontmatter?.split(/\r?\n/).includes(`tweet_id: "${b.tweetId}"`)) return filePath;
+    // Preserve files belonging to another bookmark, including exports from earlier runs.
+    collision++;
+    const id = encodeURIComponent(b.id);
+    const suffix = collision === 1 ? id : `${id}-${collision}`;
+    filePath = path.join(bookmarksDir(), `${filename.slice(0, -3)}-${suffix}.md`);
+  }
+  return filePath;
+}
+
 function oneLine(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
@@ -167,8 +184,7 @@ export async function exportBookmarks(options: ExportOptions = {}): Promise<Expo
     if (bookmarks.length === 0) break;
 
     for (const b of bookmarks) {
-      const filename = bookmarkFilename(b);
-      const filePath = path.join(bookmarksDir(), filename);
+      const filePath = bookmarkFilePath(b);
 
       if (!shouldExportBookmark(b, filePath, options)) {
         skipped++;
