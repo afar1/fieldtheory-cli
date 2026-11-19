@@ -97,6 +97,10 @@ On first run, `ft sync` extracts your X session from your browser and downloads 
 | `ft lint` | Health-check the wiki for broken links and missing pages |
 | `ft lint --fix` | Auto-fix fixable wiki issues |
 
+`ft md` keeps existing filenames when they identify the same bookmark. If a
+filename is occupied by a different bookmark or an unidentified file, it adds a
+bookmark ID suffix instead of skipping or overwriting that file.
+
 ### Possibility runs
 
 | Command | Description |
